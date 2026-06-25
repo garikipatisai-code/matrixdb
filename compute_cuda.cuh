@@ -55,10 +55,10 @@ __global__ void matrix_execute_kernel(DatabaseQuery* batch, size_t count,
 // nondeterministic. Test keys are unique so it's exact; colliding keys need
 // the spec's §4 OCC validation (TEV lock bit + read-set check). Upgrade path.
 __global__ void matrix_reconcile_kernel(uint64_t* store, const Mutation* delta_log,
-                                        unsigned long long logged,
+                                        const unsigned long long* delta_head,
                                         unsigned long long* delta_applied) {
     const size_t s = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (s >= logged) return;
+    if (s >= *delta_head) return; // read count on-device — no host sync needed to size this
     const Mutation m = delta_log[s & MATRIX_DELTA_LOG_MASK];
     store[m.key & MATRIX_STORE_MASK] = m.value;
     atomicAdd(delta_applied, 1ULL);
@@ -129,18 +129,13 @@ public:
             d_batch_, count, d_store_, d_delta_log_, d_delta_head_, d_reads_, d_writes_);
         CUDA_CHECK(cudaGetLastError());
 
-        // Read how many mutations were staged this batch to size the reconcile launch.
-        unsigned long long logged = 0;
-        CUDA_CHECK(cudaMemcpyAsync(&logged, d_delta_head_, sizeof(logged),
-                                   cudaMemcpyDeviceToHost, stream_));
-        CUDA_CHECK(cudaStreamSynchronize(stream_));
-
-        if (logged > 0) {
-            const int rec_blocks = static_cast<int>((logged + TPB - 1) / TPB);
-            matrix_reconcile_kernel<<<rec_blocks, TPB, 0, stream_>>>(
-                d_store_, d_delta_log_, logged, d_delta_applied_);
-            CUDA_CHECK(cudaGetLastError());
-        }
+        // Reconcile reads delta_head on-device, so we launch sized to count (logged <= count
+        // always) without copying the count back to the host. ponytail: this removes the
+        // mid-batch cudaStreamSynchronize — one sync per batch instead of two. Threads beyond
+        // the real logged count early-out via the *delta_head check inside the kernel.
+        matrix_reconcile_kernel<<<exec_blocks, TPB, 0, stream_>>>(
+            d_store_, d_delta_log_, d_delta_head_, d_delta_applied_);
+        CUDA_CHECK(cudaGetLastError());
 
         // Reset the Delta Log head for the next batch, then copy read results back.
         CUDA_CHECK(cudaMemsetAsync(d_delta_head_, 0, sizeof(unsigned long long), stream_));

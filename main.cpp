@@ -109,6 +109,42 @@ void measure_handoff_latency() {
               << "  p99.9=" << pct(0.999) << "  max=" << samples.back() << std::endl;
 }
 
+/**
+ * @brief Throughput vs. batch size sweep — the key question for GPU viability.
+ * Calls execute_batch() directly (no ring) so it measures pure engine cost per query
+ * across batch sizes. Reveals fixed per-batch overhead and where (if ever) larger
+ * batches amortize it. One run gives the whole curve — precious when GPU runs are remote.
+ */
+void sweep_batch_sizes(ComputeInterface& engine) {
+    constexpr size_t QUERIES_PER_POINT = 200000; // enough work to dwarf timer noise
+    const size_t sizes[] = {64, 128, 256, 512, 1024, 2048, 4096};
+
+    std::cout << "--- Batch-size sweep (execute_batch only, " << QUERIES_PER_POINT
+              << " queries/point) ---" << std::endl;
+
+    std::vector<DatabaseQuery> batch(MATRIX_BATCH_MAX);
+    for (size_t bs : sizes) {
+        const size_t iters = QUERIES_PER_POINT / bs;
+        // Rebuild a representative batch each point (alternating read/write).
+        for (size_t i = 0; i < bs; ++i) {
+            batch[i] = DatabaseQuery{};
+            batch[i].query_id = i;
+            batch[i].opcode = (i % 2 == 0) ? OP_READ : OP_WRITE;
+        }
+        const auto t0 = std::chrono::steady_clock::now();
+        for (size_t it = 0; it < iters; ++it) {
+            engine.execute_batch(batch.data(), bs);
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        const double secs = std::chrono::duration<double>(t1 - t0).count();
+        const double ops = static_cast<double>(iters * bs) / secs;
+        const double us_per_batch = (secs / iters) * 1e6;
+        std::cout << "  batch=" << bs
+                  << "\t" << static_cast<uint64_t>(ops) << " ops/sec"
+                  << "\t" << us_per_batch << " us/batch" << std::endl;
+    }
+}
+
 int main() {
     std::cout << "MatrixDB Bare-Metal Engine Booting..." << std::endl;
 
@@ -121,6 +157,10 @@ int main() {
 
     auto ring_buffer = std::make_unique<SPSCRingBuffer<DatabaseQuery, 4096>>();
     auto mock_engine = std::make_unique<EngineType>(4);
+
+    // Sweep batch sizes before the pipeline run so one execution yields the whole
+    // throughput-vs-batch curve (decisive for GPU viability; remote runs are costly).
+    sweep_batch_sizes(*mock_engine);
 
     std::atomic<bool> run_state{true};
     std::atomic<size_t> total_processed{0}; // ponytail: end-to-end check that every query flows through
@@ -174,6 +214,12 @@ int main() {
         }
     });
 
+    // Snapshot engine counters after the sweep so the pipeline asserts below measure
+    // only the pipeline's 10k queries, not the sweep's traffic.
+    const uint64_t reads_base = mock_engine->reads();
+    const uint64_t writes_base = mock_engine->writes();
+    const uint64_t applied_base = mock_engine->delta_applied();
+
     // Simulate query production on a separate thread
     auto pipeline_start = std::chrono::steady_clock::now();
     std::thread producer([&]() {
@@ -213,9 +259,10 @@ int main() {
     assert(processed == TOTAL_QUERIES && "Dual-trigger pipeline dropped queries");
 
     // Verify the engine actually dispatched on opcode and committed every mutation.
-    const uint64_t reads = mock_engine->reads();
-    const uint64_t writes = mock_engine->writes();
-    const uint64_t applied = mock_engine->delta_applied();
+    // Deltas since the pre-pipeline snapshot isolate the pipeline from the sweep.
+    const uint64_t reads = mock_engine->reads() - reads_base;
+    const uint64_t writes = mock_engine->writes() - writes_base;
+    const uint64_t applied = mock_engine->delta_applied() - applied_base;
     std::cout << "Engine: reads=" << reads << " writes=" << writes
               << " delta_applied=" << applied << std::endl;
     assert(reads + writes == processed && "opcode dispatch missed queries");

@@ -54,4 +54,4 @@ constexpr size_t MATRIX_STORE_SLOTS       = 4096;                        // powe
 constexpr size_t MATRIX_STORE_MASK        = MATRIX_STORE_SLOTS - 1;
 constexpr size_t MATRIX_DELTA_LOG_CAPACITY = 8192;                       // >= max queries per batch
 constexpr size_t MATRIX_DELTA_LOG_MASK    = MATRIX_DELTA_LOG_CAPACITY - 1;
-constexpr size_t MATRIX_BATCH_MAX         = 512;                         // host-side max batch (matches main)
+constexpr size_t MATRIX_BATCH_MAX         = 4096;                        // host-side max batch (== ring capacity)

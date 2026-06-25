@@ -37,20 +37,9 @@ public:
     }
 
     void execute_batch(DatabaseQuery* batch_array, size_t count) override {
-        // Simulates query processing and kernel execution latency using a spin-wait loop
-        const auto start_wait = std::chrono::high_resolution_clock::now();
-        while (true) {
-            const auto current_time = std::chrono::high_resolution_clock::now();
-            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(current_time - start_wait).count();
-            if (elapsed >= 50) { // Emulate a 50-microsecond GPU execution delay
-                break;
-            }
-#if defined(__ARM_ARCH) || defined(__apple_build_version__)
-            asm volatile("isb" ::: "memory");
-#else
-            asm volatile("pause" ::: "memory");
-#endif
-        }
+        // ponytail: the fake 50us "GPU latency" spin was removed — it was a no-GPU
+        // placeholder and now only distorts CPU-vs-GPU throughput comparisons.
+        // The CPU mock just does the real dispatch work as fast as it can.
 
         // Execution phase: dispatch every query on its opcode.
         // Reads hit the columnar store directly. Writes never touch the store here —
