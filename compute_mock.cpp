@@ -10,8 +10,10 @@
  * @brief CPU Mock Engine — the no-GPU fallback (Component 5: Local Sandbox).
  * Page-ownership model: bins the batch by owning page, then processes each page's
  * queries against its own slice of the store. One owner per page ⇒ no atomics, no
- * delta log, deterministic last-writer-wins. Mirrors the CUDA engine's semantics so
- * both produce identical store contents.
+ * delta log, deterministic last-writer-wins. The point-op store is a real KVStore
+ * (DM-1 fix: distinct colliding keys never overwrite). The CUDA engine's point-op
+ * store is still the flat key&MASK array (replaced in a later increment), so CPU/GPU
+ * store parity holds only while keys don't collide; CPU is the DM-1-correct path.
  */
 class CPUMockEngine : public ComputeInterface {
 public:
@@ -26,6 +28,14 @@ public:
     }
 
     ~CPUMockEngine() override {
+        // Make the fixed-capacity overflow seam loud (not silent) even in release builds:
+        // if any write was dropped because the KVStore filled, report it. Inc 3's SSD
+        // spill removes the drop entirely; until then this is the visible failure signal.
+        if (store_overflows_ > 0) {
+            std::cout << "WARNING: " << store_overflows_
+                      << " point-op writes dropped — KVStore full (Inc 3 adds SSD spill)."
+                      << std::endl;
+        }
         std::cout << "CPUMockEngine shutdown cleanly." << std::endl;
     }
 
