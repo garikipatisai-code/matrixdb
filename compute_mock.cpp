@@ -79,6 +79,8 @@ public:
     uint64_t scans() const override { return scans_; }
     uint64_t scan_result_sum() const override { return scan_result_sum_; }
     double scan_time_s() const override { return scan_time_s_; }
+    // CPU has no launch/sync layer, so kernel time == the timed scan loop (zero overhead).
+    double scan_kernel_time_s() const override { return scan_time_s_; }
 
     uint64_t store_checksum() const override {
         uint64_t sum = 0;

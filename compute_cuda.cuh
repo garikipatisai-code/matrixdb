@@ -200,6 +200,10 @@ public:
 
         // ponytail: single stream. Hyper-Q multi-stream is the throughput upgrade.
         CUDA_CHECK(cudaStreamCreate(&stream_));
+        // Reused events to time just the scan kernel (per-scan create/destroy would
+        // itself add overhead and pollute the measurement).
+        CUDA_CHECK(cudaEventCreate(&scan_k0_));
+        CUDA_CHECK(cudaEventCreate(&scan_k1_));
         std::printf("CUDAGPUEngine initialized on '%s' (%d SMs, page-ownership, %zu pages).\n",
                     prop.name, prop.multiProcessorCount, MATRIX_PAGE_COUNT);
     }
@@ -212,6 +216,8 @@ public:
         cudaFree(d_writes_);
         cudaFree(d_scan_col_);
         cudaFree(d_scan_count_);
+        cudaEventDestroy(scan_k0_);
+        cudaEventDestroy(scan_k1_);
         cudaStreamDestroy(stream_);
         std::printf("CUDAGPUEngine released device resources.\n");
     }
@@ -248,8 +254,10 @@ public:
             constexpr int SCAN_TPB = 256;
             const int blocks = 1024;
             const uint4* col4 = reinterpret_cast<const uint4*>(d_scan_col_);
+            CUDA_CHECK(cudaEventRecord(scan_k0_, stream_));
             matrix_scan_kernel_u32x4<<<blocks, SCAN_TPB, 0, stream_>>>(
                 col4, MATRIX_SCAN_COLUMN_SIZE / 4, threshold, d_scan_count_);
+            CUDA_CHECK(cudaEventRecord(scan_k1_, stream_));
             CUDA_CHECK(cudaGetLastError());
             unsigned long long c = 0;
             CUDA_CHECK(cudaMemcpyAsync(&c, d_scan_count_, sizeof(c),
@@ -257,6 +265,11 @@ public:
             CUDA_CHECK(cudaStreamSynchronize(stream_));
             scan_time_s_ += std::chrono::duration<double>(
                 std::chrono::steady_clock::now() - st0).count();
+            // Pure kernel time (events bracket only the launch) — isolates per-scan
+            // overhead = scan_time_s_ (host wall, incl memset/copy/sync) minus this.
+            float k_ms = 0.0f;
+            CUDA_CHECK(cudaEventElapsedTime(&k_ms, scan_k0_, scan_k1_));
+            scan_kernel_time_s_ += k_ms / 1e3;
             batch_array[i].transaction_id = c;
             ++scans_;
             scan_result_sum_ += c;
@@ -269,6 +282,7 @@ public:
     uint64_t scans() const override { return scans_; }
     uint64_t scan_result_sum() const override { return scan_result_sum_; }
     double scan_time_s() const override { return scan_time_s_; }
+    double scan_kernel_time_s() const override { return scan_kernel_time_s_; }
 
     uint64_t store_checksum() const override {
         // ponytail: copy the whole store back (32KB) and sum on host. Once, off the
@@ -371,6 +385,8 @@ private:
     uint64_t scans_ = 0;                          // host-side scan accounting
     uint64_t scan_result_sum_ = 0;
     double scan_time_s_ = 0.0;
+    double scan_kernel_time_s_ = 0.0;            // cudaEvent-measured pure kernel time
+    cudaEvent_t scan_k0_{}, scan_k1_{};          // reused scan-kernel timing events
     std::vector<DatabaseQuery> h_binned_;
     std::vector<uint32_t> offsets_;
     cudaStream_t stream_{};

@@ -35,6 +35,11 @@ public:
     // one combined "ops/sec" number is meaningless once scans are mixed in.
     virtual double scan_time_s() const = 0;
 
+    // Pure kernel time for OP_SCAN work (GPU: cudaEvent-measured, excludes launch/sync/
+    // copy and host jitter; CPU: same as the compute loop). scan_time_s() - this =
+    // per-scan overhead. The split attributes the integrated-vs-standalone gap.
+    virtual double scan_kernel_time_s() const = 0;
+
     // Order-independent fingerprint of the whole store (sum of slot values). Lets
     // main.cpp assert CPU and GPU reach byte-identical state — the real test of the
     // ownership model, not just matching counts.

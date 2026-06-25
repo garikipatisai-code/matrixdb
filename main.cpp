@@ -341,6 +341,20 @@ int main() {
     }
     std::cout << std::endl;
 
+    // Attribute the scan cost: pure kernel time (cudaEvents) vs per-scan overhead
+    // (memset + launch + result copy + sync + host jitter). The split tells us whether
+    // closing the integrated-vs-standalone gap means batching scans or is already tight.
+    if (scans > 0) {
+        const double k_s = mock_engine->scan_kernel_time_s();
+        const double overhead_s = scan_s - k_s;
+        const double col_gb = (MATRIX_SCAN_COLUMN_SIZE * sizeof(uint32_t)) / 1e9;
+        std::cout << "Scan breakdown: kernel " << k_s / scans * 1e3 << " ms/scan ("
+                  << col_gb * scans / k_s << " GB/s) + overhead "
+                  << overhead_s / scans * 1e3 << " ms/scan ("
+                  << static_cast<uint64_t>(overhead_s / scan_s * 100) << "% of scan time)"
+                  << std::endl;
+    }
+
     // Queue residency under burst: time each query waits in the ring before it is
     // batched. Dominated by backlog (producer outruns the single consumer), so this
     // is NOT the raw handoff cost reported above — it is the saturated-pipeline view.
