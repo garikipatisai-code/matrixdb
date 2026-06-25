@@ -16,9 +16,13 @@ public:
     Router(ComputeInterface* cpu, ComputeInterface* gpu, CostModel cm)
         : cpu_(cpu), gpu_(gpu), cm_(cm) {}
 
-    // Point ops always run on the CPU engine (page-ownership KV store lives in HOST RAM).
+    // Point ops run where the cost model places them — always HOST today (page-ownership
+    // KV store lives in CPU RAM; GPU loses point ops). Routed via the model so the
+    // invariant lives in one place.
     void route_batch(DatabaseQuery* batch, size_t count) {
-        cpu_->execute_batch(batch, count);
+        ComputeInterface* eng =
+            (cm_.place_point() == MemorySpace::DEVICE && gpu_) ? gpu_ : cpu_;
+        eng->execute_batch(batch, count);
     }
 
     // Register a scan column of `bytes`, deciding its home now. Returns a dataset id used

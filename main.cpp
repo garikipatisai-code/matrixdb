@@ -182,13 +182,12 @@ void scan_benchmark(ComputeInterface& engine) {
 // them through the Router, and report where each landed. Proves placement is by cost and
 // results are correct regardless of home. (Latency comparison vs single-backend is a
 // follow-up; this asserts correctness of routing first.)
-void routing_demo(Router& router, ComputeInterface* cpu, ComputeInterface* gpu) {
+void routing_demo(Router& router) {
     const char* sp[] = {"HOST", "DEVICE", "UNIFIED"};
     const uint64_t small_id = router.place_scan_column(256u * 1024);       // 256 KB
     const uint64_t large_id = router.place_scan_column(64u * 1024 * 1024); // 64 MB
     std::cout << "Routing demo: 256KB column -> " << sp[(int)router.home_of(small_id)]
               << ", 64MB column -> " << sp[(int)router.home_of(large_id)] << std::endl;
-    (void)cpu; (void)gpu;
 }
 
 int main() {
@@ -230,7 +229,7 @@ int main() {
     // Point-op counters/store always live on the CPU engine.
     ComputeInterface* point_op_engine = cpu_engine.get();
 
-    routing_demo(router, cpu_engine.get(), gpu_ptr);
+    routing_demo(router);
 
     // Sweep batch sizes before the pipeline run so one execution yields the whole
     // throughput-vs-batch curve (decisive for GPU viability; remote runs are costly).

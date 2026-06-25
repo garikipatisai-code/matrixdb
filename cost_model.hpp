@@ -28,7 +28,10 @@ public:
         return static_cast<double>(bytes) / CPU_SCAN_BPus;
     }
     double device_scan_us(size_t bytes) const {
-        const double transfer = mm_.is_unified() ? 0.0 : 0.0; // amortized to 0 (placed once, scanned many)
+        // Transfer is amortized to 0 today (a column is placed once and scanned many).
+        // Both branches are 0.0 ON PURPOSE: this is the seam where the discrete one-time
+        // transfer term will go; UNIFIED stays 0. Deliberately inert until calibrated.
+        const double transfer = mm_.is_unified() ? 0.0 : 0.0;
         return LAUNCH_US + transfer + static_cast<double>(bytes) / GPU_SCAN_BPus;
     }
 
