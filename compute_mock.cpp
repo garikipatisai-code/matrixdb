@@ -94,6 +94,12 @@ public:
         return benchmark_scan_u32(n, threshold, out_count);
     }
 
+    double benchmark_scan_ipt(size_t n, uint32_t threshold, uint64_t& out_count) override {
+        // ponytail: register-blocking is a GPU latency-hiding lever; on CPU it's the same
+        // auto-vectorized loop. Delegate.
+        return benchmark_scan_u32(n, threshold, out_count);
+    }
+
 private:
     std::array<uint64_t, MATRIX_STORE_SLOTS> store_{}; // the Value column
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page

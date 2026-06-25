@@ -116,6 +116,41 @@ __global__ void matrix_scan_kernel_u32x4(const uint4* data4, size_t n4,
     if (threadIdx.x == 0) atomicAdd(count, block_count);
 }
 
+// Items-per-thread uint32 scan (register blocking) — the lever CUB's BlockReduce uses
+// (128 threads x 4 items each). Each thread issues ITEMS independent loads into a
+// register array BEFORE comparing any, so multiple loads are in flight per thread =>
+// DRAM latency is hidden => bandwidth saturates. Unlike uint4 this needs no special
+// type/alignment and doesn't inflate per-load register width. Strided access keeps the
+// warp's ITEMS loads coalesced (lane L reads base+L, base+L+blockDim, ...).
+template <int ITEMS>
+__global__ void matrix_scan_kernel_ipt(const uint32_t* data, size_t n,
+                                       uint32_t threshold, unsigned long long* count) {
+    __shared__ unsigned long long block_count;
+    if (threadIdx.x == 0) block_count = 0;
+    __syncthreads();
+
+    unsigned long long local = 0;
+    const size_t base_stride = (size_t)gridDim.x * blockDim.x;
+    const size_t chunk = base_stride * ITEMS;
+    for (size_t base = (size_t)blockIdx.x * blockDim.x * ITEMS + threadIdx.x;
+         base < n; base += chunk) {
+        uint32_t reg[ITEMS];
+        #pragma unroll
+        for (int k = 0; k < ITEMS; ++k) {
+            const size_t idx = base + (size_t)k * base_stride;
+            reg[k] = (idx < n) ? data[idx] : 0u; // load all ITEMS first (in flight)
+        }
+        #pragma unroll
+        for (int k = 0; k < ITEMS; ++k) {
+            const size_t idx = base + (size_t)k * base_stride;
+            if (idx < n) local += (reg[k] > threshold); // then compare
+        }
+    }
+    atomicAdd(&block_count, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(count, block_count);
+}
+
 /**
  * @brief Real CUDA GPU engine, page-ownership model. Device-resident store persists
  * across batches (it is the database). Same ComputeInterface + correctness contract
@@ -221,6 +256,14 @@ public:
                int blocks, int tpb, cudaStream_t s) {
                 const uint4* d4 = reinterpret_cast<const uint4*>(d);
                 matrix_scan_kernel_u32x4<<<blocks, tpb, 0, s>>>(d4, nn / 4, thr, c);
+            });
+    }
+
+    double benchmark_scan_ipt(size_t n, uint32_t threshold, uint64_t& out_count) override {
+        return timed_scan<uint32_t>(n, threshold, out_count,
+            [](const uint32_t* d, size_t nn, uint32_t thr, unsigned long long* c,
+               int blocks, int tpb, cudaStream_t s) {
+                matrix_scan_kernel_ipt<8><<<blocks, tpb, 0, s>>>(d, nn, thr, c);
             });
     }
 

@@ -48,6 +48,11 @@ public:
     // underfilling the bus (MLP-bound) and wider loads are the fix. If it doesn't, the
     // kernel is ALU-bound and we stop optimizing. CPU may treat this same as scalar.
     virtual double benchmark_scan_u32x4(size_t n, uint32_t threshold, uint64_t& out_count) = 0;
+
+    // Items-per-thread scan (register blocking, ITEMS independent loads/thread before
+    // comparing). CUB's BlockReduce lever. Tests whether deeper memory-level parallelism
+    // per thread beats both scalar and uint4. CPU delegates (compiler auto-vectorizes).
+    virtual double benchmark_scan_ipt(size_t n, uint32_t threshold, uint64_t& out_count) = 0;
 };
 
 // Which page owns a query's key. Single source of truth for both engines and the
