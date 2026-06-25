@@ -46,7 +46,8 @@ integrated scan still pays per-scan launch/copy/sync overhead — see *Known lim
 
 ## Architecture
 
-**Page ownership (Redis-per-page, Dragonfly-overall).** The key space is split into pages;
+**Page ownership (single-owner per page, shared-nothing across pages).** The key space
+is split into pages;
 exactly one owner (one CUDA block) reads/writes a page's slots. The same key always routes
 to the same owner, so writes serialize by ownership — **no store atomics, no OCC, no delta
 log**. Point ops bin to their pages (a counting sort) and the GPU runs one block per page.

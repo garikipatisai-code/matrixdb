@@ -7,8 +7,8 @@
 // One CUDA BLOCK owns one page. The batch is binned by page on the host (CSR offsets),
 // so block p processes only page p's contiguous queries against page p's store slice.
 // Different blocks touch disjoint store slots ⇒ no cross-block conflict, no store
-// atomics, no delta log. Per page: single-owner (Redis). Across pages: shared-nothing
-// (Dragonfly). Threads within a block stride over the page's queries.
+// atomics, no delta log. Each page has a single owner; pages are independent
+// (shared-nothing). Threads within a block stride over the page's queries.
 
 #include "compute.hpp"
 #include <cuda_runtime.h>

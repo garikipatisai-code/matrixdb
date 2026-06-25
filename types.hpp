@@ -46,12 +46,12 @@ enum MatrixOpcode : uint32_t {
     OP_SCAN  = 3,
 };
 
-// Columnar store + page-ownership layout (Dragonfly-style shard-per-thread).
+// Columnar store + page-ownership layout (shard-per-thread).
 // The keyspace (STORE_SLOTS) is split into PAGE_COUNT contiguous pages. Exactly one
 // owner (one GPU thread) reads/writes a page's slots, so the same key always routes
 // to the same owner: writes to a key serialize by ownership. No cross-thread conflict
-// => no store atomics, no OCC, no delta log. Per page it is single-owner (Redis);
-// across pages it is shared-nothing (Dragonfly).
+// => no store atomics, no OCC, no delta log. Each page has a single owner; pages are
+// independent of one another (shared-nothing).
 constexpr size_t MATRIX_STORE_SLOTS = 4096;                       // power of two
 constexpr size_t MATRIX_STORE_MASK  = MATRIX_STORE_SLOTS - 1;
 constexpr size_t MATRIX_PAGE_COUNT  = 1024;                       // owner threads; the tuning knob
