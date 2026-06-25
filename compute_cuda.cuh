@@ -182,6 +182,19 @@ public:
         CUDA_CHECK(cudaMemset(d_reads_, 0, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMemset(d_writes_, 0, sizeof(unsigned long long)));
 
+        // Resident analytical column (value[i]=i), filled once, scanned in place by
+        // OP_SCAN. This is the GPU-DB's actual data — never shipped per query.
+        CUDA_CHECK(cudaMalloc(&d_scan_col_, MATRIX_SCAN_COLUMN_SIZE * sizeof(uint32_t)));
+        {
+            std::vector<uint32_t> h(MATRIX_SCAN_COLUMN_SIZE);
+            for (size_t i = 0; i < MATRIX_SCAN_COLUMN_SIZE; ++i) h[i] = static_cast<uint32_t>(i);
+            CUDA_CHECK(cudaMemcpy(d_scan_col_, h.data(),
+                                  MATRIX_SCAN_COLUMN_SIZE * sizeof(uint32_t),
+                                  cudaMemcpyHostToDevice));
+        }
+        CUDA_CHECK(cudaMalloc(&d_scan_count_, sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMemset(d_scan_count_, 0, sizeof(unsigned long long)));
+
         offsets_.resize(MATRIX_PAGE_COUNT + 1);
 
         // ponytail: single stream. Hyper-Q multi-stream is the throughput upgrade.
@@ -196,6 +209,8 @@ public:
         cudaFree(d_offsets_);
         cudaFree(d_reads_);
         cudaFree(d_writes_);
+        cudaFree(d_scan_col_);
+        cudaFree(d_scan_count_);
         cudaStreamDestroy(stream_);
         std::printf("CUDAGPUEngine released device resources.\n");
     }
@@ -214,16 +229,41 @@ public:
                                    cudaMemcpyHostToDevice, stream_));
 
         // One block per page; 128 threads/block stride over the page's queries.
+        // Point ops (read/write) route by page ownership; OP_SCAN is handled below.
         constexpr int TPB = 128;
         matrix_page_kernel<<<MATRIX_PAGE_COUNT, TPB, 0, stream_>>>(
             d_binned_, d_offsets_, d_store_, d_reads_, d_writes_);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaStreamSynchronize(stream_));
+
+        // OP_SCAN: each scan query runs the proven u32x4 kernel over the resident column.
+        // ponytail: one kernel launch per scan query, sequential. Scans are rare relative
+        // to point ops; fusing many predicates into one pass is the future optimization.
+        for (size_t i = 0; i < count; ++i) {
+            if (batch_array[i].opcode != OP_SCAN) continue;
+            const uint32_t threshold = matrix_get_scan_threshold(batch_array[i]);
+            CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), stream_));
+            constexpr int SCAN_TPB = 256;
+            const int blocks = 1024;
+            const uint4* col4 = reinterpret_cast<const uint4*>(d_scan_col_);
+            matrix_scan_kernel_u32x4<<<blocks, SCAN_TPB, 0, stream_>>>(
+                col4, MATRIX_SCAN_COLUMN_SIZE / 4, threshold, d_scan_count_);
+            CUDA_CHECK(cudaGetLastError());
+            unsigned long long c = 0;
+            CUDA_CHECK(cudaMemcpyAsync(&c, d_scan_count_, sizeof(c),
+                                       cudaMemcpyDeviceToHost, stream_));
+            CUDA_CHECK(cudaStreamSynchronize(stream_));
+            batch_array[i].transaction_id = c;
+            ++scans_;
+            scan_result_sum_ += c;
+        }
     }
 
     uint64_t reads() const override { return read_counter(d_reads_); }
     uint64_t writes() const override { return read_counter(d_writes_); }
     uint64_t commits() const override { return read_counter(d_writes_); } // every write commits (owned slot)
+    uint64_t scans() const override { return scans_; }
+    uint64_t scan_result_sum() const override { return scan_result_sum_; }
 
     uint64_t store_checksum() const override {
         // ponytail: copy the whole store back (32KB) and sum on host. Once, off the
@@ -321,6 +361,10 @@ private:
     uint32_t* d_offsets_ = nullptr;
     unsigned long long* d_reads_ = nullptr;
     unsigned long long* d_writes_ = nullptr;
+    uint32_t* d_scan_col_ = nullptr;            // resident analytical column
+    unsigned long long* d_scan_count_ = nullptr; // scratch for one scan's count
+    uint64_t scans_ = 0;                          // host-side scan accounting
+    uint64_t scan_result_sum_ = 0;
     std::vector<DatabaseQuery> h_binned_;
     std::vector<uint32_t> offsets_;
     cudaStream_t stream_{};

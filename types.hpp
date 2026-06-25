@@ -58,5 +58,11 @@ constexpr size_t MATRIX_PAGE_COUNT  = 1024;                       // owner threa
 constexpr size_t MATRIX_PAGE_SIZE   = MATRIX_STORE_SLOTS / MATRIX_PAGE_COUNT; // slots per page
 constexpr size_t MATRIX_BATCH_MAX   = 65536;                      // sweep ceiling / scratch buffer size
 
+// Resident analytical column (the GPU-DB's actual data): a uint32 column that lives
+// in VRAM/RAM and is scanned in place by OP_SCAN — never shipped per query. 16M values
+// = 64MB, well past CPU cache so the GPU bandwidth advantage is real. Filled value[i]=i
+// so a threshold T yields a known count (SCAN_SIZE-1-T) for oracle verification.
+constexpr size_t MATRIX_SCAN_COLUMN_SIZE = 1u << 24;             // 16,777,216 values (divisible by 4 for uint4)
+
 static_assert(MATRIX_STORE_SLOTS % MATRIX_PAGE_COUNT == 0,
     "store slots must divide evenly into pages so each page owns a contiguous slice");

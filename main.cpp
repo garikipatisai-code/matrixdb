@@ -255,6 +255,18 @@ int main() {
     const uint64_t reads_base = mock_engine->reads();
     const uint64_t writes_base = mock_engine->writes();
     const uint64_t applied_base = mock_engine->commits();
+    const uint64_t scans_base = mock_engine->scans();
+    const uint64_t scan_sum_base = mock_engine->scan_result_sum();
+
+    // Every Nth query is an analytical OP_SCAN with a fixed threshold; the rest are
+    // point ops. Lets us prove scans flow through the same ring + batcher to the engine.
+    constexpr size_t SCAN_EVERY = 1000;
+    constexpr uint32_t SCAN_THRESHOLD = MATRIX_SCAN_COLUMN_SIZE / 2;
+    size_t expected_scans = 0;
+    for (size_t i = 0; i < TOTAL_QUERIES; ++i) if (i % SCAN_EVERY == 0) ++expected_scans;
+    // Column is value[j]=j, so each scan counts (SIZE-1-threshold); sum = scans * that.
+    const uint64_t expected_scan_sum =
+        static_cast<uint64_t>(expected_scans) * (MATRIX_SCAN_COLUMN_SIZE - 1 - SCAN_THRESHOLD);
 
     // Simulate query production on a separate thread
     auto pipeline_start = std::chrono::steady_clock::now();
@@ -263,9 +275,12 @@ int main() {
             // Stamp ingestion time (steady_clock ns) so the consumer can measure queue residency.
             const uint64_t stamp_ns = static_cast<uint64_t>(
                 std::chrono::steady_clock::now().time_since_epoch().count());
-            // Alternate Read/Write so both opcode paths are exercised end to end.
-            const uint32_t op = (i % 2 == 0) ? OP_READ : OP_WRITE;
-            DatabaseQuery q{i, stamp_ns, 0, op, 8, {0}, {0}};
+            DatabaseQuery q{i, stamp_ns, 0, OP_READ, 8, {0}, {0}};
+            if (i % SCAN_EVERY == 0) {
+                matrix_set_scan_threshold(q, SCAN_THRESHOLD); // analytical scan query
+            } else {
+                q.opcode = (i % 2 == 0) ? OP_READ : OP_WRITE; // point ops otherwise
+            }
             while (!ring_buffer->try_emplace(q)) {
                 spin_stall();
             }
@@ -299,12 +314,18 @@ int main() {
     const uint64_t reads = mock_engine->reads() - reads_base;
     const uint64_t writes = mock_engine->writes() - writes_base;
     const uint64_t applied = mock_engine->commits() - applied_base;
+    const uint64_t scans = mock_engine->scans() - scans_base;
+    const uint64_t scan_sum = mock_engine->scan_result_sum() - scan_sum_base;
     std::cout << "Engine: reads=" << reads << " writes=" << writes
-              << " commits=" << applied << std::endl;
+              << " commits=" << applied << " scans=" << scans << std::endl;
     std::cout << "Store checksum: " << mock_engine->store_checksum()
               << " (must match across CPU and GPU backends)" << std::endl;
-    assert(reads + writes == processed && "opcode dispatch missed queries");
+    std::cout << "Scan result sum: " << scan_sum
+              << " (oracle " << expected_scan_sum << ")" << std::endl;
+    assert(reads + writes + scans == processed && "opcode dispatch missed queries");
     assert(applied == writes && "page-ownership commit dropped mutations");
+    assert(scans == expected_scans && "scan queries dropped in pipeline");
+    assert(scan_sum == expected_scan_sum && "GPU scan result mismatch vs oracle");
 
     // Report end-to-end pipeline throughput (the payoff of batched GPU execution).
     std::cout << "Throughput: " << static_cast<uint64_t>(throughput)

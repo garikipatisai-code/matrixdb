@@ -24,6 +24,12 @@ public:
     virtual uint64_t writes() const = 0;
     virtual uint64_t commits() const = 0; // writes actually applied to the store
 
+    // OP_SCAN result accounting: how many scan queries ran, and the running sum of their
+    // filter-count results. main asserts the sum against a known oracle to prove scans
+    // flowed ring -> batcher -> execute_batch -> (GPU) scan kernel correctly.
+    virtual uint64_t scans() const = 0;
+    virtual uint64_t scan_result_sum() const = 0;
+
     // Order-independent fingerprint of the whole store (sum of slot values). Lets
     // main.cpp assert CPU and GPU reach byte-identical state — the real test of the
     // ownership model, not just matching counts.
@@ -59,6 +65,16 @@ public:
 // kernel: slot = key & STORE_MASK, page = slot / PAGE_SIZE.
 inline size_t matrix_page_of(uint64_t key) {
     return (key & MATRIX_STORE_MASK) / MATRIX_PAGE_SIZE;
+}
+
+// OP_SCAN carries its filter threshold in the query payload (that's what payload is for).
+// One codec used by both engines so they decode identically.
+inline void matrix_set_scan_threshold(DatabaseQuery& q, uint32_t threshold) {
+    q.opcode = OP_SCAN;
+    *reinterpret_cast<uint32_t*>(q.payload) = threshold;
+}
+inline uint32_t matrix_get_scan_threshold(const DatabaseQuery& q) {
+    return *reinterpret_cast<const uint32_t*>(q.payload);
 }
 
 /**

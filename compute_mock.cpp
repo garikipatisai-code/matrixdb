@@ -14,9 +14,13 @@
 class CPUMockEngine : public ComputeInterface {
 public:
     explicit CPUMockEngine(size_t /*worker_count*/ = 0)
-        : binned_(MATRIX_BATCH_MAX) {
+        : binned_(MATRIX_BATCH_MAX)
+        , scan_column_(MATRIX_SCAN_COLUMN_SIZE) {
+        for (size_t i = 0; i < MATRIX_SCAN_COLUMN_SIZE; ++i)
+            scan_column_[i] = static_cast<uint32_t>(i); // resident analytical column
         std::cout << "CPUMockEngine initialized (page-ownership, "
-                  << MATRIX_PAGE_COUNT << " pages)." << std::endl;
+                  << MATRIX_PAGE_COUNT << " pages, "
+                  << MATRIX_SCAN_COLUMN_SIZE << "-value scan column)." << std::endl;
     }
 
     ~CPUMockEngine() override {
@@ -45,6 +49,17 @@ public:
                     store_[slot] = q.query_id; // mock projection: value == key
                     ++writes_;
                     ++commits_;
+                } else if (q.opcode == OP_SCAN) {
+                    // Scan the resident column for values > threshold (filter-count).
+                    // ponytail: one full scan per scan query. Batching predicates into a
+                    // single pass is the future optimization; correctness first.
+                    const uint32_t threshold = matrix_get_scan_threshold(q);
+                    uint64_t c = 0;
+                    for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
+                        c += (scan_column_[s2] > threshold);
+                    q.transaction_id = c;
+                    ++scans_;
+                    scan_result_sum_ += c;
                 }
             }
         }
@@ -58,6 +73,8 @@ public:
     uint64_t reads() const override { return reads_; }
     uint64_t writes() const override { return writes_; }
     uint64_t commits() const override { return commits_; }
+    uint64_t scans() const override { return scans_; }
+    uint64_t scan_result_sum() const override { return scan_result_sum_; }
 
     uint64_t store_checksum() const override {
         uint64_t sum = 0;
@@ -104,7 +121,10 @@ private:
     std::array<uint64_t, MATRIX_STORE_SLOTS> store_{}; // the Value column
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
+    std::vector<uint32_t> scan_column_;                // resident analytical column
     uint64_t reads_ = 0;
     uint64_t writes_ = 0;
     uint64_t commits_ = 0;
+    uint64_t scans_ = 0;
+    uint64_t scan_result_sum_ = 0;
 };
