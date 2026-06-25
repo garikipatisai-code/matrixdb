@@ -28,6 +28,31 @@ public:
                            /*arrived_tick*/tick_};
     }
 
+    // --- tunables (calibration targets) ---
+    static constexpr double HEAT_ALPHA = 0.5;          // EWMA weight on recent accesses
+    static constexpr double HYSTERESIS = 1.5;          // promote only if benefit > 1.5x cost
+    static constexpr int    SCAN_HORIZON = 8;          // cap on est. future scans
+    static constexpr uint64_t MIN_RESIDENCY_TICKS = 2; // anti-thrash: min ticks before evict
+
+    // Record that `bytes` of column `id` were scanned. O(1); accumulates until rebalance.
+    void record_access(uint64_t id, size_t bytes) {
+        auto it = cols_.find(id);
+        if (it != cols_.end()) it->second.recent_bytes += bytes;
+    }
+
+    // Global pass. (This task: age heat only. Later tasks add promotion + eviction.)
+    std::vector<MigrationDecision> rebalance() {
+        ++tick_;
+        for (auto& kv : cols_) {
+            Column& c = kv.second;
+            c.heat = HEAT_ALPHA * static_cast<double>(c.recent_bytes)
+                     + (1.0 - HEAT_ALPHA) * c.heat;
+            c.recent_bytes = 0;
+        }
+        std::vector<MigrationDecision> decisions;
+        return decisions;
+    }
+
     MemorySpace tier_of(uint64_t id) const { return cols_.at(id).tier; }
     double heat_of(uint64_t id) const { return cols_.at(id).heat; }
 

@@ -21,6 +21,24 @@ int main() {
         assert(tm.heat_of(1) == 0.0 && "fresh column starts cold (heat 0)");
     }
 
+    // --- Task 2: heat tracking ---
+    {
+        TierManager tm(make_cm(), 1u<<30, 1u<<30);
+        tm.register_column(1, 1000, MemorySpace::HOST);
+
+        // Access accumulates; heat only updates on rebalance (EWMA aging).
+        tm.record_access(1, 1000);
+        tm.record_access(1, 1000);
+        assert(tm.heat_of(1) == 0.0 && "heat unchanged until rebalance");
+
+        tm.rebalance(); // heat = 0.5*recent + 0.5*old = 0.5*2000 + 0 = 1000
+        assert(tm.heat_of(1) == 1000.0 && "first rebalance sets heat to alpha*recent");
+
+        // No access this round: heat decays toward 0.
+        tm.rebalance(); // heat = 0.5*0 + 0.5*1000 = 500
+        assert(tm.heat_of(1) == 500.0 && "idle column heat decays");
+    }
+
     std::printf("PASS: tier manager decisions correct\n");
     return 0;
 }
