@@ -1,7 +1,7 @@
 # MatrixDB Prototype
 
-A GPU-accelerated database engine, built from `MatrixDB Engine Architectural Specification.md`
-and `Mental Model of MatrixDB.md`, then driven by measurement on a real Tesla T4.
+A GPU-accelerated database engine: a lock-free ingestion pipeline that routes each
+workload to the hardware where it wins, driven by measurement on a real Tesla T4.
 
 One ingestion pipeline (lock-free SPSC ring → dual-trigger batching) feeds two
 interchangeable compute backends, selected at compile time:
