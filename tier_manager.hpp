@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <vector>
 #include <unordered_map>
+#include <algorithm>
 
 // A migration the brain decided on (the future executor will move the bytes).
 struct MigrationDecision {
@@ -52,16 +53,30 @@ public:
 
         std::vector<MigrationDecision> decisions;
 
-        // Promotion: move qualifying columns one tier toward DEVICE.
-        for (auto& kv : cols_) {
-            Column& c = kv.second;
-            if (should_promote(c)) {
-                const MemorySpace from = c.tier;
-                const MemorySpace to = faster_tier(c.tier);
-                decisions.push_back(MigrationDecision{c.id, from, to});
-                c.tier = to;
-                c.arrived_tick = tick_;
-            }
+        // Promotion: move qualifying columns one tier toward DEVICE — but capacity-gated,
+        // so the emitted plan never over-subscribes a bounded tier (the executor in Inc 4
+        // could not honor an over-capacity plan). Approve best-first (highest net benefit)
+        // and only if the column fits its target tier given current + already-approved
+        // same-tick promotions (resident_bytes reflects approved moves as we apply them).
+        std::vector<uint64_t> candidates;
+        for (auto& kv : cols_) if (should_promote(kv.second)) candidates.push_back(kv.first);
+        std::sort(candidates.begin(), candidates.end(),
+                  [this](uint64_t a, uint64_t b) {
+                      const double na = promote_net_benefit(cols_.at(a));
+                      const double nb = promote_net_benefit(cols_.at(b));
+                      if (na != nb) return na > nb;     // best benefit first
+                      return a < b;                      // tie-break by id (determinism)
+                  });
+        for (uint64_t id : candidates) {
+            Column& c = cols_.at(id);
+            const MemorySpace to = faster_tier(c.tier);
+            const size_t cap = capacity_of(to);
+            // cap == 0 means unbounded; otherwise the column must fit after current residents.
+            if (cap != 0 && resident_bytes(to) + c.bytes > cap) continue; // doesn't fit: skip
+            const MemorySpace from = c.tier;
+            decisions.push_back(MigrationDecision{c.id, from, to});
+            c.tier = to;
+            c.arrived_tick = tick_;
         }
 
         // Capacity eviction: for each bounded tier over capacity, demote the lowest
@@ -136,6 +151,17 @@ private:
                                * static_cast<double>(est_future_scans(c));
         const double cost = cm_.migration_us(c.tier, faster, c.bytes);
         return benefit > HYSTERESIS * cost;
+    }
+
+    // Net benefit (benefit - cost) of promoting one tier — used to rank candidates so the
+    // best columns win scarce capacity first. Only meaningful when should_promote is true.
+    double promote_net_benefit(const Column& c) const {
+        const MemorySpace faster = faster_tier(c.tier);
+        if (faster == c.tier) return 0.0;
+        const double benefit = (cm_.scan_us(c.tier, c.bytes) - cm_.scan_us(faster, c.bytes))
+                               * static_cast<double>(est_future_scans(c));
+        const double cost = cm_.migration_us(c.tier, faster, c.bytes);
+        return benefit - cost;
     }
 
     static MemorySpace slower_tier(MemorySpace t) {

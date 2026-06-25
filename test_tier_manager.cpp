@@ -103,6 +103,34 @@ int main() {
         assert(tm.resident_bytes(MemorySpace::DEVICE) <= COL && "evicted once past min-residency");
     }
 
+    // --- Capacity-gated promotion: the plan must never over-subscribe a bounded tier ---
+    {
+        // DEVICE holds ONE column; THREE equally-hot columns all qualify to promote.
+        // Promotion must be capacity-gated so the brain never emits an infeasible plan
+        // (more bytes on DEVICE than it holds). Without gating, all three promote and
+        // DEVICE sits multi-x over capacity in steady state.
+        const size_t COL = 64u*1024*1024;
+        TierManager tm(make_cm(), /*device_cap*/ COL, /*host_cap*/ 1u<<30);
+        tm.register_column(1, COL, MemorySpace::COLD);
+        tm.register_column(2, COL, MemorySpace::COLD);
+        tm.register_column(3, COL, MemorySpace::COLD);
+        for (int r = 0; r < 8; ++r) {
+            for (int i = 0; i < 50; ++i) {
+                tm.record_access(1, COL); tm.record_access(2, COL); tm.record_access(3, COL);
+            }
+            tm.rebalance();
+            // The hard invariant the eviction/gating logic exists to guarantee:
+            assert(tm.resident_bytes(MemorySpace::DEVICE) <= COL
+                   && "DEVICE plan must never exceed capacity (promotion is capacity-gated)");
+            assert(tm.resident_bytes(MemorySpace::HOST) <= (1u<<30)
+                   && "HOST plan must never exceed capacity");
+        }
+        // Exactly one of the three should occupy DEVICE; the rest sit on HOST.
+        int on_device = 0;
+        for (uint64_t id : {1u, 2u, 3u}) if (tm.tier_of(id) == MemorySpace::DEVICE) ++on_device;
+        assert(on_device == 1 && "exactly one column fits the 1-column DEVICE");
+    }
+
     // --- Task 5: determinism — identical access sequence -> identical decisions ---
     {
         auto run = []() {
