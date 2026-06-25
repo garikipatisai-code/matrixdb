@@ -4,6 +4,7 @@
 enum class MemorySpace {
     HOST,    // CPU RAM
     DEVICE,  // GPU VRAM (discrete)
+    COLD,    // SSD — cold columns + durability log (append-only, high latency)
     UNIFIED, // shared CPU+GPU pool (DGX Spark / Grace-Hopper) — placement is zero-copy
 };
 

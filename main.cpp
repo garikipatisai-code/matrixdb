@@ -183,7 +183,7 @@ void scan_benchmark(ComputeInterface& engine) {
 // results are correct regardless of home. (Latency comparison vs single-backend is a
 // follow-up; this asserts correctness of routing first.)
 void routing_demo(Router& router) {
-    const char* sp[] = {"HOST", "DEVICE", "UNIFIED"};
+    const char* sp[] = {"HOST", "DEVICE", "COLD", "UNIFIED"};
     const uint64_t small_id = router.place_scan_column(256u * 1024);       // 256 KB
     const uint64_t large_id = router.place_scan_column(64u * 1024 * 1024); // 64 MB
     std::cout << "Routing demo: 256KB column -> " << sp[(int)router.home_of(small_id)]
