@@ -143,25 +143,32 @@ private:
         return n;
     }
 
-    // Should this column be promoted one tier now? (cost-benefit + hysteresis)
-    bool should_promote(const Column& c) const {
+    // Benefit (scan-time saved over the horizon) and cost (one-time migration) of promoting
+    // a column one tier toward DEVICE. Single source of the promotion arithmetic so
+    // should_promote and promote_net_benefit can never drift. benefit==cost==0 if already
+    // on the fastest tier.
+    struct PromoteEval { double benefit; double cost; };
+    PromoteEval promote_eval(const Column& c) const {
         const MemorySpace faster = faster_tier(c.tier);
-        if (faster == c.tier) return false; // already fastest
+        if (faster == c.tier) return PromoteEval{0.0, 0.0};
         const double benefit = (cm_.scan_us(c.tier, c.bytes) - cm_.scan_us(faster, c.bytes))
                                * static_cast<double>(est_future_scans(c));
         const double cost = cm_.migration_us(c.tier, faster, c.bytes);
-        return benefit > HYSTERESIS * cost;
+        return PromoteEval{benefit, cost};
+    }
+
+    // Should this column be promoted one tier now? (cost-benefit + hysteresis)
+    bool should_promote(const Column& c) const {
+        if (faster_tier(c.tier) == c.tier) return false; // already fastest
+        const PromoteEval e = promote_eval(c);
+        return e.benefit > HYSTERESIS * e.cost;
     }
 
     // Net benefit (benefit - cost) of promoting one tier — used to rank candidates so the
     // best columns win scarce capacity first. Only meaningful when should_promote is true.
     double promote_net_benefit(const Column& c) const {
-        const MemorySpace faster = faster_tier(c.tier);
-        if (faster == c.tier) return 0.0;
-        const double benefit = (cm_.scan_us(c.tier, c.bytes) - cm_.scan_us(faster, c.bytes))
-                               * static_cast<double>(est_future_scans(c));
-        const double cost = cm_.migration_us(c.tier, faster, c.bytes);
-        return benefit - cost;
+        const PromoteEval e = promote_eval(c);
+        return e.benefit - e.cost;
     }
 
     static MemorySpace slower_tier(MemorySpace t) {
