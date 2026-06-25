@@ -4,9 +4,10 @@
 import json
 
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
-           "memory_model.hpp", "cost_model.hpp", "router.hpp",
+           "memory_model.hpp", "tier_model.hpp", "cost_model.hpp", "router.hpp",
+           "kv_store.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
-           "test_scan_coverage.cpp", "test_cost_model.cpp"]
+           "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -45,6 +46,12 @@ cells += [
        "every index is visited exactly once. This is pure integer logic, so it runs "
        "on the CPU and catches GPU-only coverage bugs before spending a GPU build."),
     code("!g++ -std=c++17 -O2 test_scan_coverage.cpp -o /tmp/tcov && /tmp/tcov"),
+    md("## 3a. KVStore unit test (CPU, no GPU)\n"
+       "\n"
+       "Proves the DM-1 fix: distinct colliding keys never overwrite each other, and a "
+       "full table is an explicit error, not silent data loss."),
+    code("!clang++ -std=c++20 -O2 test_kv_store.cpp -o /tmp/tkv 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_kv_store.cpp -o /tmp/tkv; /tmp/tkv"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "

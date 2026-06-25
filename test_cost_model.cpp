@@ -7,6 +7,7 @@
 #include "router.hpp"
 #include "compute.hpp"
 #include <vector>
+#include "tier_model.hpp"
 
 int main() {
     const MemoryModel discrete = MemoryModel::detect(/*gpu_available=*/true);
@@ -77,6 +78,24 @@ int main() {
     DatabaseQuery ssmall{}; matrix_set_scan_threshold(ssmall, 1);
     router.route_scan(ssmall, small_id);
     assert(cpu_eng.scan_calls == 1 && "small scan must hit CPU");
+
+    // --- Tier-aware cost: scan time per tier, and migration cost ---
+    {
+        CostModel tcm(discrete);
+        const size_t bytes = 64u * 1024 * 1024; // 64 MB
+
+        // Per-tier scan time ranks by bandwidth: DEVICE (VRAM) fastest, COLD (SSD) slowest.
+        const double dev = tcm.scan_us(MemorySpace::DEVICE, bytes);
+        const double host = tcm.scan_us(MemorySpace::HOST, bytes);
+        const double cold = tcm.scan_us(MemorySpace::COLD, bytes);
+        assert(dev < host && host < cold && "scan time must rank DEVICE < HOST < COLD");
+
+        // Migration cost is non-negative and zero when source==dest (no move).
+        assert(tcm.migration_us(MemorySpace::HOST, MemorySpace::HOST, bytes) == 0.0
+               && "no-op migration costs 0");
+        assert(tcm.migration_us(MemorySpace::HOST, MemorySpace::DEVICE, bytes) > 0.0
+               && "real migration costs > 0");
+    }
 
     std::printf("PASS: cost model placement decisions correct\n");
     return 0;

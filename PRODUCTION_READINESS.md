@@ -43,7 +43,7 @@ in the current env (CPU, no network) vs needs real infra.
 
 | ID | Gap | Why it matters | Sev | Effort | Local? |
 |----|-----|----------------|-----|--------|--------|
-| DM-1 | **Store is 4096 slots, `key & MASK` → silent overwrite on collision** | Real keys collide → **silent data loss**. This is a correctness bug, not a size limit. | P0 | M | yes |
+| DM-1 | **Store is 4096 slots, `key & MASK` → silent overwrite on collision** **[FIXED — Inc 1: KVStore]** | Real keys collide → **silent data loss**. This is a correctness bug, not a size limit. | P0 | M | yes |
 | DM-2 | No schema/catalog (tables, columns, types) | Can't model real data; everything is one fixed record shape | P0 | L | yes |
 | DM-3 | Fixed 64-byte record / 32-byte payload; no variable-length or real types | No strings, no nullable, no real columns | P0 | L | yes |
 | DM-4 | No query language — opcodes only (`OP_READ/WRITE/SCAN`) | No way for a client to express a query; the "router" routes opcodes, there's no parser/planner | P0 | XL | yes |
@@ -52,6 +52,8 @@ in the current env (CPU, no network) vs needs real infra.
 | DM-7 | No secondary indexes; point access is a single masked slot | Only one access path; no range scans on keys | P2 | L | yes |
 | DM-8 | No joins | Multi-table analytics impossible | P2 | XL | yes |
 | DM-9 | Dynamic data growth — store/column are fixed pre-allocations | Can't grow past boot-time size; no realloc/spill | P1 | L | partial |
+
+*Inc 1 of the three-tier engine landed: `tier_model.hpp`, tier-aware `cost_model.hpp`, and `kv_store.hpp` (DM-1 fixed — open-addressing hash table, no silent overwrite). See spec 2026-06-25-three-tier-storage-engine-design.md.*
 
 ## 2. Durability & persistence (the "D" in ACID)
 
