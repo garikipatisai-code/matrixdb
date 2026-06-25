@@ -116,21 +116,25 @@ void measure_handoff_latency() {
  * batches amortize it. One run gives the whole curve — precious when GPU runs are remote.
  */
 void sweep_batch_sizes(ComputeInterface& engine) {
-    constexpr size_t QUERIES_PER_POINT = 200000; // enough work to dwarf timer noise
-    const size_t sizes[] = {64, 128, 256, 512, 1024, 2048, 4096};
+    constexpr size_t QUERIES_PER_POINT = 400000; // enough work to dwarf timer noise
+    const size_t sizes[] = {64, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536};
 
     std::cout << "--- Batch-size sweep (execute_batch only, " << QUERIES_PER_POINT
               << " queries/point) ---" << std::endl;
 
     std::vector<DatabaseQuery> batch(MATRIX_BATCH_MAX);
+    for (size_t i = 0; i < MATRIX_BATCH_MAX; ++i) {
+        batch[i] = DatabaseQuery{};
+        batch[i].query_id = i;
+        batch[i].opcode = (i % 2 == 0) ? OP_READ : OP_WRITE;
+    }
+
+    // Warm up the engine (first GPU call pays one-time CUDA init) so it doesn't
+    // pollute the smallest batch point.
+    engine.execute_batch(batch.data(), 256);
+
     for (size_t bs : sizes) {
         const size_t iters = QUERIES_PER_POINT / bs;
-        // Rebuild a representative batch each point (alternating read/write).
-        for (size_t i = 0; i < bs; ++i) {
-            batch[i] = DatabaseQuery{};
-            batch[i].query_id = i;
-            batch[i].opcode = (i % 2 == 0) ? OP_READ : OP_WRITE;
-        }
         const auto t0 = std::chrono::steady_clock::now();
         for (size_t it = 0; it < iters; ++it) {
             engine.execute_batch(batch.data(), bs);

@@ -52,6 +52,6 @@ struct Mutation { uint64_t key; uint64_t value; };
 
 constexpr size_t MATRIX_STORE_SLOTS       = 4096;                        // power of two
 constexpr size_t MATRIX_STORE_MASK        = MATRIX_STORE_SLOTS - 1;
-constexpr size_t MATRIX_DELTA_LOG_CAPACITY = 8192;                       // >= max queries per batch
+constexpr size_t MATRIX_DELTA_LOG_CAPACITY = 65536;                      // >= max batch (a full write-batch needs this many slots)
 constexpr size_t MATRIX_DELTA_LOG_MASK    = MATRIX_DELTA_LOG_CAPACITY - 1;
-constexpr size_t MATRIX_BATCH_MAX         = 4096;                        // host-side max batch (== ring capacity)
+constexpr size_t MATRIX_BATCH_MAX         = 65536;                       // sweep ceiling: push past here to find the GPU plateau
