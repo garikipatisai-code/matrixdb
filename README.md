@@ -98,7 +98,13 @@ Each step was decided by a benchmark, not a guess. Notable findings:
   mismatched column sizes) — the integrated scan is ~96% efficient.
 - **HTAP head-of-line blocking — fixed.** Point ops and scans now run on separate queues
   and threads (GPU: separate streams), so a multi-ms scan no longer stalls point ops.
-  Measured: point-op queue residency p99 dropped ~200× (40 ms → 0.19 ms on CPU).
+  Measured on CPU: point-op queue residency p99 ~1.8 ms with ten 8 ms scans running
+  concurrently (was ~40 ms pre-split, ~22×). On GPU, point-op residency is no longer
+  scan-bound — what remains (~2.6 ms p99) is the point-op path's own per-batch
+  launch/sync cost (see next item), not scan interference.
+- **Per-batch GPU sync (point-op path):** each `execute_batch` blocks on a
+  `cudaStreamSynchronize`, so queries queue while it runs. Double-buffering / async
+  batches would hide it. Hypothesis — not yet instrumented like the scan path was.
 - **Scans return a count, not rows;** no SUM/MIN/MAX yet.
 - **Full OCC** (TEV lock-bit + read-set validation) — unnecessary while page ownership holds.
 - **Page binning on host** — folding it into the dual-trigger batcher is a future step.

@@ -128,7 +128,11 @@ wasted optimization pass.
 
 - **HTAP head-of-line blocking — FIXED.** Point ops and scans now run on separate
   queues + threads (GPU: separate CUDA streams). A multi-ms scan no longer stalls point
-  ops; measured point-op queue-residency p99 dropped ~200× (40 ms → 0.19 ms on CPU).
+  ops. Measured on CPU: point-op queue-residency p99 ~1.8 ms with ten 8 ms scans running
+  concurrently, vs ~40 ms when they shared one queue (~22×). On GPU the residency is no
+  longer scan-bound; what remains (~2.6 ms p99) is the point-op path's own per-batch
+  `cudaStreamSynchronize` cost (hypothesis — not yet instrumented), addressable with
+  async/double-buffered batches.
 - Scans return a **count, not matching rows**; no SUM/MIN/MAX/AVG yet.
 - **Full OCC** (TEV lock-bit + read-set validation) — unnecessary while page ownership
   holds; needed only if a page gains multiple concurrent writers.
