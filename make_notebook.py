@@ -4,7 +4,8 @@
 import json
 
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
-           "compute_mock.cpp", "compute_cuda.cuh", "main.cpp"]
+           "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
+           "test_scan_coverage.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -37,7 +38,13 @@ for f in SOURCES:
     cells.append(code("%%writefile " + f + "\n" + body))
 
 cells += [
-    md("## 3. Build & run on the GPU\n"
+    md("## 3. Kernel index-coverage test (CPU, no GPU needed)\n"
+       "\n"
+       "Simulates the items-per-thread scan kernel's index arithmetic and asserts "
+       "every index is visited exactly once. This is pure integer logic, so it runs "
+       "on the CPU and catches GPU-only coverage bugs before spending a GPU build."),
+    code("!g++ -std=c++17 -O2 test_scan_coverage.cpp -o /tmp/tcov && /tmp/tcov"),
+    md("## 4. Build & run on the GPU\n"
        "\n"
        "`-x cu` compiles `main.cpp` as CUDA so the `.cuh` kernels link in. "
        "`-D_GNU_SOURCE` exposes Linux thread-affinity APIs; "
@@ -45,7 +52,7 @@ cells += [
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA main.cpp -o matrixdb_proto"),
     code("!./matrixdb_proto"),
-    md("## 4. CPU fallback (run this if no GPU runtime is selected)\n"
+    md("## 5. CPU fallback (run this if no GPU runtime is selected)\n"
        "\n"
        "Same code, same asserts, no CUDA — proves the logic without a GPU."),
     code("!g++ -std=c++17 -O3 -D_GNU_SOURCE -pthread main.cpp -o matrixdb_cpu "

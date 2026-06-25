@@ -132,7 +132,11 @@ __global__ void matrix_scan_kernel_ipt(const uint32_t* data, size_t n,
     unsigned long long local = 0;
     const size_t base_stride = (size_t)gridDim.x * blockDim.x;
     const size_t chunk = base_stride * ITEMS;
-    for (size_t base = (size_t)blockIdx.x * blockDim.x * ITEMS + threadIdx.x;
+    // Striped layout: thread's global id is the base; item k is base + k*base_stride.
+    // (base init must NOT include *ITEMS — that mixes the blocked convention with the
+    // striped strides below and leaves most indices unvisited. Verified by
+    // test_scan_coverage.cpp.)
+    for (size_t base = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
          base < n; base += chunk) {
         uint32_t reg[ITEMS];
         #pragma unroll
