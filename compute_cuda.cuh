@@ -12,6 +12,7 @@
 
 #include "compute.hpp"
 #include <cuda_runtime.h>
+#include <vector>
 #include <cstdio>
 #include <cstdlib>
 
