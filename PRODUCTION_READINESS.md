@@ -55,6 +55,8 @@ in the current env (CPU, no network) vs needs real infra.
 
 *Inc 1 of the three-tier engine landed: `tier_model.hpp`, tier-aware `cost_model.hpp`, and `kv_store.hpp` (DM-1 fixed — open-addressing hash table, no silent overwrite). See spec 2026-06-25-three-tier-storage-engine-design.md.*
 
+*Inc 2 landed: `tier_manager.hpp` — the auto-tiering brain (per-column heat EWMA, capacity-gated cost-benefit promotion, cost-benefit eviction, anti-thrash; decisions-only, returns a feasible migration plan). Pure logic, fully CPU-tested. See spec 2026-06-25-increment-2-tier-manager-design.md. Remaining three-tier increments: Inc 3 = SSD cold-store/WAL (delivers durability DU-1/2/3), Inc 4 = GPU migration executor, Inc 5 = unified-memory collapse.*
+
 ## 2. Durability & persistence (the "D" in ACID)
 
 | ID | Gap | Why | Sev | Effort | Local? |
