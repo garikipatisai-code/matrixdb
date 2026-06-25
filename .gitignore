@@ -1,0 +1,6 @@
+# Build artifacts
+matrixdb_proto
+matrixdb_cpu
+build/
+*.o
+*.out
