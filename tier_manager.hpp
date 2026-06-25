@@ -49,7 +49,21 @@ public:
                      + (1.0 - HEAT_ALPHA) * c.heat;
             c.recent_bytes = 0;
         }
+
         std::vector<MigrationDecision> decisions;
+
+        // Promotion: move qualifying columns one tier toward DEVICE.
+        for (auto& kv : cols_) {
+            Column& c = kv.second;
+            if (should_promote(c)) {
+                const MemorySpace from = c.tier;
+                const MemorySpace to = faster_tier(c.tier);
+                decisions.push_back(MigrationDecision{c.id, from, to});
+                c.tier = to;
+                c.arrived_tick = tick_;
+            }
+        }
+
         return decisions;
     }
 
@@ -71,6 +85,32 @@ private:
         size_t   recent_bytes;   // accesses since last rebalance
         uint64_t arrived_tick;   // when it last landed on its current tier
     };
+
+    static MemorySpace faster_tier(MemorySpace t) {
+        if (t == MemorySpace::COLD) return MemorySpace::HOST;
+        if (t == MemorySpace::HOST) return MemorySpace::DEVICE;
+        return t; // DEVICE already fastest
+    }
+
+    // Heat-derived estimate of upcoming scans for a column, clamped to the horizon.
+    int est_future_scans(const Column& c) const {
+        if (c.bytes == 0) return 0;
+        const double scans = c.heat / static_cast<double>(c.bytes); // ~scans-per-tick
+        int n = static_cast<int>(scans + 0.5);
+        if (n < 0) n = 0;
+        if (n > SCAN_HORIZON) n = SCAN_HORIZON;
+        return n;
+    }
+
+    // Should this column be promoted one tier now? (cost-benefit + hysteresis)
+    bool should_promote(const Column& c) const {
+        const MemorySpace faster = faster_tier(c.tier);
+        if (faster == c.tier) return false; // already fastest
+        const double benefit = (cm_.scan_us(c.tier, c.bytes) - cm_.scan_us(faster, c.bytes))
+                               * static_cast<double>(est_future_scans(c));
+        const double cost = cm_.migration_us(c.tier, faster, c.bytes);
+        return benefit > HYSTERESIS * cost;
+    }
 
     CostModel cm_;
     size_t device_cap_;
