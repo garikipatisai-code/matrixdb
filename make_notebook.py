@@ -5,9 +5,10 @@ import json
 
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "memory_model.hpp", "tier_model.hpp", "cost_model.hpp", "router.hpp",
-           "kv_store.hpp",
+           "kv_store.hpp", "tier_manager.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
-           "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp"]
+           "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
+           "test_tier_manager.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -52,6 +53,13 @@ cells += [
        "full table is an explicit error, not silent data loss."),
     code("!clang++ -std=c++20 -O2 test_kv_store.cpp -o /tmp/tkv 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_kv_store.cpp -o /tmp/tkv; /tmp/tkv"),
+    md("## 3c. TierManager unit test (CPU, no GPU)\n"
+       "\n"
+       "Proves the auto-tiering brain: hot columns promote toward VRAM, cold stay put, "
+       "scarce tiers evict by cost-benefit (not pure LRU), anti-thrash holds, decisions "
+       "are deterministic."),
+    code("!clang++ -std=c++20 -O2 test_tier_manager.cpp -o /tmp/ttm 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_tier_manager.cpp -o /tmp/ttm; /tmp/ttm"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
