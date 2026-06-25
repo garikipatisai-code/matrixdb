@@ -57,6 +57,25 @@ __global__ void matrix_page_kernel(const DatabaseQuery* binned, const uint32_t* 
     if (w) atomicAdd(writes, (unsigned long long)w);
 }
 
+// Filter-count scan: count values > threshold. Grid-stride over resident VRAM data,
+// block-local reduction, one atomicAdd per block. This is the GPU's home turf —
+// streaming bandwidth over data too large for CPU cache.
+__global__ void matrix_scan_kernel(const uint64_t* data, size_t n,
+                                   uint64_t threshold, unsigned long long* count) {
+    __shared__ unsigned long long block_count;
+    if (threadIdx.x == 0) block_count = 0;
+    __syncthreads();
+
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        if (data[i] > threshold) ++local;
+    }
+    atomicAdd(&block_count, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(count, block_count);
+}
+
 /**
  * @brief Real CUDA GPU engine, page-ownership model. Device-resident store persists
  * across batches (it is the database). Same ComputeInterface + correctness contract
@@ -136,6 +155,43 @@ public:
         uint64_t sum = 0;
         for (uint64_t v : h) sum += v;
         return sum;
+    }
+
+    double benchmark_scan(size_t n, uint64_t threshold, uint64_t& out_count) override {
+        // Data lives resident in VRAM; we never ship it per query. Fill via a small
+        // host buffer once (NOT timed) — the query is the scan over resident data.
+        uint64_t* d_data = nullptr;
+        unsigned long long* d_count = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_data, n * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_count, sizeof(unsigned long long)));
+        CUDA_CHECK(cudaMemset(d_count, 0, sizeof(unsigned long long)));
+        {
+            std::vector<uint64_t> h(n);
+            for (size_t i = 0; i < n; ++i) h[i] = i;
+            CUDA_CHECK(cudaMemcpy(d_data, h.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        }
+
+        constexpr int TPB = 256;
+        const int blocks = 1024; // saturate the 40 SMs; grid-stride handles any n
+        cudaEvent_t start, stop;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventRecord(start, stream_));
+        matrix_scan_kernel<<<blocks, TPB, 0, stream_>>>(d_data, n, threshold, d_count);
+        CUDA_CHECK(cudaEventRecord(stop, stream_));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        float ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+
+        unsigned long long h_count = 0;
+        CUDA_CHECK(cudaMemcpy(&h_count, d_count, sizeof(h_count), cudaMemcpyDeviceToHost));
+        out_count = h_count;
+
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+        cudaFree(d_data);
+        cudaFree(d_count);
+        return ms / 1e3; // seconds
     }
 
 private:

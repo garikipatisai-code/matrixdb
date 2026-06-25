@@ -1,8 +1,7 @@
 #include "compute.hpp"
 #include <vector>
-#include <thread>
-#include <atomic>
 #include <array>
+#include <chrono>
 #include <iostream>
 
 /**
@@ -64,6 +63,17 @@ public:
         uint64_t sum = 0;
         for (uint64_t v : store_) sum += v;
         return sum;
+    }
+
+    double benchmark_scan(size_t n, uint64_t threshold, uint64_t& out_count) override {
+        std::vector<uint64_t> data(n);
+        for (size_t i = 0; i < n; ++i) data[i] = i; // resident; fill not timed
+        const auto t0 = std::chrono::steady_clock::now();
+        uint64_t count = 0;
+        for (size_t i = 0; i < n; ++i) count += (data[i] > threshold);
+        const auto t1 = std::chrono::steady_clock::now();
+        out_count = count;
+        return std::chrono::duration<double>(t1 - t0).count();
     }
 
 private:

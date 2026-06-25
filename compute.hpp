@@ -28,6 +28,14 @@ public:
     // main.cpp assert CPU and GPU reach byte-identical state — the real test of the
     // ownership model, not just matching counts.
     virtual uint64_t store_checksum() const = 0;
+
+    // Scan benchmark: allocate n resident values (value[i]=i), then time a single
+    // filter-count scan (count of value[i] > threshold) over that resident data.
+    // alloc+fill are NOT timed — the point is "data lives here, query scans it".
+    // This is the GPU's home turf (bandwidth over data too big for CPU cache),
+    // the opposite of the point-op path. Returns seconds; sets out_count.
+    // out_count is deterministic (value[i]=i) so it must match across CPU and GPU.
+    virtual double benchmark_scan(size_t n, uint64_t threshold, uint64_t& out_count) = 0;
 };
 
 // Which page owns a query's key. Single source of truth for both engines and the

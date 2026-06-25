@@ -149,6 +149,29 @@ void sweep_batch_sizes(ComputeInterface& engine) {
     }
 }
 
+/**
+ * @brief Scan benchmark — the GPU's home turf. Filter-count over RESIDENT data of
+ * growing size: small (fits CPU cache) to large (far exceeds it). The crossover where
+ * GPU overtakes CPU is the whole point — exploiting bandwidth over big data, not
+ * shipping tiny point-ops over PCIe. Verifies the count against a known oracle.
+ */
+void scan_benchmark(ComputeInterface& engine) {
+    const size_t sizes[] = {1u<<16, 1u<<18, 1u<<20, 1u<<22, 1u<<24, 1u<<26}; // 64K .. 64M values
+    std::cout << "--- Scan benchmark (filter-count over resident data) ---" << std::endl;
+    for (size_t n : sizes) {
+        const uint64_t threshold = n / 2;
+        uint64_t count = 0;
+        const double secs = engine.benchmark_scan(n, threshold, count);
+        // value[i]=i, so count of i>threshold == n-1-threshold.
+        assert(count == n - 1 - threshold && "scan produced wrong count");
+        const double gb = (n * sizeof(uint64_t)) / 1e9;
+        std::cout << "  n=" << n
+                  << "\t" << static_cast<uint64_t>(n / secs) << " vals/sec"
+                  << "\t" << gb / secs << " GB/s"
+                  << "\t(" << gb * 1e3 << " MB scanned)" << std::endl;
+    }
+}
+
 int main() {
     std::cout << "MatrixDB Bare-Metal Engine Booting..." << std::endl;
 
@@ -165,6 +188,7 @@ int main() {
     // Sweep batch sizes before the pipeline run so one execution yields the whole
     // throughput-vs-batch curve (decisive for GPU viability; remote runs are costly).
     sweep_batch_sizes(*mock_engine);
+    scan_benchmark(*mock_engine);
 
     std::atomic<bool> run_state{true};
     std::atomic<size_t> total_processed{0}; // ponytail: end-to-end check that every query flows through
