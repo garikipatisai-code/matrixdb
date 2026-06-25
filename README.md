@@ -37,6 +37,7 @@ integrated scan still pays per-scan launch/copy/sync overhead — see *Known lim
 - `types.hpp` — `DatabaseQuery` (cache-aligned POD), opcodes, store + page-ownership + scan-column layout
 - `ring_buffer.hpp` — lock-free SPSC ring (Component 1: the ingestion dam)
 - `compute.hpp` — `ComputeInterface` contract + page-binning helper + scan-threshold codec
+- `memory_model.hpp` / `cost_model.hpp` / `router.hpp` — cost-based hardware router: places each dataset on CPU or GPU by measured cost, dispatches queries to the engine that owns the data (open to unified memory via a seam, discrete-only for now)
 - `compute_mock.cpp` — CPU engine (Component 5: local sandbox)
 - `compute_cuda.cuh` — CUDA engine: block-per-page point ops + u32x4 resident-column scan (Component 4)
 - `main.cpp` — orchestration, latency/throughput/scan benchmarks, oracle asserts
@@ -56,6 +57,15 @@ log**. Point ops bin to their pages (a counting sort) and the GPU runs one block
 **Resident scan column.** A 16M-value `uint32` column lives in VRAM, filled once, never
 shipped per query. `OP_SCAN` queries (threshold carried in the payload) flow through the
 same ring + batcher and run the chosen `u32x4` vectorized kernel over it in place.
+
+### Routing
+
+Both engines live in one process behind a `Router`. A `CostModel` (parameterized by
+measured hardware constants) decides each dataset's single home — point-op KV store on
+the CPU, scan columns on CPU or GPU by size — and queries execute where their data lives.
+No data is duplicated, so there is no coherence protocol. A `MemorySpace`/`MemoryModel`
+seam keeps the design open to unified-memory hardware (e.g. DGX Spark, Grace-Hopper);
+only the discrete-memory path is implemented today.
 
 ## Build & run locally (CPU)
 ```sh
