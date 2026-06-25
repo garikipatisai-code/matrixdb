@@ -4,8 +4,9 @@
 import json
 
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
+           "memory_model.hpp", "cost_model.hpp", "router.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
-           "test_scan_coverage.cpp"]
+           "test_scan_coverage.cpp", "test_cost_model.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -44,6 +45,12 @@ cells += [
        "every index is visited exactly once. This is pure integer logic, so it runs "
        "on the CPU and catches GPU-only coverage bugs before spending a GPU build."),
     code("!g++ -std=c++17 -O2 test_scan_coverage.cpp -o /tmp/tcov && /tmp/tcov"),
+    md("## 3b. Cost-model unit test (CPU, no GPU)\n"
+       "\n"
+       "Pure-function check of the router's placement decisions — point ops -> HOST, "
+       "small scans -> HOST, large scans -> DEVICE, monotonic crossover."),
+    code("!clang++ -std=c++20 -O2 test_cost_model.cpp -o /tmp/tcm 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_cost_model.cpp -o /tmp/tcm; /tmp/tcm"),
     md("## 4. Build & run on the GPU\n"
        "\n"
        "`-x cu` compiles `main.cpp` as CUDA so the `.cuh` kernels link in. "

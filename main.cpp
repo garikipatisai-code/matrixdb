@@ -1,12 +1,10 @@
 #include "types.hpp"
 #include "ring_buffer.hpp"
+#include "compute_mock.cpp"        // CPU engine — always present (fallback + point-op home)
 #if defined(MATRIX_USE_CUDA)
-    #include "compute_cuda.cuh"   // real GPU engine (build with nvcc -DMATRIX_USE_CUDA)
-    using EngineType = CUDAGPUEngine;
-#else
-    #include "compute_mock.cpp"   // CPU fallback (default; runs anywhere)
-    using EngineType = CPUMockEngine;
+    #include "compute_cuda.cuh"    // GPU engine — present only in the CUDA build
 #endif
+#include "router.hpp"
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -180,6 +178,18 @@ void scan_benchmark(ComputeInterface& engine) {
     }
 }
 
+// Thesis demo: register two scan columns straddling the crossover plus point ops, run
+// them through the Router, and report where each landed. Proves placement is by cost and
+// results are correct regardless of home. (Latency comparison vs single-backend is a
+// follow-up; this asserts correctness of routing first.)
+void routing_demo(Router& router) {
+    const char* sp[] = {"HOST", "DEVICE", "UNIFIED"};
+    const uint64_t small_id = router.place_scan_column(256u * 1024);       // 256 KB
+    const uint64_t large_id = router.place_scan_column(64u * 1024 * 1024); // 64 MB
+    std::cout << "Routing demo: 256KB column -> " << sp[(int)router.home_of(small_id)]
+              << ", 64MB column -> " << sp[(int)router.home_of(large_id)] << std::endl;
+}
+
 int main() {
     std::cout << "MatrixDB Bare-Metal Engine Booting..." << std::endl;
 
@@ -194,12 +204,37 @@ int main() {
     // Separate ring for scans (HTAP): a long scan in its own queue can't head-of-line-
     // block the point ops. Small — scans are infrequent and run one at a time.
     auto scan_ring = std::make_unique<SPSCRingBuffer<DatabaseQuery, 64>>();
-    auto mock_engine = std::make_unique<EngineType>(4);
+
+    // Both engines live in one process; the Router places data and dispatches per query.
+    auto cpu_engine = std::make_unique<CPUMockEngine>(4);
+#if defined(MATRIX_USE_CUDA)
+    auto gpu_engine = std::make_unique<CUDAGPUEngine>(4);
+    ComputeInterface* gpu_ptr = gpu_engine.get();
+    const bool gpu_available = true;
+#else
+    ComputeInterface* gpu_ptr = nullptr;
+    const bool gpu_available = false;
+#endif
+    MemoryModel memmodel = MemoryModel::detect(gpu_available);
+    Router router(cpu_engine.get(), gpu_ptr, CostModel(memmodel, gpu_available));
+
+    // The scan column is a single dataset; the Router decides its home from its size.
+    const uint64_t scan_col_id =
+        router.place_scan_column(MATRIX_SCAN_COLUMN_SIZE * sizeof(uint32_t));
+
+    // Counters for scans live on whichever engine actually ran them.
+    ComputeInterface* scan_engine =
+        (router.home_of(scan_col_id) == MemorySpace::DEVICE && gpu_ptr) ? gpu_ptr : cpu_engine.get();
+
+    // Point-op counters/store always live on the CPU engine.
+    ComputeInterface* point_op_engine = cpu_engine.get();
+
+    routing_demo(router);
 
     // Sweep batch sizes before the pipeline run so one execution yields the whole
     // throughput-vs-batch curve (decisive for GPU viability; remote runs are costly).
-    sweep_batch_sizes(*mock_engine);
-    scan_benchmark(*mock_engine);
+    sweep_batch_sizes(*point_op_engine);
+    scan_benchmark(*point_op_engine);
 
     std::atomic<bool> run_state{true};
     std::atomic<size_t> total_processed{0}; // ponytail: end-to-end check that every query flows through
@@ -241,7 +276,7 @@ int main() {
 
                 // Trigger flush if batch is full OR time-based window has expired
                 if (accumulated_queries >= BATCH_SIZE_LIMIT || duration_us >= static_cast<long long>(TEMPORAL_LIMIT_US)) {
-                    mock_engine->execute_batch(batch.data(), accumulated_queries);
+                    router.route_batch(batch.data(), accumulated_queries);
                     total_processed.fetch_add(accumulated_queries, std::memory_order_relaxed);
                     accumulated_queries = 0;
                 }
@@ -260,7 +295,7 @@ int main() {
         while (run_state.load(std::memory_order_relaxed)) {
             DatabaseQuery sq;
             if (scan_ring->try_pop(sq)) {
-                mock_engine->execute_scan(sq);
+                router.route_scan(sq, scan_col_id);
                 scans_processed.fetch_add(1, std::memory_order_relaxed);
             } else {
                 spin_stall();
@@ -269,18 +304,18 @@ int main() {
         // Drain any scans still queued at shutdown.
         DatabaseQuery sq;
         while (scan_ring->try_pop(sq)) {
-            mock_engine->execute_scan(sq);
+            router.route_scan(sq, scan_col_id);
             scans_processed.fetch_add(1, std::memory_order_relaxed);
         }
     });
 
     // Snapshot engine counters after the sweep so the pipeline asserts below measure
     // only the pipeline's queries, not the sweep's traffic.
-    const uint64_t reads_base = mock_engine->reads();
-    const uint64_t writes_base = mock_engine->writes();
-    const uint64_t applied_base = mock_engine->commits();
-    const uint64_t scans_base = mock_engine->scans();
-    const uint64_t scan_sum_base = mock_engine->scan_result_sum();
+    const uint64_t reads_base = point_op_engine->reads();
+    const uint64_t writes_base = point_op_engine->writes();
+    const uint64_t applied_base = point_op_engine->commits();
+    const uint64_t scans_base = scan_engine->scans();
+    const uint64_t scan_sum_base = scan_engine->scan_result_sum();
 
     // Every Nth query is an analytical OP_SCAN with a fixed threshold; the rest are
     // point ops. Lets us prove scans flow through the same ring + batcher to the engine.
@@ -334,14 +369,14 @@ int main() {
 
     // Verify the engine actually dispatched on opcode and committed every mutation.
     // Deltas since the pre-pipeline snapshot isolate the pipeline from the sweep.
-    const uint64_t reads = mock_engine->reads() - reads_base;
-    const uint64_t writes = mock_engine->writes() - writes_base;
-    const uint64_t applied = mock_engine->commits() - applied_base;
-    const uint64_t scans = mock_engine->scans() - scans_base;
-    const uint64_t scan_sum = mock_engine->scan_result_sum() - scan_sum_base;
+    const uint64_t reads = point_op_engine->reads() - reads_base;
+    const uint64_t writes = point_op_engine->writes() - writes_base;
+    const uint64_t applied = point_op_engine->commits() - applied_base;
+    const uint64_t scans = scan_engine->scans() - scans_base;
+    const uint64_t scan_sum = scan_engine->scan_result_sum() - scan_sum_base;
     std::cout << "Engine: reads=" << reads << " writes=" << writes
               << " commits=" << applied << " scans=" << scans << std::endl;
-    std::cout << "Store checksum: " << mock_engine->store_checksum()
+    std::cout << "Store checksum: " << point_op_engine->store_checksum()
               << " (must match across CPU and GPU backends)" << std::endl;
     std::cout << "Scan result sum: " << scan_sum
               << " (oracle " << expected_scan_sum << ")" << std::endl;
@@ -353,7 +388,7 @@ int main() {
     // Report throughput split by workload. Point ops and scans now run on independent
     // threads/queues (HTAP separation), so point-op throughput is measured over the full
     // pipeline wall — it no longer pays scan time, which is the whole point of the split.
-    const double scan_s = mock_engine->scan_time_s();
+    const double scan_s = scan_engine->scan_time_s();
     const uint64_t point_ops = reads + writes;
     std::cout << "Throughput: point-ops " << static_cast<uint64_t>(point_ops / elapsed_s)
               << " ops/sec (" << point_ops << " in " << elapsed_s * 1e3 << " ms wall)";
@@ -368,7 +403,7 @@ int main() {
     // (memset + launch + result copy + sync + host jitter). The split tells us whether
     // closing the integrated-vs-standalone gap means batching scans or is already tight.
     if (scans > 0) {
-        const double k_s = mock_engine->scan_kernel_time_s();
+        const double k_s = scan_engine->scan_kernel_time_s();
         const double overhead_s = scan_s - k_s;
         const double col_gb = (MATRIX_SCAN_COLUMN_SIZE * sizeof(uint32_t)) / 1e9;
         std::cout << "Scan breakdown: kernel " << k_s / scans * 1e3 << " ms/scan ("

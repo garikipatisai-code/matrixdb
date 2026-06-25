@@ -126,6 +126,11 @@ wasted optimization pass.
 
 ## 6. Known limits / deferred (none are blockers)
 
+- **Cost-based router — built.** Both engines live in one process; a measured cost model
+  places each dataset (point store -> HOST, scan column -> HOST/DEVICE by size) and
+  queries run where their data lives. No duplication, no coherence protocol. Unified-memory
+  seam present, discrete-only implemented. Open item: one calibration pass on the cost
+  constants (the derived ~313 KB crossover vs the ~4-8 MB practical one).
 - **HTAP head-of-line blocking — FIXED.** Point ops and scans now run on separate
   queues + threads (GPU: separate CUDA streams). A multi-ms scan no longer stalls point
   ops. Measured on CPU: point-op queue-residency p99 ~1.8 ms with ten 8 ms scans running
