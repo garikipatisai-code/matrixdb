@@ -36,6 +36,7 @@ public:
 
         // One logical owner per page: process only this page's queries against its
         // contiguous store slice. Pages are independent — this is the parallel unit.
+        // Scans arrive on a separate path (execute_scan), so this sees only point ops.
         for (size_t page = 0; page < MATRIX_PAGE_COUNT; ++page) {
             const uint32_t begin = offsets_[page];
             const uint32_t end = offsets_[page + 1];
@@ -49,20 +50,6 @@ public:
                     store_[slot] = q.query_id; // mock projection: value == key
                     ++writes_;
                     ++commits_;
-                } else if (q.opcode == OP_SCAN) {
-                    // Scan the resident column for values > threshold (filter-count).
-                    // ponytail: one full scan per scan query. Batching predicates into a
-                    // single pass is the future optimization; correctness first.
-                    const uint32_t threshold = matrix_get_scan_threshold(q);
-                    const auto st0 = std::chrono::steady_clock::now();
-                    uint64_t c = 0;
-                    for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
-                        c += (scan_column_[s2] > threshold);
-                    scan_time_s_ += std::chrono::duration<double>(
-                        std::chrono::steady_clock::now() - st0).count();
-                    q.transaction_id = c;
-                    ++scans_;
-                    scan_result_sum_ += c;
                 }
             }
         }
@@ -71,6 +58,21 @@ public:
         // batch_array. Callers here assert on counters + store contents, not on each
         // query's transaction_id, so the scatter-back is YAGNI. Add it if a caller
         // needs per-query read results in original order.
+    }
+
+    void execute_scan(DatabaseQuery& q) override {
+        // Filter-count over the resident column. Runs on the scan path's own thread, so
+        // it never blocks point ops. Touches only scan_* state (disjoint from the store).
+        const uint32_t threshold = matrix_get_scan_threshold(q);
+        const auto st0 = std::chrono::steady_clock::now();
+        uint64_t c = 0;
+        for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
+            c += (scan_column_[s2] > threshold);
+        scan_time_s_ += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - st0).count();
+        q.transaction_id = c;
+        ++scans_;
+        scan_result_sum_ += c;
     }
 
     uint64_t reads() const override { return reads_; }

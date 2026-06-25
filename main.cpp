@@ -191,6 +191,9 @@ int main() {
     constexpr size_t TOTAL_QUERIES = 10000;
 
     auto ring_buffer = std::make_unique<SPSCRingBuffer<DatabaseQuery, 4096>>();
+    // Separate ring for scans (HTAP): a long scan in its own queue can't head-of-line-
+    // block the point ops. Small — scans are infrequent and run one at a time.
+    auto scan_ring = std::make_unique<SPSCRingBuffer<DatabaseQuery, 64>>();
     auto mock_engine = std::make_unique<EngineType>(4);
 
     // Sweep batch sizes before the pipeline run so one execution yields the whole
@@ -250,8 +253,29 @@ int main() {
         }
     });
 
+    // Scan consumer: dedicated thread + queue so a multi-ms scan runs concurrently with
+    // point-op processing instead of stalling it. Scans run one at a time (no batching).
+    std::atomic<size_t> scans_processed{0};
+    std::thread scan_consumer([&]() {
+        while (run_state.load(std::memory_order_relaxed)) {
+            DatabaseQuery sq;
+            if (scan_ring->try_pop(sq)) {
+                mock_engine->execute_scan(sq);
+                scans_processed.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                spin_stall();
+            }
+        }
+        // Drain any scans still queued at shutdown.
+        DatabaseQuery sq;
+        while (scan_ring->try_pop(sq)) {
+            mock_engine->execute_scan(sq);
+            scans_processed.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
     // Snapshot engine counters after the sweep so the pipeline asserts below measure
-    // only the pipeline's 10k queries, not the sweep's traffic.
+    // only the pipeline's queries, not the sweep's traffic.
     const uint64_t reads_base = mock_engine->reads();
     const uint64_t writes_base = mock_engine->writes();
     const uint64_t applied_base = mock_engine->commits();
@@ -277,36 +301,36 @@ int main() {
                 std::chrono::steady_clock::now().time_since_epoch().count());
             DatabaseQuery q{i, stamp_ns, 0, OP_READ, 8, {0}, {0}};
             if (i % SCAN_EVERY == 0) {
-                matrix_set_scan_threshold(q, SCAN_THRESHOLD); // analytical scan query
+                matrix_set_scan_threshold(q, SCAN_THRESHOLD);       // analytical scan query
+                while (!scan_ring->try_emplace(q)) spin_stall();    // -> dedicated scan queue
             } else {
-                q.opcode = (i % 2 == 0) ? OP_READ : OP_WRITE; // point ops otherwise
-            }
-            while (!ring_buffer->try_emplace(q)) {
-                spin_stall();
+                q.opcode = (i % 2 == 0) ? OP_READ : OP_WRITE;       // point ops
+                while (!ring_buffer->try_emplace(q)) spin_stall();  // -> point-op queue
             }
         }
     });
 
     producer.join();
 
-    // Wait until every produced query has been processed, then stamp the drain time.
-    // Replaces an arbitrary fixed sleep so throughput reflects real drain, not slack.
-    while (total_processed.load(std::memory_order_relaxed) < TOTAL_QUERIES) {
+    // Wait until both queues have drained, then stamp the drain time. Point ops and
+    // scans drain on independent threads; the slower of the two bounds the pipeline.
+    const size_t expected_pointops = TOTAL_QUERIES - expected_scans;
+    while (total_processed.load(std::memory_order_relaxed) < expected_pointops ||
+           scans_processed.load(std::memory_order_relaxed) < expected_scans) {
         spin_stall();
     }
     auto pipeline_end = std::chrono::steady_clock::now();
     run_state.store(false);
 
-    if (consumer.joinable()) {
-        consumer.join();
-    }
+    if (consumer.joinable()) consumer.join();
+    if (scan_consumer.joinable()) scan_consumer.join();
 
     const double elapsed_s =
         std::chrono::duration<double>(pipeline_end - pipeline_start).count();
 
-    const size_t processed = total_processed.load();
+    const size_t processed = total_processed.load() + scans_processed.load();
     std::cout << "Processed " << processed << " / " << TOTAL_QUERIES << " queries." << std::endl;
-    assert(processed == TOTAL_QUERIES && "Dual-trigger pipeline dropped queries");
+    assert(processed == TOTAL_QUERIES && "pipeline dropped queries");
 
     // Verify the engine actually dispatched on opcode and committed every mutation.
     // Deltas since the pre-pipeline snapshot isolate the pipeline from the sweep.
@@ -326,14 +350,13 @@ int main() {
     assert(scans == expected_scans && "scan queries dropped in pipeline");
     assert(scan_sum == expected_scan_sum && "GPU scan result mismatch vs oracle");
 
-    // Report throughput split by workload. A single 64MB scan costs ~1000x a point op,
-    // so a combined ops/sec is meaningless once scans are mixed in (HTAP: OLTP point ops
-    // vs OLAP scans on one path). Separate them: point-op rate excludes scan time.
+    // Report throughput split by workload. Point ops and scans now run on independent
+    // threads/queues (HTAP separation), so point-op throughput is measured over the full
+    // pipeline wall — it no longer pays scan time, which is the whole point of the split.
     const double scan_s = mock_engine->scan_time_s();
-    const double pointop_s = elapsed_s - scan_s;
     const uint64_t point_ops = reads + writes;
-    std::cout << "Throughput: point-ops " << static_cast<uint64_t>(point_ops / pointop_s)
-              << " ops/sec (" << point_ops << " in " << pointop_s * 1e3 << " ms)";
+    std::cout << "Throughput: point-ops " << static_cast<uint64_t>(point_ops / elapsed_s)
+              << " ops/sec (" << point_ops << " in " << elapsed_s * 1e3 << " ms wall)";
     if (scans > 0) {
         std::cout << " | scans " << static_cast<uint64_t>(scans / scan_s)
                   << " scans/sec (" << scans << " in " << scan_s * 1e3 << " ms, "

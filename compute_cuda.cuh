@@ -200,6 +200,9 @@ public:
 
         // ponytail: single stream. Hyper-Q multi-stream is the throughput upgrade.
         CUDA_CHECK(cudaStreamCreate(&stream_));
+        // Dedicated stream for scans so they overlap point-op work and don't serialize
+        // behind it (the HTAP separation, GPU side).
+        CUDA_CHECK(cudaStreamCreate(&scan_stream_));
         // Reused events to time just the scan kernel (per-scan create/destroy would
         // itself add overhead and pollute the measurement).
         CUDA_CHECK(cudaEventCreate(&scan_k0_));
@@ -219,6 +222,7 @@ public:
         cudaEventDestroy(scan_k0_);
         cudaEventDestroy(scan_k1_);
         cudaStreamDestroy(stream_);
+        cudaStreamDestroy(scan_stream_);
         std::printf("CUDAGPUEngine released device resources.\n");
     }
 
@@ -236,44 +240,40 @@ public:
                                    cudaMemcpyHostToDevice, stream_));
 
         // One block per page; 128 threads/block stride over the page's queries.
-        // Point ops (read/write) route by page ownership; OP_SCAN is handled below.
+        // Point ops only — scans arrive via execute_scan on their own stream.
         constexpr int TPB = 128;
         matrix_page_kernel<<<MATRIX_PAGE_COUNT, TPB, 0, stream_>>>(
             d_binned_, d_offsets_, d_store_, d_reads_, d_writes_);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaStreamSynchronize(stream_));
+    }
 
-        // OP_SCAN: each scan query runs the proven u32x4 kernel over the resident column.
-        // ponytail: one kernel launch per scan query, sequential. Scans are rare relative
-        // to point ops; fusing many predicates into one pass is the future optimization.
-        for (size_t i = 0; i < count; ++i) {
-            if (batch_array[i].opcode != OP_SCAN) continue;
-            const auto st0 = std::chrono::steady_clock::now();
-            const uint32_t threshold = matrix_get_scan_threshold(batch_array[i]);
-            CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), stream_));
-            constexpr int SCAN_TPB = 256;
-            const int blocks = 1024;
-            const uint4* col4 = reinterpret_cast<const uint4*>(d_scan_col_);
-            CUDA_CHECK(cudaEventRecord(scan_k0_, stream_));
-            matrix_scan_kernel_u32x4<<<blocks, SCAN_TPB, 0, stream_>>>(
-                col4, MATRIX_SCAN_COLUMN_SIZE / 4, threshold, d_scan_count_);
-            CUDA_CHECK(cudaEventRecord(scan_k1_, stream_));
-            CUDA_CHECK(cudaGetLastError());
-            unsigned long long c = 0;
-            CUDA_CHECK(cudaMemcpyAsync(&c, d_scan_count_, sizeof(c),
-                                       cudaMemcpyDeviceToHost, stream_));
-            CUDA_CHECK(cudaStreamSynchronize(stream_));
-            scan_time_s_ += std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - st0).count();
-            // Pure kernel time (events bracket only the launch) — isolates per-scan
-            // overhead = scan_time_s_ (host wall, incl memset/copy/sync) minus this.
-            float k_ms = 0.0f;
-            CUDA_CHECK(cudaEventElapsedTime(&k_ms, scan_k0_, scan_k1_));
-            scan_kernel_time_s_ += k_ms / 1e3;
-            batch_array[i].transaction_id = c;
-            ++scans_;
-            scan_result_sum_ += c;
-        }
+    void execute_scan(DatabaseQuery& q) override {
+        // u32x4 filter-count over the resident column, on the dedicated scan stream so
+        // it overlaps point-op submission on stream_ and never head-of-line-blocks them.
+        const auto st0 = std::chrono::steady_clock::now();
+        const uint32_t threshold = matrix_get_scan_threshold(q);
+        CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), scan_stream_));
+        constexpr int SCAN_TPB = 256;
+        const int blocks = 1024;
+        const uint4* col4 = reinterpret_cast<const uint4*>(d_scan_col_);
+        CUDA_CHECK(cudaEventRecord(scan_k0_, scan_stream_));
+        matrix_scan_kernel_u32x4<<<blocks, SCAN_TPB, 0, scan_stream_>>>(
+            col4, MATRIX_SCAN_COLUMN_SIZE / 4, threshold, d_scan_count_);
+        CUDA_CHECK(cudaEventRecord(scan_k1_, scan_stream_));
+        CUDA_CHECK(cudaGetLastError());
+        unsigned long long c = 0;
+        CUDA_CHECK(cudaMemcpyAsync(&c, d_scan_count_, sizeof(c),
+                                   cudaMemcpyDeviceToHost, scan_stream_));
+        CUDA_CHECK(cudaStreamSynchronize(scan_stream_));
+        scan_time_s_ += std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - st0).count();
+        float k_ms = 0.0f;
+        CUDA_CHECK(cudaEventElapsedTime(&k_ms, scan_k0_, scan_k1_));
+        scan_kernel_time_s_ += k_ms / 1e3;
+        q.transaction_id = c;
+        ++scans_;
+        scan_result_sum_ += c;
     }
 
     uint64_t reads() const override { return read_counter(d_reads_); }
@@ -390,4 +390,5 @@ private:
     std::vector<DatabaseQuery> h_binned_;
     std::vector<uint32_t> offsets_;
     cudaStream_t stream_{};
+    cudaStream_t scan_stream_{};                  // dedicated scan path (HTAP)
 };

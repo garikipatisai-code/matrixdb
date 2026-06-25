@@ -42,6 +42,7 @@ integrated scan still pays per-scan launch/copy/sync overhead — see *Known lim
 - `main.cpp` — orchestration, latency/throughput/scan benchmarks, oracle asserts
 - `test_scan_coverage.cpp` — CPU simulation of the scan kernel's index math (catches GPU-only bugs)
 - `make_notebook.py` — regenerates `matrixdb_colab.ipynb` from the real source (run after edits)
+- `FINDINGS.md` — engineering journal: every measured result, overturned hypothesis, and idea for later
 - `CMakeLists.txt` — CPU build (CUDA uses the one-liner below)
 
 ## Architecture
@@ -95,9 +96,9 @@ Each step was decided by a benchmark, not a guess. Notable findings:
   launch/copy/sync at ~4% of scan time (kernel 0.41 ms/scan @ 163 GB/s on the 16M column).
   An earlier "70% overhead" claim was a measurement artifact (host-wall vs cudaEvent timing,
   mismatched column sizes) — the integrated scan is ~96% efficient.
-- **HTAP head-of-line blocking:** point ops and scans share one SPSC queue, so a scan stalls
-  the point ops behind it (queue residency spikes to 2–5 ms GPU / 30–40 ms CPU). Separate
-  queues/streams is the fix — the main remaining architectural improvement.
+- **HTAP head-of-line blocking — fixed.** Point ops and scans now run on separate queues
+  and threads (GPU: separate streams), so a multi-ms scan no longer stalls point ops.
+  Measured: point-op queue residency p99 dropped ~200× (40 ms → 0.19 ms on CPU).
 - **Scans return a count, not rows;** no SUM/MIN/MAX yet.
 - **Full OCC** (TEV lock-bit + read-set validation) — unnecessary while page ownership holds.
 - **Page binning on host** — folding it into the dual-trigger batcher is a future step.

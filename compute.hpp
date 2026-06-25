@@ -20,6 +20,12 @@ public:
     virtual ~ComputeInterface() = default;
     virtual void execute_batch(DatabaseQuery* batch_array, size_t count) = 0;
 
+    // Run a single OP_SCAN over the resident column (sets q.transaction_id to the count).
+    // Separate from execute_batch so scans run on their own thread/queue and stream and
+    // don't head-of-line-block point ops. Touches only scan-path state (disjoint from
+    // the point-op store/counters), so the two may run concurrently.
+    virtual void execute_scan(DatabaseQuery& q) = 0;
+
     virtual uint64_t reads() const = 0;
     virtual uint64_t writes() const = 0;
     virtual uint64_t commits() const = 0; // writes actually applied to the store
