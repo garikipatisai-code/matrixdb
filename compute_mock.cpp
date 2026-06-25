@@ -1,6 +1,8 @@
 #include "compute.hpp"
+#include "kv_store.hpp"
 #include <vector>
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <iostream>
 
@@ -42,14 +44,23 @@ public:
             const uint32_t end = offsets_[page + 1];
             for (uint32_t j = begin; j < end; ++j) {
                 DatabaseQuery& q = binned_[j];
-                const size_t slot = q.query_id & MATRIX_STORE_MASK;
                 if (q.opcode == OP_READ) {
-                    q.transaction_id = store_[slot];
+                    uint64_t v = 0;
+                    kv_.get(q.query_id, v); // miss leaves v=0 (matches old zero-init store)
+                    q.transaction_id = v;
                     ++reads_;
                 } else if (q.opcode == OP_WRITE) {
-                    store_[slot] = q.query_id; // mock projection: value == key
+                    // mock projection: value == key. Fixed-capacity seam: a full table is
+                    // counted as an overflow (always live, even under NDEBUG) so a dropped
+                    // write is never silent. Inc 3 replaces this with SSD spill. The assert
+                    // makes it fail loud in debug builds too.
                     ++writes_;
-                    ++commits_;
+                    if (kv_.put(q.query_id, q.query_id)) {
+                        ++commits_;
+                    } else {
+                        ++store_overflows_;
+                        assert(false && "KVStore full — point-op store capacity exceeded (Inc 3 adds spill)");
+                    }
                 }
             }
         }
@@ -85,9 +96,7 @@ public:
     double scan_kernel_time_s() const override { return scan_time_s_; }
 
     uint64_t store_checksum() const override {
-        uint64_t sum = 0;
-        for (uint64_t v : store_) sum += v;
-        return sum;
+        return kv_.checksum();
     }
 
     double benchmark_scan(size_t n, uint64_t threshold, uint64_t& out_count) override {
@@ -126,7 +135,10 @@ public:
     }
 
 private:
-    std::array<uint64_t, MATRIX_STORE_SLOTS> store_{}; // the Value column
+    // Point-op store: a real hash table (gap DM-1). Distinct keys never overwrite; a full
+    // table is an explicit error, not silent loss. Sized with headroom over the demo's
+    // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
+    KVStore kv_{1u << 16}; // 65536 slots
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column
@@ -135,5 +147,6 @@ private:
     uint64_t commits_ = 0;
     uint64_t scans_ = 0;
     uint64_t scan_result_sum_ = 0;
+    uint64_t store_overflows_ = 0; // writes dropped because the fixed-capacity KVStore was full (Inc 3 adds SSD spill)
     double scan_time_s_ = 0.0;
 };
