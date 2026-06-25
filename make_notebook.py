@@ -17,14 +17,14 @@ def md(src):
 cells = [
     md("# MatrixDB on Google Colab\n"
        "\n"
-       "Real CUDA backend of the MatrixDB engine: one GPU thread per query, "
-       "`atomicAdd` Delta Log, reconcile kernel.\n"
+       "GPU-accelerated database engine: page-ownership point ops + a resident-column "
+       "`u32x4` scan kernel, behind a lock-free SPSC ring + dual-trigger batcher.\n"
        "\n"
        "**Before running:** Runtime -> Change runtime type -> **T4 GPU**.\n"
        "\n"
-       "This notebook writes its own source files (cells below), builds with `nvcc`, "
-       "and runs. No uploads needed. Success ends with "
-       "`reads=5000 writes=5000 delta_applied=5000` — asserts fire on any drop."),
+       "This notebook writes its own source files (cells below), runs the CPU coverage "
+       "test, builds with `nvcc`, and runs. No uploads needed. Success ends with "
+       "`Scan result sum: 83886070 (oracle 83886070)` — asserts fire on any mismatch."),
     md("## 1. Confirm a GPU is attached"),
     code("!nvcc --version\n"
          "!nvidia-smi --query-gpu=name,memory.total --format=csv,noheader"),
