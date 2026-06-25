@@ -1,6 +1,7 @@
 #pragma once
 
 #include "memory_model.hpp"
+#include "tier_model.hpp"
 #include <cstddef>
 
 // Cost-based placement: predict microseconds for a workload on each processor, choose
@@ -33,6 +34,27 @@ public:
         // transfer term will go; UNIFIED stays 0. Deliberately inert until calibrated.
         const double transfer = mm_.is_unified() ? 0.0 : 0.0;
         return LAUNCH_US + transfer + static_cast<double>(bytes) / GPU_SCAN_BPus;
+    }
+
+    // Predicted scan time (us) for `bytes` resident in tier `s`. Uses each tier's measured
+    // bandwidth from tier_model. This generalizes host_scan_us/device_scan_us to all tiers
+    // (the existing two stay for the router's HOST/DEVICE fast path and back-compat).
+    double scan_us(MemorySpace s, size_t bytes) const {
+        const TierPhysics p = tier_physics(s);
+        const double launch = (s == MemorySpace::DEVICE) ? LAUNCH_US : 0.0;
+        return launch + static_cast<double>(bytes) / p.scan_bytes_per_us;
+    }
+
+    // Predicted one-time cost (us) to move `bytes` from tier `from` to tier `to`. Zero if
+    // same tier (no move) or if memory is unified (zero-copy). Otherwise bounded by the
+    // slower of read-from-source and write-to-dest bandwidth.
+    double migration_us(MemorySpace from, MemorySpace to, size_t bytes) const {
+        if (from == to) return 0.0;
+        if (mm_.is_unified()) return 0.0; // unified pool: placement is zero-copy
+        const double read_bw  = tier_physics(from).scan_bytes_per_us;
+        const double write_bw = tier_physics(to).scan_bytes_per_us;
+        const double slower = (read_bw < write_bw) ? read_bw : write_bw;
+        return static_cast<double>(bytes) / slower;
     }
 
 private:
