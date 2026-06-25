@@ -76,6 +76,17 @@ public:
         return std::chrono::duration<double>(t1 - t0).count();
     }
 
+    double benchmark_scan_u32(size_t n, uint32_t threshold, uint64_t& out_count) override {
+        std::vector<uint32_t> data(n);
+        for (size_t i = 0; i < n; ++i) data[i] = static_cast<uint32_t>(i);
+        const auto t0 = std::chrono::steady_clock::now();
+        uint64_t count = 0;
+        for (size_t i = 0; i < n; ++i) count += (data[i] > threshold);
+        const auto t1 = std::chrono::steady_clock::now();
+        out_count = count;
+        return std::chrono::duration<double>(t1 - t0).count();
+    }
+
 private:
     std::array<uint64_t, MATRIX_STORE_SLOTS> store_{}; // the Value column
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page

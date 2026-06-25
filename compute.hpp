@@ -36,6 +36,12 @@ public:
     // the opposite of the point-op path. Returns seconds; sets out_count.
     // out_count is deterministic (value[i]=i) so it must match across CPU and GPU.
     virtual double benchmark_scan(size_t n, uint64_t threshold, uint64_t& out_count) = 0;
+
+    // Same scan over a uint32 column. Scan is bandwidth-bound, so halving bytes/value
+    // should ~double values/sec at the same GB/s — the columnar "narrowest type" win.
+    // If GB/s holds vs the uint64 scan, we are at the bandwidth wall (vectorized loads
+    // won't help); if it drops, narrower loads underfill the bus and vectorizing is next.
+    virtual double benchmark_scan_u32(size_t n, uint32_t threshold, uint64_t& out_count) = 0;
 };
 
 // Which page owns a query's key. Single source of truth for both engines and the

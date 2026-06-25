@@ -76,6 +76,23 @@ __global__ void matrix_scan_kernel(const uint64_t* data, size_t n,
     if (threadIdx.x == 0) atomicAdd(count, block_count);
 }
 
+// uint32 column variant — half the bytes/value. Same grid-stride filter-count.
+__global__ void matrix_scan_kernel_u32(const uint32_t* data, size_t n,
+                                       uint32_t threshold, unsigned long long* count) {
+    __shared__ unsigned long long block_count;
+    if (threadIdx.x == 0) block_count = 0;
+    __syncthreads();
+
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        if (data[i] > threshold) ++local;
+    }
+    atomicAdd(&block_count, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(count, block_count);
+}
+
 /**
  * @brief Real CUDA GPU engine, page-ownership model. Device-resident store persists
  * across batches (it is the database). Same ComputeInterface + correctness contract
@@ -158,17 +175,35 @@ public:
     }
 
     double benchmark_scan(size_t n, uint64_t threshold, uint64_t& out_count) override {
-        // Data lives resident in VRAM; we never ship it per query. Fill via a small
-        // host buffer once (NOT timed) — the query is the scan over resident data.
-        uint64_t* d_data = nullptr;
+        return timed_scan<uint64_t>(n, threshold, out_count,
+            [](const uint64_t* d, size_t nn, uint64_t thr, unsigned long long* c,
+               int blocks, int tpb, cudaStream_t s) {
+                matrix_scan_kernel<<<blocks, tpb, 0, s>>>(d, nn, thr, c);
+            });
+    }
+
+    double benchmark_scan_u32(size_t n, uint32_t threshold, uint64_t& out_count) override {
+        return timed_scan<uint32_t>(n, threshold, out_count,
+            [](const uint32_t* d, size_t nn, uint32_t thr, unsigned long long* c,
+               int blocks, int tpb, cudaStream_t s) {
+                matrix_scan_kernel_u32<<<blocks, tpb, 0, s>>>(d, nn, thr, c);
+            });
+    }
+
+private:
+    // Shared scan harness: alloc resident column, fill (untimed), time kernel via CUDA
+    // events, return seconds. Templated on column type so u32/u64 share one code path.
+    template <typename T, typename Launch>
+    double timed_scan(size_t n, T threshold, uint64_t& out_count, Launch launch) {
+        T* d_data = nullptr;
         unsigned long long* d_count = nullptr;
-        CUDA_CHECK(cudaMalloc(&d_data, n * sizeof(uint64_t)));
+        CUDA_CHECK(cudaMalloc(&d_data, n * sizeof(T)));
         CUDA_CHECK(cudaMalloc(&d_count, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMemset(d_count, 0, sizeof(unsigned long long)));
         {
-            std::vector<uint64_t> h(n);
-            for (size_t i = 0; i < n; ++i) h[i] = i;
-            CUDA_CHECK(cudaMemcpy(d_data, h.data(), n * sizeof(uint64_t), cudaMemcpyHostToDevice));
+            std::vector<T> h(n);
+            for (size_t i = 0; i < n; ++i) h[i] = static_cast<T>(i);
+            CUDA_CHECK(cudaMemcpy(d_data, h.data(), n * sizeof(T), cudaMemcpyHostToDevice));
         }
 
         constexpr int TPB = 256;
@@ -177,7 +212,7 @@ public:
         CUDA_CHECK(cudaEventCreate(&start));
         CUDA_CHECK(cudaEventCreate(&stop));
         CUDA_CHECK(cudaEventRecord(start, stream_));
-        matrix_scan_kernel<<<blocks, TPB, 0, stream_>>>(d_data, n, threshold, d_count);
+        launch(d_data, n, threshold, d_count, blocks, TPB, stream_);
         CUDA_CHECK(cudaEventRecord(stop, stream_));
         CUDA_CHECK(cudaEventSynchronize(stop));
         float ms = 0.0f;
@@ -194,7 +229,6 @@ public:
         return ms / 1e3; // seconds
     }
 
-private:
     static uint64_t read_counter(const unsigned long long* d_ptr) {
         unsigned long long h = 0;
         CUDA_CHECK(cudaMemcpy(&h, d_ptr, sizeof(h), cudaMemcpyDeviceToHost));
