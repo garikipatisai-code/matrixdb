@@ -93,6 +93,29 @@ __global__ void matrix_scan_kernel_u32(const uint32_t* data, size_t n,
     if (threadIdx.x == 0) atomicAdd(count, block_count);
 }
 
+// Vectorized uint32 scan: each thread loads 4 values per instruction via uint4
+// (LDG.128 = 16 bytes/load). This is the standard memory-bound fix across DL/DB/HPC
+// kernels — more bytes in flight per thread => deeper memory-level parallelism =>
+// closer to peak DRAM bandwidth than the scalar 4-byte load. Requires n % 4 == 0 and
+// 16-byte-aligned data (cudaMalloc guarantees alignment; n is a power of two here).
+__global__ void matrix_scan_kernel_u32x4(const uint4* data4, size_t n4,
+                                         uint32_t threshold, unsigned long long* count) {
+    __shared__ unsigned long long block_count;
+    if (threadIdx.x == 0) block_count = 0;
+    __syncthreads();
+
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += stride) {
+        const uint4 v = data4[i]; // one 16-byte load -> 4 comparisons
+        local += (v.x > threshold) + (v.y > threshold)
+               + (v.z > threshold) + (v.w > threshold);
+    }
+    atomicAdd(&block_count, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(count, block_count);
+}
+
 /**
  * @brief Real CUDA GPU engine, page-ownership model. Device-resident store persists
  * across batches (it is the database). Same ComputeInterface + correctness contract
@@ -187,6 +210,17 @@ public:
             [](const uint32_t* d, size_t nn, uint32_t thr, unsigned long long* c,
                int blocks, int tpb, cudaStream_t s) {
                 matrix_scan_kernel_u32<<<blocks, tpb, 0, s>>>(d, nn, thr, c);
+            });
+    }
+
+    double benchmark_scan_u32x4(size_t n, uint32_t threshold, uint64_t& out_count) override {
+        // Same resident-column setup, but the kernel reads 4 u32 per uint4 load.
+        // n is a power of two (>= 65536) so n % 4 == 0; cudaMalloc is 256-byte aligned.
+        return timed_scan<uint32_t>(n, threshold, out_count,
+            [](const uint32_t* d, size_t nn, uint32_t thr, unsigned long long* c,
+               int blocks, int tpb, cudaStream_t s) {
+                const uint4* d4 = reinterpret_cast<const uint4*>(d);
+                matrix_scan_kernel_u32x4<<<blocks, tpb, 0, s>>>(d4, nn / 4, thr, c);
             });
     }
 

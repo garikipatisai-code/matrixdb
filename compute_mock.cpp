@@ -87,6 +87,13 @@ public:
         return std::chrono::duration<double>(t1 - t0).count();
     }
 
+    double benchmark_scan_u32x4(size_t n, uint32_t threshold, uint64_t& out_count) override {
+        // ponytail: uint4 vectorized loads are a GPU concept; the CPU compiler already
+        // auto-vectorizes the scalar loop, so this just delegates. Keeps the interface
+        // uniform without faking a "CPU vectorized" path.
+        return benchmark_scan_u32(n, threshold, out_count);
+    }
+
 private:
     std::array<uint64_t, MATRIX_STORE_SLOTS> store_{}; // the Value column
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page

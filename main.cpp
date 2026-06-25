@@ -160,17 +160,19 @@ void scan_benchmark(ComputeInterface& engine) {
     std::cout << "--- Scan benchmark (filter-count over resident data) ---" << std::endl;
     for (size_t n : sizes) {
         const uint64_t threshold = n / 2;
-        uint64_t c64 = 0, c32 = 0;
+        uint64_t c64 = 0, c32 = 0, c32x4 = 0;
         const double s64 = engine.benchmark_scan(n, threshold, c64);
         const double s32 = engine.benchmark_scan_u32(n, static_cast<uint32_t>(threshold), c32);
+        const double s32x4 = engine.benchmark_scan_u32x4(n, static_cast<uint32_t>(threshold), c32x4);
         // value[i]=i, so count of i>threshold == n-1-threshold (oracle).
         assert(c64 == n - 1 - threshold && "u64 scan produced wrong count");
         assert(c32 == n - 1 - threshold && "u32 scan produced wrong count");
+        assert(c32x4 == n - 1 - threshold && "u32x4 vectorized scan produced wrong count");
         std::cout << "  n=" << n
                   << "\tu64 " << (n * sizeof(uint64_t)) / 1e9 / s64 << " GB/s"
-                  << " " << static_cast<uint64_t>(n / s64 / 1e6) << "M vals/s"
                   << "\tu32 " << (n * sizeof(uint32_t)) / 1e9 / s32 << " GB/s"
-                  << " " << static_cast<uint64_t>(n / s32 / 1e6) << "M vals/s"
+                  << "\tu32x4 " << (n * sizeof(uint32_t)) / 1e9 / s32x4 << " GB/s"
+                  << " (" << static_cast<uint64_t>(n / s32x4 / 1e6) << "M vals/s)"
                   << std::endl;
     }
 }

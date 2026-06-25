@@ -42,6 +42,12 @@ public:
     // If GB/s holds vs the uint64 scan, we are at the bandwidth wall (vectorized loads
     // won't help); if it drops, narrower loads underfill the bus and vectorizing is next.
     virtual double benchmark_scan_u32(size_t n, uint32_t threshold, uint64_t& out_count) = 0;
+
+    // Vectorized uint32 scan (4 values per load via uint4). Tests the memory-level
+    // parallelism theory: if this beats the scalar u32 GB/s, narrow scalar loads were
+    // underfilling the bus (MLP-bound) and wider loads are the fix. If it doesn't, the
+    // kernel is ALU-bound and we stop optimizing. CPU may treat this same as scalar.
+    virtual double benchmark_scan_u32x4(size_t n, uint32_t threshold, uint64_t& out_count) = 0;
 };
 
 // Which page owns a query's key. Single source of truth for both engines and the
