@@ -65,6 +65,50 @@ int main() {
         assert(tm2.tier_of(2) == MemorySpace::COLD && "cold column stays put");
     }
 
+    // --- Task 4: capacity eviction (cost-benefit, not pure LRU) + anti-thrash ---
+    {
+        const size_t COL = 64u*1024*1024;
+        // DEVICE capacity holds ONE column, but BOTH start resident on DEVICE (e.g. loaded
+        // hot). Col 1 is kept hot; col 2 goes cold. Eviction must demote the cold one so
+        // DEVICE fits its capacity — and keep the hot one (cost-benefit, not pure LRU).
+        TierManager tm(make_cm(), /*device_cap*/ COL, /*host_cap*/ 1u<<30);
+        tm.register_column(1, COL, MemorySpace::DEVICE); // hot — must stay
+        tm.register_column(2, COL, MemorySpace::DEVICE); // cold — must be evicted
+
+        for (int r = 0; r < 3; ++r) {
+            for (int i = 0; i < 50; ++i) tm.record_access(1, COL); // col 1 very hot
+            // col 2 gets no accesses → cold → lowest keep_score → the eviction victim
+            tm.rebalance();
+        }
+        assert(tm.tier_of(1) == MemorySpace::DEVICE && "hot column kept on scarce DEVICE");
+        assert(tm.tier_of(2) != MemorySpace::DEVICE && "cold column evicted from full DEVICE");
+        assert(tm.resident_bytes(MemorySpace::DEVICE) <= COL && "DEVICE never over capacity");
+    }
+    {
+        // Anti-thrash: a column promoted then idle is not evicted within MIN_RESIDENCY_TICKS.
+        const size_t COL = 8u*1024*1024;
+        TierManager tm(make_cm(), 1u<<30, 1u<<30);
+        tm.register_column(1, COL, MemorySpace::HOST);
+        for (int i = 0; i < 50; ++i) tm.record_access(1, COL);
+        tm.rebalance(); // promote to DEVICE
+        const MemorySpace after_promote = tm.tier_of(1);
+        tm.rebalance(); // idle round — must not immediately demote (min residency)
+        if (after_promote == MemorySpace::DEVICE)
+            assert(tm.tier_of(1) == MemorySpace::DEVICE && "no thrash within min-residency");
+    }
+    {
+        // Anti-thrash: a column promoted then idle is not evicted within MIN_RESIDENCY_TICKS.
+        const size_t COL = 8u*1024*1024;
+        TierManager tm(make_cm(), 1u<<30, 1u<<30);
+        tm.register_column(1, COL, MemorySpace::HOST);
+        for (int i = 0; i < 50; ++i) tm.record_access(1, COL);
+        tm.rebalance(); // promote to DEVICE
+        const MemorySpace after_promote = tm.tier_of(1);
+        tm.rebalance(); // idle round — must not immediately demote (min residency)
+        if (after_promote == MemorySpace::DEVICE)
+            assert(tm.tier_of(1) == MemorySpace::DEVICE && "no thrash within min-residency");
+    }
+
     std::printf("PASS: tier manager decisions correct\n");
     return 0;
 }

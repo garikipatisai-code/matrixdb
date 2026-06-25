@@ -64,6 +64,32 @@ public:
             }
         }
 
+        // Capacity eviction: for each bounded tier over capacity, demote the lowest
+        // keep_score residents (cost-benefit, not pure LRU) until it fits. Respect
+        // MIN_RESIDENCY_TICKS so a freshly-arrived column isn't immediately thrashed out.
+        for (MemorySpace tier : {MemorySpace::DEVICE, MemorySpace::HOST}) {
+            const size_t cap = capacity_of(tier);
+            if (cap == 0) continue;
+            for (;;) {
+                if (resident_bytes(tier) <= cap) break;
+                Column* victim = nullptr;
+                double worst = 1e301;
+                for (auto& kv : cols_) {
+                    Column& c = kv.second;
+                    if (c.tier != tier) continue;
+                    if (tick_ - c.arrived_tick < MIN_RESIDENCY_TICKS) continue; // anti-thrash
+                    const double s = keep_score(c);
+                    if (s < worst) { worst = s; victim = &c; }
+                }
+                if (!victim) break; // nothing evictable (all within min residency) this pass
+                const MemorySpace from = victim->tier;
+                const MemorySpace to = slower_tier(from);
+                decisions.push_back(MigrationDecision{victim->id, from, to});
+                victim->tier = to;
+                victim->arrived_tick = tick_;
+            }
+        }
+
         return decisions;
     }
 
@@ -110,6 +136,29 @@ private:
                                * static_cast<double>(est_future_scans(c));
         const double cost = cm_.migration_us(c.tier, faster, c.bytes);
         return benefit > HYSTERESIS * cost;
+    }
+
+    static MemorySpace slower_tier(MemorySpace t) {
+        if (t == MemorySpace::DEVICE) return MemorySpace::HOST;
+        if (t == MemorySpace::HOST) return MemorySpace::COLD;
+        return t; // COLD already slowest
+    }
+
+    // Usable capacity of a tier; 0 means unbounded (COLD/SSD).
+    size_t capacity_of(MemorySpace t) const {
+        if (t == MemorySpace::DEVICE) return device_cap_;
+        if (t == MemorySpace::HOST)   return host_cap_;
+        return 0; // COLD unbounded
+    }
+
+    // Cost-benefit score of keeping a column on its tier (higher = more worth keeping).
+    // Lower-scored residents are evicted first when a tier is over capacity.
+    double keep_score(const Column& c) const {
+        const MemorySpace slower = slower_tier(c.tier);
+        if (slower == c.tier) return 1e300; // COLD: never "evict" further (infinite keep)
+        const double penalty = (cm_.scan_us(slower, c.bytes) - cm_.scan_us(c.tier, c.bytes))
+                               * static_cast<double>(est_future_scans(c));
+        return penalty; // time/heat that would be lost by demoting
     }
 
     CostModel cm_;
