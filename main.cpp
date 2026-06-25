@@ -61,8 +61,59 @@ inline void pin_to_performance_core() {
 #endif
 }
 
+/**
+ * @brief Raw SPSC handoff latency via ping-pong: the producer pushes exactly one
+ * item, waits until the consumer has popped it, then pushes the next. This isolates
+ * the pure enqueue->dequeue cost — the spec's "sub-microsecond" claim — with zero
+ * queue backlog, unlike the pipeline's queue-residency number which is dominated by
+ * burst backlog. Backend-independent: measures only the ring buffer.
+ */
+void measure_handoff_latency() {
+    constexpr size_t WARMUP = 1000;   // discard cold-cache / thread-migration samples
+    constexpr size_t SAMPLES = 100000;
+    auto ring = std::make_unique<SPSCRingBuffer<DatabaseQuery, 4096>>();
+    std::atomic<bool> running{true};
+    std::vector<uint64_t> samples;
+    samples.reserve(SAMPLES);
+
+    // Consumer pops and timestamps; it is the sole writer of `samples` (joined before read).
+    std::thread consumer([&]() {
+        pin_to_performance_core();
+        DatabaseQuery v;
+        while (running.load(std::memory_order_relaxed)) {
+            if (ring->try_pop(v)) {
+                const uint64_t now_ns = static_cast<uint64_t>(
+                    std::chrono::steady_clock::now().time_since_epoch().count());
+                if (v.query_id >= WARMUP) {
+                    samples.push_back(now_ns - v.timestamp_us);
+                }
+            }
+        }
+    });
+
+    for (size_t i = 0; i < WARMUP + SAMPLES; ++i) {
+        DatabaseQuery q{};
+        q.query_id = i;
+        q.timestamp_us = static_cast<uint64_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count());
+        while (!ring->try_emplace(q)) spin_stall();
+        while (!ring->empty()) spin_stall(); // wait for consumer to take it (ping-pong)
+    }
+    running.store(false);
+    consumer.join();
+
+    std::sort(samples.begin(), samples.end());
+    const auto pct = [&](double p) { return samples[static_cast<size_t>(p * (samples.size() - 1))]; };
+    std::cout << "Raw SPSC handoff (ns)    "
+              << "p50=" << pct(0.50) << "  p99=" << pct(0.99)
+              << "  p99.9=" << pct(0.999) << "  max=" << samples.back() << std::endl;
+}
+
 int main() {
     std::cout << "MatrixDB Bare-Metal Engine Booting..." << std::endl;
+
+    // Microbenchmark first: pure ring handoff, before the pipeline saturates anything.
+    measure_handoff_latency();
 
     constexpr size_t BATCH_SIZE_LIMIT = 512;
     constexpr uint64_t TEMPORAL_LIMIT_US = 50;
@@ -124,6 +175,7 @@ int main() {
     });
 
     // Simulate query production on a separate thread
+    auto pipeline_start = std::chrono::steady_clock::now();
     std::thread producer([&]() {
         for (size_t i = 0; i < TOTAL_QUERIES; ++i) {
             // Stamp ingestion time (steady_clock ns) so the consumer can measure queue residency.
@@ -140,13 +192,21 @@ int main() {
 
     producer.join();
 
-    // Allow the queue to drain before stopping
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // Wait until every produced query has been processed, then stamp the drain time.
+    // Replaces an arbitrary fixed sleep so throughput reflects real drain, not slack.
+    while (total_processed.load(std::memory_order_relaxed) < TOTAL_QUERIES) {
+        spin_stall();
+    }
+    auto pipeline_end = std::chrono::steady_clock::now();
     run_state.store(false);
 
     if (consumer.joinable()) {
         consumer.join();
     }
+
+    const double elapsed_s =
+        std::chrono::duration<double>(pipeline_end - pipeline_start).count();
+    const double throughput = TOTAL_QUERIES / elapsed_s;
 
     const size_t processed = total_processed.load();
     std::cout << "Processed " << processed << " / " << TOTAL_QUERIES << " queries." << std::endl;
@@ -161,14 +221,21 @@ int main() {
     assert(reads + writes == processed && "opcode dispatch missed queries");
     assert(applied == writes && "delta log reconcile dropped mutations");
 
-    // Report SPSC queue-residency latency distribution (the spec's core thesis).
+    // Report end-to-end pipeline throughput (the payoff of batched GPU execution).
+    std::cout << "Throughput: " << static_cast<uint64_t>(throughput)
+              << " ops/sec (" << TOTAL_QUERIES << " queries in "
+              << elapsed_s * 1e3 << " ms)" << std::endl;
+
+    // Queue residency under burst: time each query waits in the ring before it is
+    // batched. Dominated by backlog (producer outruns the single consumer), so this
+    // is NOT the raw handoff cost reported above — it is the saturated-pipeline view.
     if (!latencies_ns.empty()) {
         std::sort(latencies_ns.begin(), latencies_ns.end());
         const auto pct = [&](double p) {
             const size_t idx = static_cast<size_t>(p * (latencies_ns.size() - 1));
             return latencies_ns[idx];
         };
-        std::cout << "SPSC queue latency (ns)  "
+        std::cout << "Queue residency (ns)     "
                   << "p50=" << pct(0.50) << "  "
                   << "p99=" << pct(0.99) << "  "
                   << "p99.9=" << pct(0.999) << "  "
