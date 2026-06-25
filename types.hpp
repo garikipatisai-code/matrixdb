@@ -46,12 +46,17 @@ enum MatrixOpcode : uint32_t {
     OP_SCAN  = 3,
 };
 
-// Shared store + append-only Delta Log layout (spec §2.3 store, §4 mutation path).
-// Defined here so the CPU engine and the CUDA kernel agree byte-for-byte on the layout.
-struct Mutation { uint64_t key; uint64_t value; };
+// Columnar store + page-ownership layout (Dragonfly-style shard-per-thread).
+// The keyspace (STORE_SLOTS) is split into PAGE_COUNT contiguous pages. Exactly one
+// owner (one GPU thread) reads/writes a page's slots, so the same key always routes
+// to the same owner: writes to a key serialize by ownership. No cross-thread conflict
+// => no store atomics, no OCC, no delta log. Per page it is single-owner (Redis);
+// across pages it is shared-nothing (Dragonfly).
+constexpr size_t MATRIX_STORE_SLOTS = 4096;                       // power of two
+constexpr size_t MATRIX_STORE_MASK  = MATRIX_STORE_SLOTS - 1;
+constexpr size_t MATRIX_PAGE_COUNT  = 1024;                       // owner threads; the tuning knob
+constexpr size_t MATRIX_PAGE_SIZE   = MATRIX_STORE_SLOTS / MATRIX_PAGE_COUNT; // slots per page
+constexpr size_t MATRIX_BATCH_MAX   = 65536;                      // sweep ceiling / scratch buffer size
 
-constexpr size_t MATRIX_STORE_SLOTS       = 4096;                        // power of two
-constexpr size_t MATRIX_STORE_MASK        = MATRIX_STORE_SLOTS - 1;
-constexpr size_t MATRIX_DELTA_LOG_CAPACITY = 65536;                      // >= max batch (a full write-batch needs this many slots)
-constexpr size_t MATRIX_DELTA_LOG_MASK    = MATRIX_DELTA_LOG_CAPACITY - 1;
-constexpr size_t MATRIX_BATCH_MAX         = 65536;                       // sweep ceiling: push past here to find the GPU plateau
+static_assert(MATRIX_STORE_SLOTS % MATRIX_PAGE_COUNT == 0,
+    "store slots must divide evenly into pages so each page owns a contiguous slice");

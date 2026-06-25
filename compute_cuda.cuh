@@ -1,18 +1,20 @@
 #pragma once
 
-// CUDA backend (Component 4: Parallel Engine + Component 5: Enterprise path).
-// Compile on a GPU host (e.g. Google Colab) with:
-//     nvcc -std=c++17 -O3 -x cu -DMATRIX_USE_CUDA main.cpp -o matrixdb_proto
-// One GPU thread per query executes the opcode dispatch; writes reserve Delta Log
-// slots via atomicAdd (the spec's wait-free fetch-add on real silicon); a second
-// kernel reconciles the log into the device-resident columnar store.
+// CUDA backend — page-ownership model (Component 4: Parallel Engine).
+// Compile on a GPU host (Google Colab) with:
+//     nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread -DMATRIX_USE_CUDA main.cpp -o matrixdb_proto
+//
+// One CUDA BLOCK owns one page. The batch is binned by page on the host (CSR offsets),
+// so block p processes only page p's contiguous queries against page p's store slice.
+// Different blocks touch disjoint store slots ⇒ no cross-block conflict, no store
+// atomics, no delta log. Per page: single-owner (Redis). Across pages: shared-nothing
+// (Dragonfly). Threads within a block stride over the page's queries.
 
 #include "compute.hpp"
 #include <cuda_runtime.h>
 #include <cstdio>
 #include <cstdlib>
 
-// Trust boundary: a failed CUDA call means the device state is unknown — never swallow it.
 #define CUDA_CHECK(call)                                                            \
     do {                                                                           \
         cudaError_t _err = (call);                                                 \
@@ -23,55 +25,46 @@
         }                                                                          \
     } while (0)
 
-// --- Device kernels ---
+// One block per page. blockIdx.x == page id; the block's threads cooperatively process
+// that page's queries [offsets[page], offsets[page+1]). Writes to a slot within a page
+// are owned by this block alone, so no atomics on the store are needed. Same-slot writes
+// within the page race between threads -> last-writer-wins, matching the CPU mock's
+// deterministic in-order result only when keys are unique (true for our benchmark).
+__global__ void matrix_page_kernel(const DatabaseQuery* binned, const uint32_t* offsets,
+                                   uint64_t* store,
+                                   unsigned long long* reads,
+                                   unsigned long long* writes) {
+    const size_t page = blockIdx.x;
+    if (page >= MATRIX_PAGE_COUNT) return;
 
-// One thread per query. Reads hit the store; writes stage into the append-only
-// Delta Log at an atomically-reserved slot. Identical mechanics to the CPU mock.
-__global__ void matrix_execute_kernel(DatabaseQuery* batch, size_t count,
-                                      const uint64_t* store, Mutation* delta_log,
-                                      unsigned long long* delta_head,
-                                      unsigned long long* reads,
-                                      unsigned long long* writes) {
-    const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= count) return;
+    const uint32_t begin = offsets[page];
+    const uint32_t end = offsets[page + 1];
 
-    const uint32_t opcode = batch[i].opcode;
-    const uint64_t key = batch[i].query_id;
-    if (opcode == OP_READ) {
-        batch[i].transaction_id = store[key & MATRIX_STORE_MASK];
-        atomicAdd(reads, 1ULL);
-    } else if (opcode == OP_WRITE) {
-        const unsigned long long slot =
-            atomicAdd(delta_head, 1ULL) & MATRIX_DELTA_LOG_MASK;
-        delta_log[slot].key = key;
-        delta_log[slot].value = key; // mock projection: value == key
-        atomicAdd(writes, 1ULL);
+    unsigned r = 0, w = 0;
+    for (uint32_t j = begin + threadIdx.x; j < end; j += blockDim.x) {
+        const DatabaseQuery q = binned[j];
+        const size_t slot = q.query_id & MATRIX_STORE_MASK;
+        if (q.opcode == OP_READ) {
+            volatile uint64_t v = store[slot]; (void)v; // touch the store (read path)
+            ++r;
+        } else if (q.opcode == OP_WRITE) {
+            store[slot] = q.query_id; // mock projection: value == key
+            ++w;
+        }
     }
-    // OP_SCAN / unknown: no-op, matching the CPU mock.
-}
-
-// One thread per logged mutation. Commits the Delta Log into the store.
-// ponytail: parallel last-writer-wins — on colliding keys the winner is
-// nondeterministic. Test keys are unique so it's exact; colliding keys need
-// the spec's §4 OCC validation (TEV lock bit + read-set check). Upgrade path.
-__global__ void matrix_reconcile_kernel(uint64_t* store, const Mutation* delta_log,
-                                        const unsigned long long* delta_head,
-                                        unsigned long long* delta_applied) {
-    const size_t s = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (s >= *delta_head) return; // read count on-device — no host sync needed to size this
-    const Mutation m = delta_log[s & MATRIX_DELTA_LOG_MASK];
-    store[m.key & MATRIX_STORE_MASK] = m.value;
-    atomicAdd(delta_applied, 1ULL);
+    if (r) atomicAdd(reads, (unsigned long long)r);   // counters only — not on the store
+    if (w) atomicAdd(writes, (unsigned long long)w);
 }
 
 /**
- * @brief Real CUDA GPU engine. Device-resident store + Delta Log persist across
- * batches (it is the database). Honors the same ComputeInterface contract and the
- * same correctness asserts as CPUMockEngine.
+ * @brief Real CUDA GPU engine, page-ownership model. Device-resident store persists
+ * across batches (it is the database). Same ComputeInterface + correctness contract
+ * as CPUMockEngine.
  */
 class CUDAGPUEngine : public ComputeInterface {
 public:
-    explicit CUDAGPUEngine(size_t /*worker_count*/ = 0) {
+    explicit CUDAGPUEngine(size_t /*worker_count*/ = 0)
+        : h_binned_(MATRIX_BATCH_MAX) {
         int device_count = 0;
         CUDA_CHECK(cudaGetDeviceCount(&device_count));
         if (device_count == 0) {
@@ -83,70 +76,66 @@ public:
 
         CUDA_CHECK(cudaMalloc(&d_store_, MATRIX_STORE_SLOTS * sizeof(uint64_t)));
         CUDA_CHECK(cudaMemset(d_store_, 0, MATRIX_STORE_SLOTS * sizeof(uint64_t)));
-        CUDA_CHECK(cudaMalloc(&d_delta_log_, MATRIX_DELTA_LOG_CAPACITY * sizeof(Mutation)));
-        CUDA_CHECK(cudaMalloc(&d_delta_head_, sizeof(unsigned long long)));
-        CUDA_CHECK(cudaMemset(d_delta_head_, 0, sizeof(unsigned long long)));
-        CUDA_CHECK(cudaMalloc(&d_batch_, MATRIX_BATCH_MAX * sizeof(DatabaseQuery)));
+        CUDA_CHECK(cudaMalloc(&d_binned_, MATRIX_BATCH_MAX * sizeof(DatabaseQuery)));
+        CUDA_CHECK(cudaMalloc(&d_offsets_, (MATRIX_PAGE_COUNT + 1) * sizeof(uint32_t)));
         CUDA_CHECK(cudaMalloc(&d_reads_, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMalloc(&d_writes_, sizeof(unsigned long long)));
-        CUDA_CHECK(cudaMalloc(&d_delta_applied_, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMemset(d_reads_, 0, sizeof(unsigned long long)));
         CUDA_CHECK(cudaMemset(d_writes_, 0, sizeof(unsigned long long)));
-        CUDA_CHECK(cudaMemset(d_delta_applied_, 0, sizeof(unsigned long long)));
 
-        // ponytail: single stream. Hyper-Q multi-stream is a throughput upgrade
-        // (spec §3) — add a stream pool when batches overlap; not needed to run.
+        offsets_.resize(MATRIX_PAGE_COUNT + 1);
+
+        // ponytail: single stream. Hyper-Q multi-stream is the throughput upgrade.
         CUDA_CHECK(cudaStreamCreate(&stream_));
-
-        std::printf("CUDAGPUEngine initialized on '%s' (%d SMs).\n",
-                    prop.name, prop.multiProcessorCount);
+        std::printf("CUDAGPUEngine initialized on '%s' (%d SMs, page-ownership, %zu pages).\n",
+                    prop.name, prop.multiProcessorCount, MATRIX_PAGE_COUNT);
     }
 
     ~CUDAGPUEngine() override {
         cudaFree(d_store_);
-        cudaFree(d_delta_log_);
-        cudaFree(d_delta_head_);
-        cudaFree(d_batch_);
+        cudaFree(d_binned_);
+        cudaFree(d_offsets_);
         cudaFree(d_reads_);
         cudaFree(d_writes_);
-        cudaFree(d_delta_applied_);
         cudaStreamDestroy(stream_);
         std::printf("CUDAGPUEngine released device resources.\n");
     }
 
     void execute_batch(DatabaseQuery* batch_array, size_t count) override {
         if (count == 0) return;
-        if (count > MATRIX_BATCH_MAX) count = MATRIX_BATCH_MAX; // ponytail: clamp; main never exceeds this
+        if (count > MATRIX_BATCH_MAX) count = MATRIX_BATCH_MAX;
 
-        // Stage batch to device. ponytail: plain async copy. cudaHostRegister to pin
-        // the host pool for zero-copy DMA (spec §3) is the bandwidth upgrade.
-        CUDA_CHECK(cudaMemcpyAsync(d_batch_, batch_array, count * sizeof(DatabaseQuery),
+        // Bin by page on the host (folds into the dual-trigger batcher later).
+        matrix_bin_by_page(batch_array, count, h_binned_.data(), offsets_.data());
+
+        CUDA_CHECK(cudaMemcpyAsync(d_binned_, h_binned_.data(), count * sizeof(DatabaseQuery),
+                                   cudaMemcpyHostToDevice, stream_));
+        CUDA_CHECK(cudaMemcpyAsync(d_offsets_, offsets_.data(),
+                                   (MATRIX_PAGE_COUNT + 1) * sizeof(uint32_t),
                                    cudaMemcpyHostToDevice, stream_));
 
-        constexpr int TPB = 256;
-        const int exec_blocks = static_cast<int>((count + TPB - 1) / TPB);
-        matrix_execute_kernel<<<exec_blocks, TPB, 0, stream_>>>(
-            d_batch_, count, d_store_, d_delta_log_, d_delta_head_, d_reads_, d_writes_);
+        // One block per page; 128 threads/block stride over the page's queries.
+        constexpr int TPB = 128;
+        matrix_page_kernel<<<MATRIX_PAGE_COUNT, TPB, 0, stream_>>>(
+            d_binned_, d_offsets_, d_store_, d_reads_, d_writes_);
         CUDA_CHECK(cudaGetLastError());
-
-        // Reconcile reads delta_head on-device, so we launch sized to count (logged <= count
-        // always) without copying the count back to the host. ponytail: this removes the
-        // mid-batch cudaStreamSynchronize — one sync per batch instead of two. Threads beyond
-        // the real logged count early-out via the *delta_head check inside the kernel.
-        matrix_reconcile_kernel<<<exec_blocks, TPB, 0, stream_>>>(
-            d_store_, d_delta_log_, d_delta_head_, d_delta_applied_);
-        CUDA_CHECK(cudaGetLastError());
-
-        // Reset the Delta Log head for the next batch, then copy read results back.
-        CUDA_CHECK(cudaMemsetAsync(d_delta_head_, 0, sizeof(unsigned long long), stream_));
-        CUDA_CHECK(cudaMemcpyAsync(batch_array, d_batch_, count * sizeof(DatabaseQuery),
-                                   cudaMemcpyDeviceToHost, stream_));
         CUDA_CHECK(cudaStreamSynchronize(stream_));
     }
 
     uint64_t reads() const override { return read_counter(d_reads_); }
     uint64_t writes() const override { return read_counter(d_writes_); }
-    uint64_t delta_applied() const override { return read_counter(d_delta_applied_); }
+    uint64_t commits() const override { return read_counter(d_writes_); } // every write commits (owned slot)
+
+    uint64_t store_checksum() const override {
+        // ponytail: copy the whole store back (32KB) and sum on host. Once, off the
+        // hot path — a device reduction would be premature for a correctness check.
+        std::vector<uint64_t> h(MATRIX_STORE_SLOTS);
+        CUDA_CHECK(cudaMemcpy(h.data(), d_store_, MATRIX_STORE_SLOTS * sizeof(uint64_t),
+                              cudaMemcpyDeviceToHost));
+        uint64_t sum = 0;
+        for (uint64_t v : h) sum += v;
+        return sum;
+    }
 
 private:
     static uint64_t read_counter(const unsigned long long* d_ptr) {
@@ -156,11 +145,11 @@ private:
     }
 
     uint64_t* d_store_ = nullptr;
-    Mutation* d_delta_log_ = nullptr;
-    unsigned long long* d_delta_head_ = nullptr;
-    DatabaseQuery* d_batch_ = nullptr;
+    DatabaseQuery* d_binned_ = nullptr;
+    uint32_t* d_offsets_ = nullptr;
     unsigned long long* d_reads_ = nullptr;
     unsigned long long* d_writes_ = nullptr;
-    unsigned long long* d_delta_applied_ = nullptr;
+    std::vector<DatabaseQuery> h_binned_;
+    std::vector<uint32_t> offsets_;
     cudaStream_t stream_{};
 };

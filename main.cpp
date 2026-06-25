@@ -222,7 +222,7 @@ int main() {
     // only the pipeline's 10k queries, not the sweep's traffic.
     const uint64_t reads_base = mock_engine->reads();
     const uint64_t writes_base = mock_engine->writes();
-    const uint64_t applied_base = mock_engine->delta_applied();
+    const uint64_t applied_base = mock_engine->commits();
 
     // Simulate query production on a separate thread
     auto pipeline_start = std::chrono::steady_clock::now();
@@ -266,11 +266,13 @@ int main() {
     // Deltas since the pre-pipeline snapshot isolate the pipeline from the sweep.
     const uint64_t reads = mock_engine->reads() - reads_base;
     const uint64_t writes = mock_engine->writes() - writes_base;
-    const uint64_t applied = mock_engine->delta_applied() - applied_base;
+    const uint64_t applied = mock_engine->commits() - applied_base;
     std::cout << "Engine: reads=" << reads << " writes=" << writes
-              << " delta_applied=" << applied << std::endl;
+              << " commits=" << applied << std::endl;
+    std::cout << "Store checksum: " << mock_engine->store_checksum()
+              << " (must match across CPU and GPU backends)" << std::endl;
     assert(reads + writes == processed && "opcode dispatch missed queries");
-    assert(applied == writes && "delta log reconcile dropped mutations");
+    assert(applied == writes && "page-ownership commit dropped mutations");
 
     // Report end-to-end pipeline throughput (the payoff of batched GPU execution).
     std::cout << "Throughput: " << static_cast<uint64_t>(throughput)

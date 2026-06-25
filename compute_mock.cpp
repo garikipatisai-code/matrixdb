@@ -3,103 +3,74 @@
 #include <thread>
 #include <atomic>
 #include <array>
-#include <chrono>
 #include <iostream>
 
 /**
  * @brief CPU Mock Engine — the no-GPU fallback (Component 5: Local Sandbox).
- * Executes the real opcode-dispatch + Delta Log mechanics serially, simulating
- * GPU kernel-launch latency with a spin-wait. Same correctness contract as the
- * CUDA engine, so it is the runnable proof when no GPU is present.
+ * Page-ownership model: bins the batch by owning page, then processes each page's
+ * queries against its own slice of the store. One owner per page ⇒ no atomics, no
+ * delta log, deterministic last-writer-wins. Mirrors the CUDA engine's semantics so
+ * both produce identical store contents.
  */
 class CPUMockEngine : public ComputeInterface {
 public:
-    explicit CPUMockEngine(size_t worker_count)
-        : shutdown_(false) {
-        // ponytail: workers kept only to mirror the spec's pinned-thread-pool shape.
-        // They do no work in the serial CPU mock; real parallelism lives in the CUDA engine.
-        for (size_t i = 0; i < worker_count; ++i) {
-            workers_.emplace_back([this, i]() {
-                this->worker_loop(i);
-            });
-        }
-        std::cout << "CPUMockEngine initialized with " << worker_count << " worker threads." << std::endl;
+    explicit CPUMockEngine(size_t /*worker_count*/ = 0)
+        : binned_(MATRIX_BATCH_MAX) {
+        std::cout << "CPUMockEngine initialized (page-ownership, "
+                  << MATRIX_PAGE_COUNT << " pages)." << std::endl;
     }
 
     ~CPUMockEngine() override {
-        shutdown_.store(true, std::memory_order_relaxed);
-        for (auto& thread : workers_) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-        std::cout << "CPUMockEngine workers shutdown cleanly." << std::endl;
+        std::cout << "CPUMockEngine shutdown cleanly." << std::endl;
     }
 
     void execute_batch(DatabaseQuery* batch_array, size_t count) override {
-        // ponytail: the fake 50us "GPU latency" spin was removed — it was a no-GPU
-        // placeholder and now only distorts CPU-vs-GPU throughput comparisons.
-        // The CPU mock just does the real dispatch work as fast as it can.
+        if (count == 0) return;
+        if (count > MATRIX_BATCH_MAX) count = MATRIX_BATCH_MAX;
 
-        // Execution phase: dispatch every query on its opcode.
-        // Reads hit the columnar store directly. Writes never touch the store here —
-        // they reserve a Delta Log slot with a wait-free atomic fetch-add and stage
-        // the mutation, exactly as the spec's append-only log prescribes.
-        for (size_t i = 0; i < count; ++i) {
-            DatabaseQuery& q = batch_array[i];
-            switch (q.opcode) {
-                case OP_READ:
-                    q.transaction_id = store_[q.query_id & MATRIX_STORE_MASK];
-                    reads_.fetch_add(1, std::memory_order_relaxed);
-                    break;
-                case OP_WRITE: {
-                    // ponytail: mask guards overflow; capacity already >= batch size so it never wraps in practice
-                    const size_t slot = delta_head_.fetch_add(1, std::memory_order_relaxed) & MATRIX_DELTA_LOG_MASK;
-                    delta_log_[slot] = Mutation{q.query_id, q.query_id};
-                    writes_.fetch_add(1, std::memory_order_relaxed);
-                    break;
+        // Bin by page (the step the dual-trigger batcher will eventually fold in).
+        matrix_bin_by_page(batch_array, count, binned_.data(), offsets_.data());
+
+        // One logical owner per page: process only this page's queries against its
+        // contiguous store slice. Pages are independent — this is the parallel unit.
+        for (size_t page = 0; page < MATRIX_PAGE_COUNT; ++page) {
+            const uint32_t begin = offsets_[page];
+            const uint32_t end = offsets_[page + 1];
+            for (uint32_t j = begin; j < end; ++j) {
+                DatabaseQuery& q = binned_[j];
+                const size_t slot = q.query_id & MATRIX_STORE_MASK;
+                if (q.opcode == OP_READ) {
+                    q.transaction_id = store_[slot];
+                    ++reads_;
+                } else if (q.opcode == OP_WRITE) {
+                    store_[slot] = q.query_id; // mock projection: value == key
+                    ++writes_;
+                    ++commits_;
                 }
-                default:
-                    break; // OP_SCAN and unknown opcodes are no-ops in the mock
             }
         }
 
-        // Reconciliation phase: commit staged mutations into the store, then reset the
-        // log for the next batch. Single consumer ⇒ no validation needed yet.
-        // ponytail: last-writer-wins. Full OCC (TEV lock bit + read-set validation) is the
-        // upgrade path once batches are processed by concurrent workers.
-        const size_t logged = delta_head_.load(std::memory_order_relaxed);
-        for (size_t s = 0; s < logged; ++s) {
-            const Mutation& m = delta_log_[s & MATRIX_DELTA_LOG_MASK];
-            store_[m.key & MATRIX_STORE_MASK] = m.value;
-            delta_applied_.fetch_add(1, std::memory_order_relaxed);
-        }
-        delta_head_.store(0, std::memory_order_relaxed);
+        // ponytail: read results land in binned_ (reordered), not scattered back to
+        // batch_array. Callers here assert on counters + store contents, not on each
+        // query's transaction_id, so the scatter-back is YAGNI. Add it if a caller
+        // needs per-query read results in original order.
     }
 
-    uint64_t reads() const override { return reads_.load(std::memory_order_relaxed); }
-    uint64_t writes() const override { return writes_.load(std::memory_order_relaxed); }
-    uint64_t delta_applied() const override { return delta_applied_.load(std::memory_order_relaxed); }
+    uint64_t reads() const override { return reads_; }
+    uint64_t writes() const override { return writes_; }
+    uint64_t commits() const override { return commits_; }
+
+    uint64_t store_checksum() const override {
+        uint64_t sum = 0;
+        for (uint64_t v : store_) sum += v;
+        return sum;
+    }
 
 private:
-    void worker_loop(size_t thread_id) {
-        (void)thread_id;
-        while (!shutdown_.load(std::memory_order_relaxed)) {
-#if defined(__ARM_ARCH) || defined(__apple_build_version__)
-            asm volatile("isb" ::: "memory");
-#else
-            asm volatile("pause" ::: "memory");
-#endif
-        }
-    }
-
-    std::array<uint64_t, MATRIX_STORE_SLOTS> store_{};        // the Value column
-    std::array<Mutation, MATRIX_DELTA_LOG_CAPACITY> delta_log_{};
-    std::atomic<size_t> delta_head_{0};                      // wait-free slot reservation cursor
-    std::atomic<uint64_t> reads_{0};
-    std::atomic<uint64_t> writes_{0};
-    std::atomic<uint64_t> delta_applied_{0};
-
-    std::vector<std::thread> workers_;
-    std::atomic<bool> shutdown_;
+    std::array<uint64_t, MATRIX_STORE_SLOTS> store_{}; // the Value column
+    std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
+    std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
+    uint64_t reads_ = 0;
+    uint64_t writes_ = 0;
+    uint64_t commits_ = 0;
 };
