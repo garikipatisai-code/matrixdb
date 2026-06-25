@@ -54,9 +54,12 @@ public:
                     // ponytail: one full scan per scan query. Batching predicates into a
                     // single pass is the future optimization; correctness first.
                     const uint32_t threshold = matrix_get_scan_threshold(q);
+                    const auto st0 = std::chrono::steady_clock::now();
                     uint64_t c = 0;
                     for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
                         c += (scan_column_[s2] > threshold);
+                    scan_time_s_ += std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - st0).count();
                     q.transaction_id = c;
                     ++scans_;
                     scan_result_sum_ += c;
@@ -75,6 +78,7 @@ public:
     uint64_t commits() const override { return commits_; }
     uint64_t scans() const override { return scans_; }
     uint64_t scan_result_sum() const override { return scan_result_sum_; }
+    double scan_time_s() const override { return scan_time_s_; }
 
     uint64_t store_checksum() const override {
         uint64_t sum = 0;
@@ -127,4 +131,5 @@ private:
     uint64_t commits_ = 0;
     uint64_t scans_ = 0;
     uint64_t scan_result_sum_ = 0;
+    double scan_time_s_ = 0.0;
 };

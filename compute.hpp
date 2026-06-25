@@ -30,6 +30,11 @@ public:
     virtual uint64_t scans() const = 0;
     virtual uint64_t scan_result_sum() const = 0;
 
+    // Wall time the engine spent inside OP_SCAN work. Lets the pipeline report point-op
+    // and scan throughput separately — a single 64MB scan costs ~1000x a point op, so
+    // one combined "ops/sec" number is meaningless once scans are mixed in.
+    virtual double scan_time_s() const = 0;
+
     // Order-independent fingerprint of the whole store (sum of slot values). Lets
     // main.cpp assert CPU and GPU reach byte-identical state — the real test of the
     // ownership model, not just matching counts.

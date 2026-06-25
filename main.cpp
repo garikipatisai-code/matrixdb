@@ -303,7 +303,6 @@ int main() {
 
     const double elapsed_s =
         std::chrono::duration<double>(pipeline_end - pipeline_start).count();
-    const double throughput = TOTAL_QUERIES / elapsed_s;
 
     const size_t processed = total_processed.load();
     std::cout << "Processed " << processed << " / " << TOTAL_QUERIES << " queries." << std::endl;
@@ -327,10 +326,20 @@ int main() {
     assert(scans == expected_scans && "scan queries dropped in pipeline");
     assert(scan_sum == expected_scan_sum && "GPU scan result mismatch vs oracle");
 
-    // Report end-to-end pipeline throughput (the payoff of batched GPU execution).
-    std::cout << "Throughput: " << static_cast<uint64_t>(throughput)
-              << " ops/sec (" << TOTAL_QUERIES << " queries in "
-              << elapsed_s * 1e3 << " ms)" << std::endl;
+    // Report throughput split by workload. A single 64MB scan costs ~1000x a point op,
+    // so a combined ops/sec is meaningless once scans are mixed in (HTAP: OLTP point ops
+    // vs OLAP scans on one path). Separate them: point-op rate excludes scan time.
+    const double scan_s = mock_engine->scan_time_s();
+    const double pointop_s = elapsed_s - scan_s;
+    const uint64_t point_ops = reads + writes;
+    std::cout << "Throughput: point-ops " << static_cast<uint64_t>(point_ops / pointop_s)
+              << " ops/sec (" << point_ops << " in " << pointop_s * 1e3 << " ms)";
+    if (scans > 0) {
+        std::cout << " | scans " << static_cast<uint64_t>(scans / scan_s)
+                  << " scans/sec (" << scans << " in " << scan_s * 1e3 << " ms, "
+                  << scan_s / scans * 1e3 << " ms/scan)";
+    }
+    std::cout << std::endl;
 
     // Queue residency under burst: time each query waits in the ring before it is
     // batched. Dominated by backlog (producer outruns the single consumer), so this

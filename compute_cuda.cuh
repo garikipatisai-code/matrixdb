@@ -13,6 +13,7 @@
 #include "compute.hpp"
 #include <cuda_runtime.h>
 #include <vector>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 
@@ -241,6 +242,7 @@ public:
         // to point ops; fusing many predicates into one pass is the future optimization.
         for (size_t i = 0; i < count; ++i) {
             if (batch_array[i].opcode != OP_SCAN) continue;
+            const auto st0 = std::chrono::steady_clock::now();
             const uint32_t threshold = matrix_get_scan_threshold(batch_array[i]);
             CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), stream_));
             constexpr int SCAN_TPB = 256;
@@ -253,6 +255,8 @@ public:
             CUDA_CHECK(cudaMemcpyAsync(&c, d_scan_count_, sizeof(c),
                                        cudaMemcpyDeviceToHost, stream_));
             CUDA_CHECK(cudaStreamSynchronize(stream_));
+            scan_time_s_ += std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - st0).count();
             batch_array[i].transaction_id = c;
             ++scans_;
             scan_result_sum_ += c;
@@ -264,6 +268,7 @@ public:
     uint64_t commits() const override { return read_counter(d_writes_); } // every write commits (owned slot)
     uint64_t scans() const override { return scans_; }
     uint64_t scan_result_sum() const override { return scan_result_sum_; }
+    double scan_time_s() const override { return scan_time_s_; }
 
     uint64_t store_checksum() const override {
         // ponytail: copy the whole store back (32KB) and sum on host. Once, off the
@@ -365,6 +370,7 @@ private:
     unsigned long long* d_scan_count_ = nullptr; // scratch for one scan's count
     uint64_t scans_ = 0;                          // host-side scan accounting
     uint64_t scan_result_sum_ = 0;
+    double scan_time_s_ = 0.0;
     std::vector<DatabaseQuery> h_binned_;
     std::vector<uint32_t> offsets_;
     cudaStream_t stream_{};
