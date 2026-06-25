@@ -5,6 +5,7 @@
 #include "memory_model.hpp"
 #include <cstdio>
 #include <cassert>
+#include <vector>
 
 static CostModel make_cm() { return CostModel(MemoryModel::detect(true), true); }
 
@@ -100,6 +101,29 @@ int main() {
         assert(tm.resident_bytes(MemorySpace::DEVICE) == 2*COL && "still over cap this tick");
         tm.rebalance(); // tick 2: now age 2 >= 2 → eviction permitted, DEVICE fits
         assert(tm.resident_bytes(MemorySpace::DEVICE) <= COL && "evicted once past min-residency");
+    }
+
+    // --- Task 5: determinism — identical access sequence -> identical decisions ---
+    {
+        auto run = []() {
+            TierManager tm(make_cm(), 64u*1024*1024, 1u<<30);
+            tm.register_column(1, 32u*1024*1024, MemorySpace::COLD);
+            tm.register_column(2, 32u*1024*1024, MemorySpace::COLD);
+            std::vector<MigrationDecision> all;
+            for (int r = 0; r < 4; ++r) {
+                for (int i = 0; i < 20; ++i) { tm.record_access(1, 32u*1024*1024); tm.record_access(2, 16u*1024*1024); }
+                auto d = tm.rebalance();
+                for (auto& x : d) all.push_back(x);
+            }
+            return all;
+        };
+        auto a = run();
+        auto b = run();
+        assert(a.size() == b.size() && "deterministic decision count");
+        for (size_t i = 0; i < a.size(); ++i) {
+            assert(a[i].column_id == b[i].column_id && a[i].from == b[i].from && a[i].to == b[i].to
+                   && "deterministic decision sequence");
+        }
     }
 
     std::printf("PASS: tier manager decisions correct\n");
