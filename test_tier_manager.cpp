@@ -85,28 +85,21 @@ int main() {
         assert(tm.resident_bytes(MemorySpace::DEVICE) <= COL && "DEVICE never over capacity");
     }
     {
-        // Anti-thrash: a column promoted then idle is not evicted within MIN_RESIDENCY_TICKS.
+        // Anti-thrash: when a tier is OVER capacity but the only over-capacity resident is
+        // within MIN_RESIDENCY_TICKS of arriving, eviction is SUPPRESSED this pass (it is
+        // not thrashed straight back out). This test genuinely exercises the min-residency
+        // guard: DEVICE holds one column's worth, both columns are freshly registered on
+        // DEVICE, so the first rebalance (tick 1, arrived_tick 0 → age 1 < 2) must NOT evict
+        // — DEVICE stays over capacity for one tick. (It would evict if MIN_RESIDENCY were 0.)
         const size_t COL = 8u*1024*1024;
-        TierManager tm(make_cm(), 1u<<30, 1u<<30);
-        tm.register_column(1, COL, MemorySpace::HOST);
-        for (int i = 0; i < 50; ++i) tm.record_access(1, COL);
-        tm.rebalance(); // promote to DEVICE
-        const MemorySpace after_promote = tm.tier_of(1);
-        tm.rebalance(); // idle round — must not immediately demote (min residency)
-        if (after_promote == MemorySpace::DEVICE)
-            assert(tm.tier_of(1) == MemorySpace::DEVICE && "no thrash within min-residency");
-    }
-    {
-        // Anti-thrash: a column promoted then idle is not evicted within MIN_RESIDENCY_TICKS.
-        const size_t COL = 8u*1024*1024;
-        TierManager tm(make_cm(), 1u<<30, 1u<<30);
-        tm.register_column(1, COL, MemorySpace::HOST);
-        for (int i = 0; i < 50; ++i) tm.record_access(1, COL);
-        tm.rebalance(); // promote to DEVICE
-        const MemorySpace after_promote = tm.tier_of(1);
-        tm.rebalance(); // idle round — must not immediately demote (min residency)
-        if (after_promote == MemorySpace::DEVICE)
-            assert(tm.tier_of(1) == MemorySpace::DEVICE && "no thrash within min-residency");
+        TierManager tm(make_cm(), /*device_cap*/ COL, /*host_cap*/ 1u<<30);
+        tm.register_column(1, COL, MemorySpace::DEVICE);
+        tm.register_column(2, COL, MemorySpace::DEVICE);
+        auto d = tm.rebalance(); // tick 1: both age 1 < MIN_RESIDENCY_TICKS(2) → no eviction
+        assert(d.empty() && "no eviction within min-residency, even when over capacity");
+        assert(tm.resident_bytes(MemorySpace::DEVICE) == 2*COL && "still over cap this tick");
+        tm.rebalance(); // tick 2: now age 2 >= 2 → eviction permitted, DEVICE fits
+        assert(tm.resident_bytes(MemorySpace::DEVICE) <= COL && "evicted once past min-residency");
     }
 
     std::printf("PASS: tier manager decisions correct\n");
