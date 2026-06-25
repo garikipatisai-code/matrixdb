@@ -28,7 +28,7 @@ bandwidth — far past what the CPU can stream. MatrixDB routes each workload to
 |---|---|---|---|
 | Point ops (KV get/put) | ~19M ops/sec | ~20M ops/sec (plateaus) | **CPU** (GPU PCIe-bound) |
 | Scan, standalone kernel | ~10 GB/s | **~240 GB/s** (75% of peak) | **GPU ~24×** |
-| Scan, end-to-end through engine | 7.7 ms/scan | **0.93 ms/scan** | **GPU 8.3×** |
+| Scan, end-to-end through engine | ~8 ms/scan | **~0.4–0.7 ms/scan** | **GPU ~12–19×** |
 
 (64 MB resident `uint32` column, filter-count. Standalone vs end-to-end differ because each
 integrated scan still pays per-scan launch/copy/sync overhead — see *Known limits*.)
@@ -91,10 +91,13 @@ Each step was decided by a benchmark, not a guess. Notable findings:
   `test_scan_coverage.cpp`, which simulates the kernel's integer math on the CPU.
 
 ## Known limits / deferred (marked `// ponytail:` at each site)
-- **Per-scan overhead:** integrated scan is 69 GB/s vs the kernel's 240 — ~70% of each scan
-  is per-scan `memset+launch+memcpy+sync`. Batching scans per flush would close most of it.
+- **Per-scan overhead is NOT a problem** (measured): cudaEvent instrumentation puts GPU
+  launch/copy/sync at ~4% of scan time (kernel 0.41 ms/scan @ 163 GB/s on the 16M column).
+  An earlier "70% overhead" claim was a measurement artifact (host-wall vs cudaEvent timing,
+  mismatched column sizes) — the integrated scan is ~96% efficient.
 - **HTAP head-of-line blocking:** point ops and scans share one SPSC queue, so a scan stalls
-  the point ops behind it. Separate queues/streams is the fix.
+  the point ops behind it (queue residency spikes to 2–5 ms GPU / 30–40 ms CPU). Separate
+  queues/streams is the fix — the main remaining architectural improvement.
 - **Scans return a count, not rows;** no SUM/MIN/MAX yet.
 - **Full OCC** (TEV lock-bit + read-set validation) — unnecessary while page ownership holds.
 - **Page binning on host** — folding it into the dual-trigger batcher is a future step.
