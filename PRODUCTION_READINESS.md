@@ -1,0 +1,211 @@
+# MatrixDB — Production Readiness Gap Register
+
+Status: **research prototype → production** roadmap. This is the inventory of everything
+between what we have (a measured, correct GPU/CPU engine core) and a database someone
+trusts with real data. Each gap is something we will run through brainstorm → spec →
+plan → implement, the same loop that built the cost-based router.
+
+**Honest scope note:** "implement all of this" is quarters-to-years, not a session. Several
+items (networking with real clients, HA across nodes, multi-platform CI) can't even be
+meaningfully built or verified in the current dev environment (single box, no nvcc locally,
+sandboxed network). This register exists so we sequence deliberately and never confuse
+"prototype works" with "production ready."
+
+---
+
+## Prioritization lens: who we're building for
+
+From the client analysis, the wedge is the **single-box, unified-memory, HTAP developer/
+small team** (DGX-Spark-class workstation, 50–300 GB working set, mixed point lookups +
+analytical scans). That reorders priorities:
+
+- **Up-weighted:** durability, a real data model + query API, multi-client access, single-
+  node reliability, observability. These are what that buyer needs day one.
+- **Down-weighted (for the wedge):** distributed consensus, cross-node sharding, multi-
+  region. A single box doesn't need them. Build only when we move up-market to the
+  datacenter/HBM tier — explicitly deferred, not forgotten.
+
+---
+
+## Severity
+
+- **P0** — blocks any real use / silent data loss / correctness. Must fix to call it a DB.
+- **P1** — required for production trust (durability, security, ops) but not a correctness bug.
+- **P2** — robustness, performance, scale; matters as adoption grows.
+- **P3** — up-market / future-tier; out of scope for the wedge.
+
+Effort: S (days) · M (1–2 wk) · L (weeks) · XL (months). "Local?" = buildable + verifiable
+in the current env (CPU, no network) vs needs real infra.
+
+---
+
+## 1. Data model & query layer
+
+| ID | Gap | Why it matters | Sev | Effort | Local? |
+|----|-----|----------------|-----|--------|--------|
+| DM-1 | **Store is 4096 slots, `key & MASK` → silent overwrite on collision** | Real keys collide → **silent data loss**. This is a correctness bug, not a size limit. | P0 | M | yes |
+| DM-2 | No schema/catalog (tables, columns, types) | Can't model real data; everything is one fixed record shape | P0 | L | yes |
+| DM-3 | Fixed 64-byte record / 32-byte payload; no variable-length or real types | No strings, no nullable, no real columns | P0 | L | yes |
+| DM-4 | No query language — opcodes only (`OP_READ/WRITE/SCAN`) | No way for a client to express a query; the "router" routes opcodes, there's no parser/planner | P0 | XL | yes |
+| DM-5 | No data loading path — scan column is synthetic `value[i]=i` | Can't get real data in; no INSERT/bulk-load/import | P0 | M | yes |
+| DM-6 | Scans return a count only — no GROUP BY / SUM / MIN / MAX / projection / rows | Not real analytical queries | P1 | L | yes |
+| DM-7 | No secondary indexes; point access is a single masked slot | Only one access path; no range scans on keys | P2 | L | yes |
+| DM-8 | No joins | Multi-table analytics impossible | P2 | XL | yes |
+| DM-9 | Dynamic data growth — store/column are fixed pre-allocations | Can't grow past boot-time size; no realloc/spill | P1 | L | partial |
+
+## 2. Durability & persistence (the "D" in ACID)
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| DU-1 | **Everything in-memory — total loss on restart/crash** | A database that loses all data on exit is not a database | P0 | L | yes |
+| DU-2 | No write-ahead log (WAL) | No way to recover committed writes after crash | P0 | L | yes |
+| DU-3 | No crash recovery / replay | Can't reconstruct state from log | P0 | L | yes |
+| DU-4 | No checkpoint/snapshot | Recovery would replay the entire log forever | P1 | M | yes |
+| DU-5 | No `fsync` discipline / durability guarantee levels | Can't promise "committed = survives power loss" | P1 | M | yes |
+| DU-6 | No backup / restore | Ops can't protect data | P1 | M | yes |
+
+## 3. Transactions & concurrency correctness
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| TX-1 | No multi-key/multi-statement transactions (no atomicity, no rollback) | Page-ownership serializes one key; real txns span many | P0 | L | yes |
+| TX-2 | No isolation levels / MVCC | Concurrent readers/writers have no defined semantics | P1 | XL | yes |
+| TX-3 | Full OCC (TEV lock-bit + read-set validation) never built (spec'd, deferred) | The conflict path the spec designed is absent | P1 | L | yes |
+| TX-4 | Commit/visibility semantics undefined | When is a write visible to a reader? No answer today | P1 | M | yes |
+
+## 4. Networking, API & multi-client
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| NW-1 | **No network layer — in-process hardcoded producer loop** | Nobody can connect to it | P0 | L | partial |
+| NW-2 | **SPSC ring is single-producer** — one client by construction | Real DB needs many concurrent clients → MPSC or per-connection queues feeding the consumer | P0 | L | yes |
+| NW-3 | No wire protocol | No defined client/server contract | P1 | L | partial |
+| NW-4 | No client driver/libraries | Nothing for an app to import | P1 | L | partial |
+| NW-5 | No connection management (pooling, limits, timeouts, backpressure) | Can't handle real connection churn | P1 | M | partial |
+
+## 5. Security
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| SE-1 | No authentication | Anyone who reaches it owns it | P1 | M | partial |
+| SE-2 | No authorization / access control | No per-user/role permissions | P1 | L | yes |
+| SE-3 | No TLS / encryption in transit | Wire sniffable | P1 | M | partial |
+| SE-4 | No encryption at rest | Disk/backup readable if stolen | P2 | M | yes |
+| SE-5 | No input validation at trust boundaries | The payload `reinterpret_cast` etc. is safe in-process but not from a wire boundary that doesn't exist yet | P1 | M | yes |
+| SE-6 | No audit logging | No record of who did what | P2 | S | yes |
+
+## 6. Resource management & failure handling
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| RM-1 | `CUDA_CHECK` aborts the process on any GPU error | A transient GPU error kills the whole DB; needs graceful degradation/retry | P1 | M | partial |
+| RM-2 | No memory limits / quotas / admission control | One big query can OOM the box | P1 | M | yes |
+| RM-3 | No eviction / spill when VRAM or RAM is full | Working set > capacity → crash, not graceful | P2 | L | partial |
+| RM-4 | No graceful shutdown / drain beyond the demo harness | Can't stop cleanly under load | P1 | S | yes |
+
+## 7. Observability & operability
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| OB-1 | No structured logging (just `cout`) | Can't diagnose production issues | P1 | S | yes |
+| OB-2 | No metrics/telemetry export (latency, throughput, queue depth, GPU util) | Operators are blind | P1 | M | yes |
+| OB-3 | No health checks / readiness probes | Can't run under an orchestrator | P2 | S | partial |
+| OB-4 | No runtime config (constants are compile-time `constexpr`) | Can't tune without recompiling | P1 | M | yes |
+| OB-5 | No admin/management interface | No way to inspect/operate a running instance | P2 | M | partial |
+
+## 8. Correctness, testing & CI
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| QA-1 | No CI/CD pipeline | Every change verified by hand; CUDA only via manual Colab | P1 | M | partial |
+| QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through | P1 | L | yes |
+| QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected | P1 | S | yes |
+| QA-4 | No fuzzing / property-based testing | Edge cases unexplored | P2 | M | yes |
+| QA-5 | No stress / chaos / failure-injection testing | Behavior under load & failure unknown | P2 | L | partial |
+| QA-6 | CUDA path has no automated test — host-syntax probe + manual runs only | GPU regressions only caught by hand | P1 | M | needs GPU CI |
+
+## 9. Build, packaging & deployment
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| BP-1 | Build is manual `clang++`/`nvcc` one-liners; cmake not even installed | Not reproducible; no real build system in use | P1 | S | yes |
+| BP-2 | No packaging (container/binary/release artifact) | Nothing to deploy | P1 | M | partial |
+| BP-3 | No versioning / release process | Can't ship or roll back | P2 | S | yes |
+| BP-4 | No multi-platform build matrix (Apple ARM / Linux x86 / CUDA) | "Works on my Mac" only | P1 | M | needs CI |
+
+## 10. Reliability & HA (mostly P3 for the single-box wedge)
+
+| ID | Gap | Why | Sev | Effort | Local? |
+|----|-----|-----|-----|--------|--------|
+| HA-1 | No replication | No redundancy | P3 | XL | no |
+| HA-2 | No failover / HA | Single point of failure | P3 | XL | no |
+| HA-3 | No clustering / sharding across nodes | Bounded to one box | P3 | XL | no |
+| HA-4 | No consensus (Raft/Paxos) | Needed only if distributed | P3 | XL | no |
+
+*HA-1..4 are deliberately P3: the wedge client runs on one box. Promote to P1 only when we
+move up-market to the datacenter tier.*
+
+## 11. Known deferred items (from our own FINDINGS)
+
+| ID | Gap | Sev | Effort | Local? |
+|----|-----|-----|--------|--------|
+| KD-1 | Cost-model constants uncalibrated (~313 KB derived vs ~4–8 MB practical crossover) | P1 | S | needs GPU |
+| KD-2 | Per-batch GPU sync — double-buffer/async to hide it | P2 | M | needs GPU |
+| KD-3 | Page-binning runs on host — fold into the dual-trigger batcher | P2 | S | yes |
+| KD-4 | Unified-memory path is a stub — implement when hardware is available | P2 | L | needs HW |
+| KD-5 | Hyper-Q multi-stream, `cudaHostRegister` pinned DMA | P2 | M | needs GPU |
+
+---
+
+## Critical path — recommended phasing
+
+Each phase produces something demonstrably more "real." Sequenced by dependency and by the
+wedge client's needs. Phases are roughly quarter-sized.
+
+**Phase A — "It's actually a database" (correctness + durability core)**
+The non-negotiables. Without these it's a benchmark, not a DB.
+- DM-1 (fix key collisions — silent data loss) ← *do first, it's a P0 correctness bug*
+- DU-1/DU-2/DU-3 (persistence + WAL + recovery)
+- DM-5 (a real data-loading path)
+- TX-1 (basic atomic multi-key transactions) + TX-3 (the OCC we deferred)
+- QA-3 (sanitizers on the concurrent code — cheap, high value, find races now)
+
+**Phase B — "Someone other than us can use it" (access + model)**
+- NW-2 (multi-producer ingestion — unblocks multiple clients)
+- DM-2/DM-3 (schema + real types)
+- DM-4 (a minimal query interface — even a tiny one, not full SQL)
+- NW-1/NW-3/NW-4 (network layer + wire protocol + a client)
+
+**Phase C — "Operable & trustworthy" (production hygiene)**
+- OB-1/OB-2/OB-4 (logging, metrics, runtime config)
+- DU-4/DU-5/DU-6 (checkpoints, fsync levels, backup)
+- SE-1/SE-2/SE-3/SE-5 (authn, authz, TLS, boundary validation)
+- RM-1/RM-4 (graceful GPU-error handling, clean shutdown)
+- BP-1/BP-2/QA-1/QA-2 (real build system, packaging, CI, test suite)
+
+**Phase D — "Faster & richer" (perf + analytics depth)**
+- DM-6/DM-7/DM-8 (aggregations, indexes, joins)
+- KD-1..KD-5 (the deferred GPU perf work) — needs the GPU calibration loop
+- RM-2/RM-3 (quotas, spill)
+
+**Phase E — up-market only (when leaving the single-box wedge)**
+- HA-1..HA-4 (replication, failover, clustering, consensus)
+
+---
+
+## How we execute each gap
+
+Same proven loop, one gap (or tight cluster) at a time:
+1. **Brainstorm** the gap into a design (the hard decisions surface here).
+2. **Spec** → self-review → your approval.
+3. **Plan** → bite-sized TDD tasks.
+4. **Implement** via subagent-driven development, two-stage review per task.
+5. Merge. Update this register (check the item off, note follow-ups).
+
+Locally-buildable items (most of Phases A–C minus networking/CUDA-CI) we can fully build
+and verify here. GPU-dependent items (KD-*) batch into Colab runs as before. Infra-dependent
+items (network, CI, HA) need a real target environment and are flagged "Local? = no/partial."
+
+---
+
+*Living document. As each gap is designed/built, link its spec + plan and mark status.*
