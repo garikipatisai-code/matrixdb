@@ -6,9 +6,11 @@ import json
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "memory_model.hpp", "tier_model.hpp", "cost_model.hpp", "router.hpp",
            "kv_store.hpp", "cold_store.hpp", "tier_manager.hpp",
+           "tiered_column.hpp", "migration_executor.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
-           "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp"]
+           "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
+           "test_migration.cpp", "test_migration_gpu.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -72,6 +74,19 @@ cells += [
        "same WAL path — MatrixDB no longer loses data on restart."),
     code("!clang++ -std=c++20 -O2 test_engine_restart.cpp -o /tmp/ter 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_engine_restart.cpp -o /tmp/ter; /tmp/ter"),
+    md("## 3f. Migration test (CPU, no GPU)\n"
+       "\n"
+       "Cross-tier byte movement: HOST<->COLD round-trip is checksum-invariant, and "
+       "TierManager decisions drive the executor to physically move columns."),
+    code("!clang++ -std=c++20 -O2 test_migration.cpp -o /tmp/tmig 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_migration.cpp -o /tmp/tmig; /tmp/tmig"),
+    md("## 4b. Migration GPU proof (needs T4 GPU)\n"
+       "\n"
+       "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
+       "kernel run over the promoted column's device pointer matches a CPU scan of the same "
+       "bytes. Closes the heat->decision->migration->faster-scan loop on real hardware."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_migration_gpu.cpp -o test_migration_gpu && ./test_migration_gpu"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "

@@ -70,6 +70,8 @@ in the current env (CPU, no network) vs needs real infra.
 
 *Inc 3 landed: `cold_store.hpp` — synchronous CRC-framed append-only WAL, wired into CPUMockEngine (append-before-commit + replay-on-construct). Committed point-op writes survive restart (DU-1/2/3 fixed). Checkpoint/compaction (DU-4) and cold-column spill (Inc 4) still pending. See spec 2026-06-25-increment-3-cold-store-wal-design.md.*
 
+*Inc 4 landed: `tiered_column.hpp` + `migration_executor.hpp` — cross-tier byte movement (HOST/RAM ↔ DEVICE/VRAM ↔ COLD/SSD via HOST), checksum-invariant, driven by TierManager decisions. A VRAM-promoted column is proven GPU-scannable in place. The heat→decision→migration loop is closed on the TieredColumn primitive. Live-engine integration (the OP_SCAN column becoming a managed TieredColumn) is the next step. See spec 2026-06-26-increment-4-migration-executor-design.md.*
+
 ## 3. Transactions & concurrency correctness
 
 | ID | Gap | Why | Sev | Effort | Local? |
