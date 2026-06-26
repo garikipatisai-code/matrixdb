@@ -6,7 +6,7 @@ import json
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "memory_model.hpp", "tier_model.hpp", "cost_model.hpp", "router.hpp",
            "kv_store.hpp", "cold_store.hpp", "tier_manager.hpp",
-           "tiered_column.hpp", "migration_executor.hpp",
+           "tiered_column.hpp", "migration_executor.hpp", "column_io.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
@@ -14,6 +14,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_group_by.cpp",
            "test_query.cpp",
            "test_observability.cpp",
+           "test_column_io.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -109,6 +110,11 @@ cells += [
        "gauges — verified against a known eviction workload."),
     code("!clang++ -std=c++20 -O2 test_observability.cpp -o /tmp/tobs 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_observability.cpp -o /tmp/tobs; /tmp/tobs"),
+    md("### Binary column persistence\n"
+       "save_column / load_column_from_file round-trip a column through a binary file (incl. a "
+       "COLD-tier column); a reloaded column queries identically."),
+    code("!clang++ -std=c++20 -O2 test_column_io.cpp -o /tmp/tcio 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_column_io.cpp -o /tmp/tcio; /tmp/tcio"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
