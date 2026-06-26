@@ -92,6 +92,27 @@ public:
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
 
+    // GROUP BY key WHERE value > threshold (filtered grouped aggregate). Same contract and double
+    // borrow-and-return as grouped_aggregate; only rows with value > threshold contribute.
+    void grouped_aggregate_where(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
+                                 MatrixAggOp op, uint32_t threshold, std::vector<uint64_t>& out) {
+        assert(key_id != value_id && "group-by key and value must be distinct columns");
+        TieredColumn& kc = *catalog_.at(key_id);
+        TieredColumn& vc = *catalog_.at(value_id);
+        assert(kc.size_bytes() == vc.size_bytes() && "key and value columns must be the same length");
+        tier_mgr_.record_access(key_id, kc.size_bytes());
+        tier_mgr_.record_access(value_id, vc.size_bytes());
+        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) kc.migrate_to(MemorySpace::HOST);
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) vc.migrate_to(MemorySpace::HOST);
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
+        const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
+        const size_t n = kc.size_bytes() / sizeof(uint32_t);
+        out.resize(num_groups);
+        matrix_cpu_group_reduce_where(keys, vals, n, num_groups, op, threshold, out.data());
+        if (vh != MemorySpace::HOST) vc.migrate_to(vh);
+        if (kh != MemorySpace::HOST) kc.migrate_to(kh);
+    }
+
     ~CPUMockEngine() override {
         // Make the fixed-capacity overflow seam loud (not silent) even in release builds:
         // if any write was dropped because the KVStore filled, report it. Inc 3's SSD
