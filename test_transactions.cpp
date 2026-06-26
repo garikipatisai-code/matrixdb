@@ -1,0 +1,55 @@
+// CPU test for atomic transactions (WAL group commit). Grows across tasks; one main().
+#include "compute_mock.cpp"
+#include <cassert>
+#include <cstdint>
+#include <vector>
+#include <cstdio>
+#include <iostream>
+
+static std::vector<std::pair<uint64_t,uint64_t>> replay_all(const std::string& path) {
+    std::vector<std::pair<uint64_t,uint64_t>> applied;
+    ColdStore cs(path, SyncPolicy::SYNC_OFF);
+    cs.replay([&](uint64_t k, uint64_t v){ applied.emplace_back(k, v); });
+    return applied;
+}
+
+static void test_wal_commit_atomicity() {
+    const std::string path = "/tmp/matrixdb_txn_wal.bin";
+    std::remove(path.c_str());
+    {
+        ColdStore cs(path, SyncPolicy::SYNC_OFF);
+        cs.append_txn_put(10, 100);
+        cs.append_txn_put(11, 110);
+        cs.append_commit();              // committed group {10,11}
+        cs.append_txn_put(12, 120);      // a "crash": txn-put with no following commit marker
+    }
+    auto applied = replay_all(path);
+    assert(applied.size() == 2 && "only the committed group replays");
+    assert(applied[0].first == 10 && applied[1].first == 11);
+    bool saw12 = false; for (auto& kv : applied) if (kv.first == 12) saw12 = true;
+    assert(!saw12 && "uncommitted txn-put is discarded (crash-atomic)");
+    std::remove(path.c_str());
+    std::cout << "[wal commit atomicity] ok\n";
+}
+
+static void test_wal_autocommit_unchanged() {
+    const std::string path = "/tmp/matrixdb_txn_auto.bin";
+    std::remove(path.c_str());
+    {
+        ColdStore cs(path, SyncPolicy::SYNC_OFF);
+        cs.append_put(1, 11);
+        cs.append_put(2, 22);
+    }
+    auto applied = replay_all(path);
+    assert(applied.size() == 2 && applied[0].first == 1 && applied[1].first == 2
+           && "auto-commit puts still apply immediately (backward compat)");
+    std::remove(path.c_str());
+    std::cout << "[wal auto-commit unchanged] ok\n";
+}
+
+int main() {
+    test_wal_commit_atomicity();
+    test_wal_autocommit_unchanged();
+    std::cout << "ALL TRANSACTION TESTS PASSED\n";
+    return 0;
+}
