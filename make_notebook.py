@@ -17,6 +17,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_column_io.cpp",
            "test_catalog_snapshot.cpp",
            "test_query_validation.cpp",
+           "test_transactions.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -127,6 +128,11 @@ cells += [
        "absurd group count) with a status code — gracefully, never crashing (verified under -DNDEBUG too)."),
     code("!clang++ -std=c++20 -O2 test_query_validation.cpp -o /tmp/tqv 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_query_validation.cpp -o /tmp/tqv; /tmp/tqv"),
+    md("### Atomic transactions (WAL group commit)\n"
+       "begin/txn_put/commit/rollback — a committed transaction is all-or-nothing across a crash "
+       "(uncommitted txn-puts are discarded on replay); the auto-commit path is unchanged."),
+    code("!clang++ -std=c++20 -O2 test_transactions.cpp -o /tmp/ttx 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_transactions.cpp -o /tmp/ttx; /tmp/ttx"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

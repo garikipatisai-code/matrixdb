@@ -44,6 +44,7 @@ enum MatrixOpcode : uint32_t {
     OP_READ  = 1,
     OP_WRITE = 2,
     OP_SCAN  = 3,
+    OP_TXN_WRITE = 4,   // a transactional put: buffered on WAL replay until a commit marker
 };
 
 // Aggregate reduction carried by OP_SCAN (payload offset 16). AGG_COUNT==0 is the default, so a

@@ -7,6 +7,8 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <vector>
+#include <utility>
 #include <unistd.h>    // fsync, fileno
 
 // SSD-backed write-ahead log (gap DU-1/2/3 / three-tier cold tier). Append-only: a record
@@ -24,6 +26,8 @@ enum class SyncPolicy {
 // dependence): key (8 bytes) + value (8 bytes) + opcode (4 bytes) = 20 bytes.
 constexpr size_t MATRIX_WAL_PAYLOAD_BYTES = 20;
 constexpr uint32_t MATRIX_WAL_MAX_RECORD = 4096;    // sane upper bound for the length field
+constexpr size_t   MATRIX_WAL_COMMIT_BYTES = 4;          // commit-marker record length
+constexpr uint32_t MATRIX_WAL_COMMIT       = 0x434F4D4Du; // 'COMM' — commit-marker payload
 
 // Standard CRC32 (reflected, poly 0xEDB88320). Inline, no dependency.
 inline uint32_t matrix_crc32(const unsigned char* data, size_t n) {
@@ -57,20 +61,21 @@ public:
     ColdStore(const ColdStore&) = delete;
     ColdStore& operator=(const ColdStore&) = delete;
 
-    // Append one put durably. Returns after the durable point (fsync) per policy.
-    void append_put(uint64_t key, uint64_t value) {
-        unsigned char payload[MATRIX_WAL_PAYLOAD_BYTES];
-        const uint32_t opcode = OP_WRITE;
-        std::memcpy(payload + 0,  &key,    8);
-        std::memcpy(payload + 8,  &value,  8);
-        std::memcpy(payload + 16, &opcode, 4);
+    // Append one auto-commit put durably (applied immediately on replay). Behavior unchanged.
+    void append_put(uint64_t key, uint64_t value) { append_record(OP_WRITE, key, value); }
 
-        const uint32_t length = MATRIX_WAL_PAYLOAD_BYTES;
-        const uint32_t crc = matrix_crc32(payload, MATRIX_WAL_PAYLOAD_BYTES);
+    // Append a transactional put — buffered on replay until a commit marker; discarded if a crash
+    // leaves it without one. Written as part of the engine's commit() group.
+    void append_txn_put(uint64_t key, uint64_t value) { append_record(OP_TXN_WRITE, key, value); }
 
+    // Append a commit marker durably — replay applies all txn-puts buffered since the last commit.
+    void append_commit() {
+        const uint32_t magic = MATRIX_WAL_COMMIT;
+        const uint32_t length = static_cast<uint32_t>(MATRIX_WAL_COMMIT_BYTES);
+        const uint32_t crc = matrix_crc32(reinterpret_cast<const unsigned char*>(&magic), MATRIX_WAL_COMMIT_BYTES);
         std::fwrite(&length, sizeof(length), 1, fp_);
         std::fwrite(&crc,    sizeof(crc),    1, fp_);
-        std::fwrite(payload, 1, MATRIX_WAL_PAYLOAD_BYTES, fp_);
+        std::fwrite(&magic,  1, MATRIX_WAL_COMMIT_BYTES, fp_);
         std::fflush(fp_);
         if (policy_ == SyncPolicy::SYNC_EACH) ::fsync(::fileno(fp_));
         ++records_written_;
@@ -82,6 +87,7 @@ public:
     void replay(Apply&& apply) const {
         FILE* r = std::fopen(path_.c_str(), "rb");
         if (!r) return;
+        std::vector<std::pair<uint64_t, uint64_t>> txn; // txn-puts buffered since the last commit
         for (;;) {
             uint32_t length = 0;
             if (std::fread(&length, sizeof(length), 1, r) != 1) break;     // clean EOF
@@ -91,22 +97,43 @@ public:
             unsigned char buf[MATRIX_WAL_MAX_RECORD];
             if (std::fread(buf, 1, length, r) != length) break;            // torn tail
             if (matrix_crc32(buf, length) != crc) break;                   // corruption
-            // Only the current 20-byte put record is understood today. A CRC-valid record
-            // of a different length is a future record type — skip it and keep scanning
-            // (intentional forward-compat; silent because no such record exists yet).
-            if (length == MATRIX_WAL_PAYLOAD_BYTES) {
+            if (length == MATRIX_WAL_PAYLOAD_BYTES) {                      // 20-byte put record
+                uint32_t opcode = 0; std::memcpy(&opcode, buf + 16, 4);
                 uint64_t key = 0, value = 0;
                 std::memcpy(&key,   buf + 0, 8);
                 std::memcpy(&value, buf + 8, 8);
-                apply(key, value);
+                if (opcode == OP_WRITE)          apply(key, value);        // auto-commit (unchanged)
+                else if (opcode == OP_TXN_WRITE) txn.emplace_back(key, value); // buffer until commit
+                // other opcode at length 20: skip (forward-compat)
+            } else if (length == MATRIX_WAL_COMMIT_BYTES) {               // 4-byte marker
+                uint32_t magic = 0; std::memcpy(&magic, buf, 4);
+                if (magic == MATRIX_WAL_COMMIT) { for (auto& kv : txn) apply(kv.first, kv.second); txn.clear(); }
+                // other 4-byte record: skip (forward-compat)
             }
+            // other lengths: skip (forward-compat)
         }
-        std::fclose(r);
+        std::fclose(r);   // EOF: any still-buffered txn was uncommitted -> discarded
     }
 
     uint64_t records_written() const { return records_written_; }
 
 private:
+    // Write one length-20 [key8][value8][opcode4] record durably (the put/txn-put wire form).
+    void append_record(uint32_t opcode, uint64_t key, uint64_t value) {
+        unsigned char payload[MATRIX_WAL_PAYLOAD_BYTES];
+        std::memcpy(payload + 0,  &key,    8);
+        std::memcpy(payload + 8,  &value,  8);
+        std::memcpy(payload + 16, &opcode, 4);
+        const uint32_t length = MATRIX_WAL_PAYLOAD_BYTES;
+        const uint32_t crc = matrix_crc32(payload, MATRIX_WAL_PAYLOAD_BYTES);
+        std::fwrite(&length, sizeof(length), 1, fp_);
+        std::fwrite(&crc,    sizeof(crc),    1, fp_);
+        std::fwrite(payload, 1, MATRIX_WAL_PAYLOAD_BYTES, fp_);
+        std::fflush(fp_);
+        if (policy_ == SyncPolicy::SYNC_EACH) ::fsync(::fileno(fp_));
+        ++records_written_;
+    }
+
     std::string path_;
     SyncPolicy policy_;
     FILE* fp_ = nullptr;
