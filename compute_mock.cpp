@@ -3,6 +3,7 @@
 #include "cold_store.hpp"
 #include "migration_executor.hpp"  // MigrationExecutor + TierManager + TieredColumn + CostModel
 #include "memory_model.hpp"        // MemorySpace, MemoryModel
+#include "column_io.hpp"           // matrix_write_column / matrix_read_column (binary column persistence)
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -82,6 +83,22 @@ public:
         return EngineStats{ cold_borrows_, rebalances_, migrations_, catalog_.size(),
                             tier_mgr_.resident_bytes(MemorySpace::HOST),
                             tier_mgr_.resident_bytes(MemorySpace::COLD) };
+    }
+
+    // Persist a catalog column's bytes to `path` (borrows to HOST to read, returns the borrow).
+    void save_column(uint64_t id, const std::string& path) {
+        TieredColumn& col = *catalog_.at(id);
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        matrix_write_column(path, reinterpret_cast<const uint32_t*>(col.host_ptr()),
+                            col.size_bytes() / sizeof(uint32_t));
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+    }
+    // Load a column file into the catalog under `id` (born resident in HOST, like load_scan_column).
+    void load_column_from_file(uint64_t id, const std::string& path) {
+        std::vector<uint32_t> data;
+        matrix_read_column(path, data);
+        load_scan_column(id, data.data(), data.size());
     }
 
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
