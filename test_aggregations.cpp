@@ -82,12 +82,39 @@ static void test_engine_agg_tiered() {
     std::cout << "[engine agg tiered] ok\n";
 }
 
+static void test_engine_agg_cold_borrow() {
+    // Aggregate a NON-COUNT op over a column that has actually been demoted to COLD — exercises
+    // the reducer through the borrow path (SSD->RAM->reduce->SSD), the headline use case, not just
+    // a HOST-resident column.
+    const size_t N = 1000;
+    const size_t S = N * sizeof(uint32_t);
+    std::vector<uint32_t> col(N);
+    for (size_t i = 0; i < N; ++i) col[i] = static_cast<uint32_t>(i);
+    CPUMockEngine eng(0, "", /*host_cap=*/S);          // RAM holds ONE column
+    eng.load_scan_column(1, col.data(), N);
+    eng.load_scan_column(2, col.data(), N);            // 2*S > budget: one must be demoted
+    // Hammer col 2, never col 1 -> col 1 (heat 0) is the eviction victim -> demoted to COLD.
+    for (int r = 0; r < 12; ++r) {
+        DatabaseQuery q{}; matrix_set_scan_target(q, 0u, 2); eng.execute_scan(q);
+    }
+    assert(eng.column_tier(1) == MemorySpace::COLD && "col 1 demoted to SSD");
+    // SUM over the COLD column: borrowed to HOST, reduced, returned to COLD.
+    const uint32_t T = 600;
+    DatabaseQuery qs{}; matrix_set_scan_target(qs, T, 1); matrix_set_scan_agg_op(qs, AGG_SUM);
+    eng.execute_scan(qs);
+    uint64_t sum = 0; for (uint64_t i = T + 1; i <= N - 1; ++i) sum += i;
+    assert(qs.transaction_id == sum && "SUM correct over a COLD-borrowed column");
+    assert(eng.column_tier(1) == MemorySpace::COLD && "col 1 returned to SSD after the borrow");
+    std::cout << "[engine agg cold-borrow] ok\n";
+}
+
 int main() {
     test_reduce_closed_form();
     test_reduce_empty();
     test_agg_codec();
     test_engine_agg_legacy();
     test_engine_agg_tiered();
+    test_engine_agg_cold_borrow();
     std::cout << "ALL AGGREGATION TESTS PASSED\n";
     return 0;
 }
