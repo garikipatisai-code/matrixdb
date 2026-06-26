@@ -47,9 +47,56 @@ static void test_wal_autocommit_unchanged() {
     std::cout << "[wal auto-commit unchanged] ok\n";
 }
 
+static void test_engine_commit_durable() {
+    const std::string wal = "/tmp/matrixdb_txn_eng.bin";
+    std::remove(wal.c_str());
+    {
+        CPUMockEngine eng(0, wal);            // durability ON
+        eng.begin();
+        eng.txn_put(100, 1000);
+        eng.txn_put(101, 1010);
+        eng.txn_put(102, 1020);
+        eng.commit();
+        uint64_t v = 0;
+        assert(eng.kv_get(100, v) && v == 1000);
+        assert(eng.kv_get(102, v) && v == 1020);
+    }
+    {
+        CPUMockEngine eng2(0, wal);           // replay the committed txn on restart
+        uint64_t v = 0;
+        assert(eng2.kv_get(100, v) && v == 1000 && "committed txn survives restart");
+        assert(eng2.kv_get(101, v) && v == 1010);
+        assert(eng2.kv_get(102, v) && v == 1020);
+    }
+    std::remove(wal.c_str());
+    std::cout << "[engine commit durable] ok\n";
+}
+
+static void test_engine_rollback() {
+    const std::string wal = "/tmp/matrixdb_txn_rb.bin";
+    std::remove(wal.c_str());
+    {
+        CPUMockEngine eng(0, wal);
+        eng.begin();
+        eng.txn_put(200, 2000);
+        eng.rollback();
+        uint64_t v = 0;
+        assert(!eng.kv_get(200, v) && "rolled-back write is not visible");
+    }
+    {
+        CPUMockEngine eng2(0, wal);
+        uint64_t v = 0;
+        assert(!eng2.kv_get(200, v) && "rolled-back write was never persisted");
+    }
+    std::remove(wal.c_str());
+    std::cout << "[engine rollback] ok\n";
+}
+
 int main() {
     test_wal_commit_atomicity();
     test_wal_autocommit_unchanged();
+    test_engine_commit_durable();
+    test_engine_rollback();
     std::cout << "ALL TRANSACTION TESTS PASSED\n";
     return 0;
 }

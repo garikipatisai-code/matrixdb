@@ -78,6 +78,26 @@ public:
     size_t host_resident_bytes() const { return tier_mgr_.resident_bytes(MemorySpace::HOST); }
     uint64_t column_checksum(uint64_t id) const { return catalog_.at(id)->checksum(); }
 
+    // Point-op read accessor (tests): true + sets out if present. Mirrors execute_batch's OP_READ.
+    bool kv_get(uint64_t key, uint64_t& out) const { return kv_.get(key, out); }
+
+    // --- Atomic transactions (WAL group commit) ---
+    void begin() { assert(!in_txn_ && "transaction already open"); txn_buf_.clear(); in_txn_ = true; }
+    void txn_put(uint64_t key, uint64_t value) { assert(in_txn_ && "txn_put outside a transaction"); txn_buf_.emplace_back(key, value); }
+    // Durably commit the buffered writes as one all-or-nothing group, then apply them.
+    void commit() {
+        assert(in_txn_ && "commit without begin");
+        if (cold_store_) {
+            for (auto& kv : txn_buf_) cold_store_->append_txn_put(kv.first, kv.second);
+            cold_store_->append_commit();   // the durable, atomic commit point
+        }
+        for (auto& kv : txn_buf_) apply_committed_write(kv.first, kv.second);
+        in_txn_ = false; ++transactions_committed_; txn_buf_.clear();
+    }
+    void rollback() { assert(in_txn_ && "rollback without begin"); in_txn_ = false; ++transactions_rolled_back_; txn_buf_.clear(); }
+    uint64_t transactions_committed() const { return transactions_committed_; }
+    uint64_t transactions_rolled_back() const { return transactions_rolled_back_; }
+
     // Observability snapshot (counters since construction + current resident-bytes gauges).
     EngineStats stats() const {
         return EngineStats{ cold_borrows_, rebalances_, migrations_, catalog_.size(),
@@ -250,17 +270,7 @@ public:
                     // write is only counted committed once it is durable. The in-memory kv_
                     // is volatile and rebuilt from the WAL on recovery.
                     if (cold_store_) cold_store_->append_put(q.query_id, q.query_id);
-                    // mock projection: value == key. Fixed-capacity seam: a full table is
-                    // counted as an overflow (always live, even under NDEBUG) so a dropped
-                    // write is never silent. Inc 3 replaces this with SSD spill. The assert
-                    // makes it fail loud in debug builds too.
-                    ++writes_;
-                    if (kv_.put(q.query_id, q.query_id)) {
-                        ++commits_;
-                    } else {
-                        ++store_overflows_;
-                        assert(false && "KVStore full — point-op store capacity exceeded (Inc 3 adds spill)");
-                    }
+                    apply_committed_write(q.query_id, q.query_id);
                 }
             }
         }
@@ -405,4 +415,20 @@ private:
     uint64_t scan_result_sum_ = 0;
     uint64_t store_overflows_ = 0; // writes dropped because the fixed-capacity KVStore was full (Inc 3 adds SSD spill)
     double scan_time_s_ = 0.0;
+
+    // Apply one durable write to the point-op store with the standard overflow accounting.
+    // mock projection: value == key. Fixed-capacity seam: a full table is counted as an
+    // overflow (always live, even under NDEBUG) so a dropped write is never silent. Inc 3
+    // replaces this with SSD spill; the assert makes it fail loud in debug builds too.
+    void apply_committed_write(uint64_t key, uint64_t value) {
+        ++writes_;
+        if (kv_.put(key, value)) ++commits_;
+        else { ++store_overflows_; assert(false && "KVStore full — point-op store capacity exceeded (Inc 3 adds spill)"); }
+    }
+
+    // --- Atomic transactions (WAL group commit) ---
+    std::vector<std::pair<uint64_t, uint64_t>> txn_buf_; // pending writes in the open transaction
+    bool in_txn_ = false;
+    uint64_t transactions_committed_ = 0;
+    uint64_t transactions_rolled_back_ = 0;
 };
