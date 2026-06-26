@@ -136,14 +136,20 @@ column, keeping the scenario clean.
 
 **`test_live_tiering.cpp` (the headline, CPU):** extend with `test_repromotion_under_pressure()`:
 - 3 columns, budget 2*S. Phase 1 (INT-1 baseline): scan cols 1&2, never col 3 → col 3 demotes to
-  COLD. Phase 2 (the flip): scan cols 1&3 repeatedly, **never col 2**, for enough rebalances that
-  col 3's heat overtakes col 2's by the margin and col 2 ages cold.
+  COLD. Phase 2 (the flip): scan col 3 **decisively hard** (≥3 scans per rebalance window, more
+  than col 1's 1) and **never** col 2. Col 3 must clear the COLD→HOST promotion gate, which means
+  `est_future_scans ≥ 3` (a merely-equal scan rate leaves it at 2 — benefit `1.87µs` < the
+  `2.0µs` = `1.5×` SSD-read migration cost — so it never even becomes a promotion candidate; "re-hot"
+  must mean *worth the migration*). Col 2 ages to `keep_score 0`.
 - Assert: `manager_tier(3)==HOST` **and** `column_tier(3)==HOST` — col 3 is now *resident* (not
   just borrowed); `manager_tier(2)==COLD` — col 2 was displaced; `host_resident_bytes() <= 2*S`.
   Every scan still returns the exact oracle count.
-- **Non-vacuity:** documented control — with swap-on-promote disabled (e.g. `SWAP_MARGIN` set
-  enormous so no swap ever qualifies), col 3 stays COLD and the `tier_of(3)==HOST` assert fails.
-  The implementer runs this control, shows the failure, then reverts.
+- **Non-vacuity:** the control disables the swap *mechanism* — add `return false;` at the top of
+  `try_swap_promote` — and re-runs: col 3 becomes a candidate but, HOST being full with no swap,
+  can't get in → stays COLD → `tier_of(3)==HOST` fails. (Note: raising `SWAP_MARGIN` does NOT
+  disable it here, because col 2's `keep_score` is 0 and `margin×0==0 < benefit` — the swap fires
+  regardless of margin once the victim is stone-cold.) The implementer runs the control, shows the
+  failure, then reverts.
 
 **Cold-path uniqueness:** a small assertion that two `TieredColumn`s constructed with the same id
 in one process produce different `cold_path()`s (verify via a public accessor or by round-tripping

@@ -212,7 +212,12 @@ static void test_repromotion_under_pressure() {
 
     // Phase 2: FLIP the heat — cols 1 & 3 hot, col 2 NEVER. Col 2 cools; col 3 re-heats and must
     // be RE-PROMOTED to resident HOST (swap-on-promote displaces the now-cold col 2).
-    for (int r = 0; r < 16; ++r) { scan(1); scan(3); }
+    // Col 3 is scanned 3x per round (col 1 once) so it is DECISIVELY hot: est_future_scans
+    // reaches 3, clearing the COLD->HOST promotion gate (benefit 2.8us > 1.5*1.33us cost). A
+    // merely-equal scan rate (e.g. once/round like col 1) leaves col 3 at est_future_scans 2 ->
+    // benefit 1.87us < 2.0us -> never a promotion candidate (the SSD-read migration cost isn't
+    // worth ~2 future scans). "Re-hot" must mean genuinely hot enough to justify the migration.
+    for (int r = 0; r < 16; ++r) { scan(3); scan(1); scan(3); scan(3); }
     assert(eng.column_tier(3)  == MemorySpace::HOST && "col 3 re-promoted to RESIDENT RAM (not just borrowed)");
     assert(eng.manager_tier(3) == MemorySpace::HOST && "brain agrees col 3 is resident");
     assert(eng.column_tier(2)  == MemorySpace::COLD && "col 2 displaced to SSD");
@@ -226,13 +231,13 @@ Add `test_repromotion_under_pressure();` to `main()` after `test_eviction_holds_
 - [ ] **Step 2: Run to verify it passes**
 
 Run: `clang++ -std=c++20 -O2 test_live_tiering.cpp -o /tmp/tlt && /tmp/tlt`
-Expected: PASS — prints `[re-promotion under pressure] ok` then `ALL LIVE-TIERING TESTS PASSED`.
+Expected: PASS — prints `[re-promotion under pressure] ok` then `ALL LIVE-TIERING TESTS PASSED`. (Col 3 reaches est_future_scans 3 within a few rebalances and, with col 2 cooled to keep_score 0, swaps in.)
 
 - [ ] **Step 3: Prove non-vacuity (temporary)**
 
-This test must fail if swap-on-promote is removed. Temporarily edit `tier_manager.hpp`: change `static constexpr double SWAP_MARGIN = 1.5;` to `= 1e9;` (so no candidate can ever clear the margin — swap disabled). Rebuild and run:
+This test must fail if swap-on-promote is removed. (Note: `SWAP_MARGIN=1e9` does NOT disable it here, because col 2 cools to `keep_score==0` and `margin*0==0 < benefit` — the swap still fires. Disable the *mechanism* instead.) Temporarily add `return false;` as the FIRST line of `try_swap_promote` in `tier_manager.hpp` (feature off). Rebuild and run:
 `clang++ -std=c++20 -O2 test_live_tiering.cpp -o /tmp/tlt_vac && /tmp/tlt_vac; echo exit=$?`
-Expected: ABORTS on `assert(eng.column_tier(3) == MemorySpace::HOST ...)` (col 3 stays COLD without swap), nonzero exit. Paste the output. Then **revert `SWAP_MARGIN` to `1.5`**, rebuild, confirm PASS, and confirm `git diff tier_manager.hpp` is EMPTY.
+Expected: ABORTS on `assert(eng.column_tier(3) == MemorySpace::HOST ...)` — col 3 becomes a promotion candidate but, with HOST full and no swap, can't get in, so it stays COLD; nonzero exit. Paste the output. Then **revert** (`git checkout tier_manager.hpp`), rebuild, confirm PASS, and confirm `git diff tier_manager.hpp` is EMPTY.
 
 - [ ] **Step 4: Commit**
 
