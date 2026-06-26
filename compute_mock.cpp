@@ -21,6 +21,16 @@
  * store is still the flat key&MASK array (replaced in a later increment), so CPU/GPU
  * store parity holds only while keys don't collide; CPU is the DM-1-correct path.
  */
+// Engine observability snapshot: tiering activity counters + current resident-bytes gauges.
+struct EngineStats {
+    uint64_t cold_borrows;        // COLD->HOST borrows performed for a scan/aggregate
+    uint64_t rebalances;          // rebalance() passes run (scan-driven)
+    uint64_t migrations;          // migration decisions actually executed
+    size_t   catalog_columns;     // # columns in the tiered catalog
+    size_t   host_resident_bytes; // catalog bytes currently in RAM (TierManager's view)
+    size_t   cold_resident_bytes; // catalog bytes currently on SSD
+};
+
 class CPUMockEngine : public ComputeInterface {
 public:
     // host_cap is the RAM budget (bytes) for the tiered catalog; default unbounded so the
@@ -67,6 +77,13 @@ public:
     size_t host_resident_bytes() const { return tier_mgr_.resident_bytes(MemorySpace::HOST); }
     uint64_t column_checksum(uint64_t id) const { return catalog_.at(id)->checksum(); }
 
+    // Observability snapshot (counters since construction + current resident-bytes gauges).
+    EngineStats stats() const {
+        return EngineStats{ cold_borrows_, rebalances_, migrations_, catalog_.size(),
+                            tier_mgr_.resident_bytes(MemorySpace::HOST),
+                            tier_mgr_.resident_bytes(MemorySpace::COLD) };
+    }
+
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
     // g in [0, num_groups). key_id and value_id are distinct catalog columns of equal length
     // (uint32). Borrows both to HOST for the reduction, then returns each to its home tier (so
@@ -81,8 +98,8 @@ public:
         tier_mgr_.record_access(key_id, kc.size_bytes());
         tier_mgr_.record_access(value_id, vc.size_bytes());
 
-        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) kc.migrate_to(MemorySpace::HOST);
-        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) vc.migrate_to(MemorySpace::HOST);
+        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) { ++cold_borrows_; kc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
         const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
         const size_t n = kc.size_bytes() / sizeof(uint32_t);
@@ -102,8 +119,8 @@ public:
         assert(kc.size_bytes() == vc.size_bytes() && "key and value columns must be the same length");
         tier_mgr_.record_access(key_id, kc.size_bytes());
         tier_mgr_.record_access(value_id, vc.size_bytes());
-        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) kc.migrate_to(MemorySpace::HOST);
-        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) vc.migrate_to(MemorySpace::HOST);
+        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) { ++cold_borrows_; kc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
         const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
         const size_t n = kc.size_bytes() / sizeof(uint32_t);
@@ -272,7 +289,7 @@ private:
         tier_mgr_.record_access(col_id, col.size_bytes());          // heat signal
 
         const MemorySpace home = col.tier();
-        if (home != MemorySpace::HOST) col.migrate_to(MemorySpace::HOST); // pull SSD->RAM to scan
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); } // pull SSD->RAM to scan
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
         const size_t nvals = col.size_bytes() / sizeof(uint32_t);
         const uint64_t result = has_filter ? matrix_cpu_reduce(vals, nvals, threshold, op)
@@ -284,7 +301,8 @@ private:
         if (++scans_since_rebalance_ >= REBALANCE_EVERY) {
             std::unordered_map<uint64_t, TieredColumn*> ptrs;
             for (auto& kv : catalog_) ptrs[kv.first] = kv.second.get();
-            executor_.apply(tier_mgr_.rebalance(), ptrs);
+            migrations_ += executor_.apply(tier_mgr_.rebalance(), ptrs);
+            ++rebalances_;
             scans_since_rebalance_ = 0;
         }
         return result;
@@ -301,6 +319,9 @@ private:
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
     uint64_t scans_since_rebalance_ = 0;
+    uint64_t cold_borrows_ = 0;    // observability: COLD->HOST borrows
+    uint64_t rebalances_ = 0;      // observability: rebalance passes
+    uint64_t migrations_ = 0;      // observability: migration decisions executed
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column

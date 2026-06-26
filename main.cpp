@@ -249,6 +249,12 @@ void analytical_query_demo() {
     assert(scalar.size() == 1 && scalar[0] == vb_sum && "query over the SSD-resident column is correct");
     std::cout << "SELECT SUM(vb)  [col 3 was on SSD] -> " << scalar[0]
               << "  (pulled back to RAM, correct). Demo OK." << std::endl;
+    const EngineStats st = demo.stats();
+    std::cout << "engine stats: cold_borrows=" << st.cold_borrows
+              << " rebalances=" << st.rebalances << " migrations=" << st.migrations
+              << " catalog_cols=" << st.catalog_columns
+              << " | resident HOST=" << st.host_resident_bytes / (1024 * 1024) << "MB"
+              << " COLD=" << st.cold_resident_bytes / (1024 * 1024) << "MB" << std::endl;
 }
 
 int main() {
