@@ -83,11 +83,21 @@ inline size_t matrix_page_of(uint64_t key) {
     return (key & MATRIX_STORE_MASK) / MATRIX_PAGE_SIZE;
 }
 
-// OP_SCAN carries its filter threshold in the query payload (that's what payload is for).
+// OP_SCAN carries its filter threshold in the query payload, and may target a specific
+// catalog column: threshold at payload[0] (u32), column id at payload[8] (u64). Column
+// id 0 == the legacy fixed scan column. payload begins 8-byte aligned (DatabaseQuery
+// starts with u64 fields, payload is at offset 32), so the u64 at payload+8 is aligned.
 // One codec used by both engines so they decode identically.
-inline void matrix_set_scan_threshold(DatabaseQuery& q, uint32_t threshold) {
+inline void matrix_set_scan_target(DatabaseQuery& q, uint32_t threshold, uint64_t column_id) {
     q.opcode = OP_SCAN;
     *reinterpret_cast<uint32_t*>(q.payload) = threshold;
+    *reinterpret_cast<uint64_t*>(q.payload + 8) = column_id;
+}
+inline uint64_t matrix_get_scan_column_id(const DatabaseQuery& q) {
+    return *reinterpret_cast<const uint64_t*>(q.payload + 8);
+}
+inline void matrix_set_scan_threshold(DatabaseQuery& q, uint32_t threshold) {
+    matrix_set_scan_target(q, threshold, 0); // legacy: target the fixed column (id 0)
 }
 inline uint32_t matrix_get_scan_threshold(const DatabaseQuery& q) {
     return *reinterpret_cast<const uint32_t*>(q.payload);
