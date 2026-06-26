@@ -80,6 +80,10 @@ in the current env (CPU, no network) vs needs real infra.
 
 *GBY-1 landed (GROUP BY, CPU): `matrix_cpu_group_reduce` (dense `[0,num_groups)` key reduction, COUNT/SUM/MIN/MAX, out-of-range keys ignored, empty-group sentinels matching the scalar reducer) + `CPUMockEngine::grouped_aggregate(key_id, value_id, num_groups, op, out)` — per-group aggregate over two aligned tiered columns, double borrow-and-return (both columns pulled to RAM for the reduction, returned to home tier; correct even when both are COLD-demoted). Records heat on both; migration stays scan-driven. Not on ComputeInterface (CPU-engine method, GPU unaffected). Oracle + 10-test suite green. See spec/plan 2026-06-26-group-by.*
 
+*GBY-2 landed (filtered GROUP BY, CPU): `WHERE value > threshold` added to grouped aggregation via a templated `matrix_group_reduce_impl<bool Filtered>` (`if constexpr` compiles the filter out → unfiltered path byte-identical, zero churn to GBY-1) + `matrix_cpu_group_reduce_where` + `CPUMockEngine::grouped_aggregate_where`. Completes the canonical `SELECT key, AGG(value) WHERE value>T GROUP BY key`. Oracle + 10-test suite green. See spec/plan 2026-06-26-filtered-group-by. The 4 analytical entry points (scalar scan/agg, grouped, filtered-grouped) are candidates to unify behind one `MatrixQuery` (DM-4 query layer) next.*
+
+## 3. Transactions & concurrency correctness
+
 **GPU batch (queued for the user's next Colab run — host `<<<>>>` syntax is not clang-compilable, so these can't be verified autonomously; each carries the cross-backend invariant GPU==`matrix_cpu_*` as its correctness anchor):** AGG-2 GPU SUM/MIN/MAX reduction (atomicAdd/atomicMin/atomicMax variants of the u32x4 scan kernel, dispatched on the agg op); GPU grouped-reduction (atomics into per-group accumulators); DEVICE/VRAM catalog promotion (wire the tiered catalog into the CUDA engine with a real VRAM budget — the 24x scan win; migration mechanics proven by Inc 4). Fully-local CPU increments are preferred while autonomous.
 
 ## 3. Transactions & concurrency correctness
