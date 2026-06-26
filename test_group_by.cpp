@@ -93,11 +93,52 @@ static void test_engine_group_by_cold() {
     std::cout << "[engine group-by COLD double-borrow] ok\n";
 }
 
+static void test_group_reduce_where() {
+    const std::vector<uint32_t> keys = {0, 1, 0, 2, 1, 0};
+    const std::vector<uint32_t> vals = {5, 7, 9, 11, 13, 15};
+    const uint32_t G = 3;
+    std::vector<uint64_t> out(G);
+    // WHERE value > 8 -> kept: g0{9,15}, g1{13}, g2{11}
+    matrix_cpu_group_reduce_where(keys.data(), vals.data(), keys.size(), G, AGG_COUNT, 8, out.data());
+    assert((out == std::vector<uint64_t>{2, 1, 1}));
+    matrix_cpu_group_reduce_where(keys.data(), vals.data(), keys.size(), G, AGG_SUM, 8, out.data());
+    assert((out == std::vector<uint64_t>{24, 13, 11}));   // 9+15, 13, 11
+    matrix_cpu_group_reduce_where(keys.data(), vals.data(), keys.size(), G, AGG_MIN, 8, out.data());
+    assert((out == std::vector<uint64_t>{9, 13, 11}));
+    matrix_cpu_group_reduce_where(keys.data(), vals.data(), keys.size(), G, AGG_MAX, 8, out.data());
+    assert((out == std::vector<uint64_t>{15, 13, 11}));
+    // non-vacuity + regression: unfiltered wrapper still gives GBY-1's results
+    matrix_cpu_group_reduce(keys.data(), vals.data(), keys.size(), G, AGG_SUM, out.data());
+    assert((out == std::vector<uint64_t>{29, 20, 11}));
+    // WHERE value > 12 -> g2 emptied BY the filter
+    matrix_cpu_group_reduce_where(keys.data(), vals.data(), keys.size(), G, AGG_COUNT, 12, out.data());
+    assert((out == std::vector<uint64_t>{1, 1, 0}));
+    matrix_cpu_group_reduce_where(keys.data(), vals.data(), keys.size(), G, AGG_MIN, 12, out.data());
+    assert((out == std::vector<uint64_t>{15, 13, UINT64_MAX}));
+    std::cout << "[group reduce WHERE] ok\n";
+}
+
+static void test_engine_group_by_where() {
+    const std::vector<uint32_t> keys = {0, 1, 0, 2, 1, 0};
+    const std::vector<uint32_t> vals = {5, 7, 9, 11, 13, 15};
+    CPUMockEngine eng(0, "", /*host_cap=*/SIZE_MAX);
+    eng.load_scan_column(1, keys.data(), keys.size());
+    eng.load_scan_column(2, vals.data(), vals.size());
+    std::vector<uint64_t> out;
+    eng.grouped_aggregate_where(1, 2, /*num_groups=*/3, AGG_SUM, /*threshold=*/8, out);
+    assert((out == std::vector<uint64_t>{24, 13, 11}));
+    eng.grouped_aggregate_where(1, 2, 3, AGG_COUNT, 8, out);
+    assert((out == std::vector<uint64_t>{2, 1, 1}));
+    std::cout << "[engine group-by WHERE] ok\n";
+}
+
 int main() {
     test_group_reduce_handworked();
     test_group_reduce_edge();
     test_engine_group_by_host();
     test_engine_group_by_cold();
+    test_group_reduce_where();
+    test_engine_group_by_where();
     std::cout << "ALL GROUP-BY TESTS PASSED\n";
     return 0;
 }
