@@ -127,6 +127,32 @@ inline uint64_t matrix_cpu_reduce(const uint32_t* v, size_t n, uint32_t threshol
     }
 }
 
+// Unfiltered scalar reduction (aggregate ALL values; the no-WHERE companion to matrix_cpu_reduce).
+// COUNT -> n; SUM -> Σv (u64); MIN/MAX over all (empty sentinels MIN UINT64_MAX / MAX 0 reachable
+// only when n==0). Separate from matrix_cpu_reduce (which always filters value>threshold) — clearer
+// than threading if constexpr through its four per-op loops.
+inline uint64_t matrix_cpu_reduce_all(const uint32_t* v, size_t n, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) s += v[i]; return s; }
+        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if (v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if (v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      return n;
+    }
+}
+
+// A structured analytical query over catalog columns (value_col / key_col > 0). has_filter applies
+// WHERE value > threshold; grouped applies GROUP BY key_col into num_groups dense buckets.
+struct MatrixQuery {
+    uint64_t    value_col  = 0;
+    MatrixAggOp agg        = AGG_COUNT;
+    bool        has_filter = false;
+    uint32_t    threshold  = 0;
+    bool        grouped    = false;
+    uint64_t    key_col    = 0;
+    uint32_t    num_groups = 0;
+};
+
 // Grouped reduction core (GROUP BY key). Filtered==true applies WHERE value > threshold (compiled
 // out when false via if constexpr, so the unfiltered path is byte-identical to the original). Dense
 // groups [0, num_groups); keys >= num_groups ignored; out initialized per op (empty-group sentinels
