@@ -66,6 +66,8 @@ static void test_engine_group_by_host() {
     assert((out == std::vector<uint64_t>{29, 20, 11}));
     eng.grouped_aggregate(1, 2, 3, AGG_MAX, out);
     assert((out == std::vector<uint64_t>{15, 13, 11}));
+    eng.grouped_aggregate(1, 2, 3, AGG_MIN, out);            // MIN through the engine (incl. its sentinel path)
+    assert((out == std::vector<uint64_t>{5, 7, 11}));
     std::cout << "[engine group-by HOST] ok\n";
 }
 
