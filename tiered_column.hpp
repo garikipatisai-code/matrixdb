@@ -101,8 +101,14 @@ private:
     void write_cold(const std::vector<unsigned char>& b) {
         FILE* f = std::fopen(cold_path().c_str(), "wb");
         if (!f) { std::fprintf(stderr, "TieredColumn: cold write failed %s\n", cold_path().c_str()); std::abort(); }
-        std::fwrite(b.data(), 1, b.size(), f);
+        const size_t wrote = std::fwrite(b.data(), 1, b.size(), f);
         std::fclose(f);
+        // Fail loud on a short write (e.g. disk full) rather than leave a truncated cold
+        // copy that only surfaces as corruption on read-back — symmetric with read_to_host.
+        if (wrote != b.size()) {
+            std::fprintf(stderr, "TieredColumn: short cold write (%zu/%zu)\n", wrote, b.size());
+            std::abort();
+        }
     }
 
     void free_current() {
