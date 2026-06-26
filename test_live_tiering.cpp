@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <iostream>
+#include "tiered_column.hpp"
 
 static void test_codec() {
     DatabaseQuery q{};
@@ -19,8 +20,28 @@ static void test_codec() {
     std::cout << "[codec] ok\n";
 }
 
+static void test_host_ptr() {
+    std::vector<uint32_t> data(4);
+    for (uint32_t i = 0; i < 4; ++i) data[i] = i * 10;          // 0,10,20,30
+    TieredColumn col(101, reinterpret_cast<const unsigned char*>(data.data()),
+                     data.size() * sizeof(uint32_t));
+    assert(col.tier() == MemorySpace::HOST);
+    const uint32_t* v = reinterpret_cast<const uint32_t*>(col.host_ptr());
+    assert(v != nullptr && v[0] == 0 && v[1] == 10 && v[2] == 20 && v[3] == 30);
+
+    const uint64_t cks = col.checksum();
+    col.migrate_to(MemorySpace::COLD);
+    assert(col.host_ptr() == nullptr);                          // bytes on SSD now
+    col.migrate_to(MemorySpace::HOST);
+    const uint32_t* v2 = reinterpret_cast<const uint32_t*>(col.host_ptr());
+    assert(v2 != nullptr && v2[0] == 0 && v2[3] == 30);
+    assert(col.checksum() == cks);                              // round-trip integrity
+    std::cout << "[host_ptr] ok\n";
+}
+
 int main() {
     test_codec();
+    test_host_ptr();
     std::cout << "ALL LIVE-TIERING TESTS PASSED\n";
     return 0;
 }

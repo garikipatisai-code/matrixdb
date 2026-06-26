@@ -30,6 +30,13 @@ public:
     size_t size_bytes() const { return size_; }
     uint64_t id() const { return id_; }
 
+    // Pointer to the resident HOST bytes for in-place reads (e.g. a scan). Valid only while
+    // tier()==HOST; nullptr otherwise (the bytes live on SSD/VRAM — migrate to HOST first).
+    // Zero-copy: returns the live buffer, no allocation.
+    const unsigned char* host_ptr() const {
+        return tier_ == MemorySpace::HOST ? host_.data() : nullptr;
+    }
+
     // Move the column's bytes to `dest` (no-op if already there). Always stages through HOST.
     void migrate_to(MemorySpace dest) {
         if (dest == tier_) return;
