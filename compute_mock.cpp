@@ -67,6 +67,31 @@ public:
     size_t host_resident_bytes() const { return tier_mgr_.resident_bytes(MemorySpace::HOST); }
     uint64_t column_checksum(uint64_t id) const { return catalog_.at(id)->checksum(); }
 
+    // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
+    // g in [0, num_groups). key_id and value_id are distinct catalog columns of equal length
+    // (uint32). Borrows both to HOST for the reduction, then returns each to its home tier (so
+    // residency stays in lockstep with the TierManager). Records access heat on both columns;
+    // migration stays scan-driven (GROUP BY does not itself rebalance — see spec).
+    void grouped_aggregate(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
+                           MatrixAggOp op, std::vector<uint64_t>& out) {
+        assert(key_id != value_id && "group-by key and value must be distinct columns");
+        TieredColumn& kc = *catalog_.at(key_id);
+        TieredColumn& vc = *catalog_.at(value_id);
+        assert(kc.size_bytes() == vc.size_bytes() && "key and value columns must be the same length");
+        tier_mgr_.record_access(key_id, kc.size_bytes());
+        tier_mgr_.record_access(value_id, vc.size_bytes());
+
+        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) kc.migrate_to(MemorySpace::HOST);
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) vc.migrate_to(MemorySpace::HOST);
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
+        const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
+        const size_t n = kc.size_bytes() / sizeof(uint32_t);
+        out.assign(num_groups, 0);
+        matrix_cpu_group_reduce(keys, vals, n, num_groups, op, out.data());
+        if (vh != MemorySpace::HOST) vc.migrate_to(vh);       // return borrows
+        if (kh != MemorySpace::HOST) kc.migrate_to(kh);
+    }
+
     ~CPUMockEngine() override {
         // Make the fixed-capacity overflow seam loud (not silent) even in release builds:
         // if any write was dropped because the KVStore filled, report it. Inc 3's SSD
