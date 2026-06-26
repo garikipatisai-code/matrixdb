@@ -251,6 +251,10 @@ public:
     void execute_scan(DatabaseQuery& q) override {
         // u32x4 filter-count over the resident column, on the dedicated scan stream so
         // it overlaps point-op submission on stream_ and never head-of-line-blocks them.
+        // NOTE(AGG-2): this GPU path honors only AGG_COUNT — it ignores matrix_get_scan_agg_op
+        // and always counts. SUM/MIN/MAX (the CPU engine's matrix_cpu_reduce) need a GPU
+        // parallel-reduction kernel, deferred to AGG-2. Until then, send non-COUNT aggregates to
+        // the CPU engine; a non-COUNT op reaching here would silently return a COUNT.
         const auto st0 = std::chrono::steady_clock::now();
         const uint32_t threshold = matrix_get_scan_threshold(q);
         CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), scan_stream_));

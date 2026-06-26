@@ -46,6 +46,16 @@ enum MatrixOpcode : uint32_t {
     OP_SCAN  = 3,
 };
 
+// Aggregate reduction carried by OP_SCAN (payload offset 16). AGG_COUNT==0 is the default, so a
+// scan with no agg op set counts matches (the original behavior). SUM/MIN/MAX reduce the values
+// matching the predicate (value > threshold).
+enum MatrixAggOp : uint32_t {
+    AGG_COUNT = 0,
+    AGG_SUM   = 1,
+    AGG_MIN   = 2,
+    AGG_MAX   = 3,
+};
+
 // Columnar store + page-ownership layout (shard-per-thread).
 // The keyspace (STORE_SLOTS) is split into PAGE_COUNT contiguous pages. Exactly one
 // owner (one GPU thread) reads/writes a page's slots, so the same key always routes
