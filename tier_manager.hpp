@@ -228,6 +228,10 @@ private:
             if (s < worst) { worst = s; victim = &v; }
         }
         if (!victim) return false;                                   // nothing evictable
+        // Margin gate: cand must be decisively more valuable than the incumbent to displace it.
+        // Note by design this does NOT protect a stone-cold victim: when keep_score(victim)==0
+        // (idle, heat decayed out), SWAP_MARGIN*0==0 and any positive-benefit candidate wins —
+        // a worthless resident SHOULD yield. The margin only damps swaps between close-heat columns.
         if (promote_eval(cand).benefit <= SWAP_MARGIN * keep_score(*victim)) return false; // not worth it
         if (resident_bytes(to) - victim->bytes + cand.bytes > cap) return false; // one eviction won't fit cand
         const MemorySpace v_to = slower_tier(to);
