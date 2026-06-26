@@ -1,5 +1,8 @@
 #include "compute.hpp"
 #include "kv_store.hpp"
+#include "cold_store.hpp"
+#include <memory>
+#include <string>
 #include <vector>
 #include <array>
 #include <cassert>
@@ -17,14 +20,21 @@
  */
 class CPUMockEngine : public ComputeInterface {
 public:
-    explicit CPUMockEngine(size_t /*worker_count*/ = 0)
+    explicit CPUMockEngine(size_t /*worker_count*/ = 0, std::string wal_path = "")
         : binned_(MATRIX_BATCH_MAX)
         , scan_column_(MATRIX_SCAN_COLUMN_SIZE) {
         for (size_t i = 0; i < MATRIX_SCAN_COLUMN_SIZE; ++i)
             scan_column_[i] = static_cast<uint32_t>(i); // resident analytical column
+        // Durability is opt-in: with a WAL path, recover the point-op store by replaying
+        // the log into kv_ (a write committed before a crash is restored here).
+        if (!wal_path.empty()) {
+            cold_store_ = std::make_unique<ColdStore>(wal_path);
+            cold_store_->replay([this](uint64_t k, uint64_t v){ kv_.put(k, v); });
+        }
         std::cout << "CPUMockEngine initialized (page-ownership, "
                   << MATRIX_PAGE_COUNT << " pages, "
-                  << MATRIX_SCAN_COLUMN_SIZE << "-value scan column)." << std::endl;
+                  << MATRIX_SCAN_COLUMN_SIZE << "-value scan column"
+                  << (cold_store_ ? ", WAL durability ON" : "") << ")." << std::endl;
     }
 
     ~CPUMockEngine() override {
@@ -60,6 +70,10 @@ public:
                     q.transaction_id = v;
                     ++reads_;
                 } else if (q.opcode == OP_WRITE) {
+                    // Durability invariant: append to the WAL FIRST (fsync per policy) so a
+                    // write is only counted committed once it is durable. The in-memory kv_
+                    // is volatile and rebuilt from the WAL on recovery.
+                    if (cold_store_) cold_store_->append_put(q.query_id, q.query_id);
                     // mock projection: value == key. Fixed-capacity seam: a full table is
                     // counted as an overflow (always live, even under NDEBUG) so a dropped
                     // write is never silent. Inc 3 replaces this with SSD spill. The assert
@@ -149,6 +163,7 @@ private:
     // table is an explicit error, not silent loss. Sized with headroom over the demo's
     // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
     KVStore kv_{1u << 16}; // 65536 slots
+    std::unique_ptr<ColdStore> cold_store_; // null = durability off (default); set via WAL path
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column

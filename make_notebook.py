@@ -5,10 +5,10 @@ import json
 
 SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "memory_model.hpp", "tier_model.hpp", "cost_model.hpp", "router.hpp",
-           "kv_store.hpp", "tier_manager.hpp",
+           "kv_store.hpp", "cold_store.hpp", "tier_manager.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
-           "test_tier_manager.cpp"]
+           "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -60,6 +60,18 @@ cells += [
        "are deterministic."),
     code("!clang++ -std=c++20 -O2 test_tier_manager.cpp -o /tmp/ttm 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_tier_manager.cpp -o /tmp/ttm; /tmp/ttm"),
+    md("## 3d. ColdStore WAL test (CPU, no GPU)\n"
+       "\n"
+       "Proves durability: append+replay round-trip, data survives a fresh ColdStore "
+       "instance (restart), torn tail dropped, CRC corruption stops replay."),
+    code("!clang++ -std=c++20 -O2 test_cold_store.cpp -o /tmp/tcs 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_cold_store.cpp -o /tmp/tcs; /tmp/tcs"),
+    md("## 3e. Engine restart test (CPU, no GPU)\n"
+       "\n"
+       "End-to-end: point-op writes through one engine survive into a fresh engine on the "
+       "same WAL path — MatrixDB no longer loses data on restart."),
+    code("!clang++ -std=c++20 -O2 test_engine_restart.cpp -o /tmp/ter 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_engine_restart.cpp -o /tmp/ter; /tmp/ter"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
