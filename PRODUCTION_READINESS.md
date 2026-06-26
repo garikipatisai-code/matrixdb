@@ -92,7 +92,7 @@ in the current env (CPU, no network) vs needs real infra.
 
 ## 3. Transactions & concurrency correctness
 
-**GPU batch (queued for the user's next Colab run — host `<<<>>>` syntax is not clang-compilable, so these can't be verified autonomously; each carries the cross-backend invariant GPU==`matrix_cpu_*` as its correctness anchor):** AGG-2 GPU SUM/MIN/MAX reduction (atomicAdd/atomicMin/atomicMax variants of the u32x4 scan kernel, dispatched on the agg op); GPU grouped-reduction (atomics into per-group accumulators); DEVICE/VRAM catalog promotion (wire the tiered catalog into the CUDA engine with a real VRAM budget — the 24x scan win; migration mechanics proven by Inc 4). Fully-local CPU increments are preferred while autonomous.
+**GPU batch (queued for the user's next Colab run — host `<<<>>>` syntax is not clang-compilable, so these can't be verified autonomously; each carries the cross-backend invariant GPU==`matrix_cpu_*` as its correctness anchor):** AGG-2 GPU SUM/MIN/MAX reduction (atomicAdd/atomicMin/atomicMax variants of the u32x4 scan kernel, dispatched on the agg op); GPU grouped-reduction (atomics into per-group accumulators); DEVICE/VRAM catalog promotion (wire the tiered catalog into the CUDA engine with a real VRAM budget — the 24x scan win; migration mechanics proven by Inc 4). Fully-local CPU increments are preferred while autonomous. **→ Turnkey plan with exact kernels + the cross-backend verification harness: `docs/superpowers/plans/2026-06-26-gpu-batch-colab-ready.md` (research+plan done; implement+verify on Colab, merge per-piece when green).**
 
 ## 3. Transactions & concurrency correctness
 
