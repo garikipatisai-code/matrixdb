@@ -10,7 +10,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
-           "test_migration.cpp", "test_migration_gpu.cpp"]
+           "test_migration.cpp", "test_live_tiering.cpp", "test_migration_gpu.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -80,6 +80,11 @@ cells += [
        "TierManager decisions drive the executor to physically move columns."),
     code("!clang++ -std=c++20 -O2 test_migration.cpp -o /tmp/tmig 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_migration.cpp -o /tmp/tmig; /tmp/tmig"),
+    md("### Live tiering integration\n"
+       "The engine holds a catalog of analytical columns larger than its RAM budget; the "
+       "TierManager demotes the coldest to SSD and a scan pulls a cold column back, results intact."),
+    code("!clang++ -std=c++20 -O2 test_live_tiering.cpp -o /tmp/tlt 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_live_tiering.cpp -o /tmp/tlt; /tmp/tlt"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

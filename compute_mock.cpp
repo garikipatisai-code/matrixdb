@@ -1,6 +1,9 @@
 #include "compute.hpp"
 #include "kv_store.hpp"
 #include "cold_store.hpp"
+#include "migration_executor.hpp"  // MigrationExecutor + TierManager + TieredColumn + CostModel
+#include "memory_model.hpp"        // MemorySpace, MemoryModel
+#include <unordered_map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,8 +23,15 @@
  */
 class CPUMockEngine : public ComputeInterface {
 public:
-    explicit CPUMockEngine(size_t /*worker_count*/ = 0, std::string wal_path = "")
-        : binned_(MATRIX_BATCH_MAX)
+    // host_cap is the RAM budget (bytes) for the tiered catalog; default unbounded so the
+    // existing pipeline (empty catalog) is unaffected. device_cap=1 makes the DEVICE tier
+    // inert on the CPU build: scan_us() ignores gpu_available, so the brain would otherwise
+    // emit HOST->DEVICE promotions the CPU executor's migrate_to(DEVICE) aborts on; a 1-byte
+    // cap means no real column ever fits, so no DEVICE decision is emitted (cap==0 == unbounded).
+    explicit CPUMockEngine(size_t /*worker_count*/ = 0, std::string wal_path = "",
+                           size_t host_cap = SIZE_MAX)
+        : tier_mgr_(CostModel(MemoryModel::detect(false), false), /*device_cap=*/1, host_cap)
+        , binned_(MATRIX_BATCH_MAX)
         , scan_column_(MATRIX_SCAN_COLUMN_SIZE) {
         for (size_t i = 0; i < MATRIX_SCAN_COLUMN_SIZE; ++i)
             scan_column_[i] = static_cast<uint32_t>(i); // resident analytical column
@@ -36,6 +46,26 @@ public:
                   << MATRIX_SCAN_COLUMN_SIZE << "-value scan column"
                   << (cold_store_ ? ", WAL durability ON" : "") << ")." << std::endl;
     }
+
+    // Register a uint32 analytical column into the tiered catalog (born resident in HOST).
+    // id must be > 0 (0 is reserved for the legacy fixed scan column).
+    void load_scan_column(uint64_t id, const uint32_t* data, size_t n) {
+        assert(id != 0 && "column id 0 is reserved for the legacy fixed scan column");
+        // Register once: re-registering an id would desync the catalog from the brain (and
+        // could orphan a demoted column's COLD file). Callers assign distinct ids.
+        assert(catalog_.find(id) == catalog_.end() && "column id already registered");
+        const size_t bytes = n * sizeof(uint32_t);
+        catalog_[id] = std::make_unique<TieredColumn>(
+            id, reinterpret_cast<const unsigned char*>(data), bytes);
+        tier_mgr_.register_column(id, bytes, MemorySpace::HOST);
+    }
+
+    // Inspection (tests): where the bytes actually live vs where the brain believes, the
+    // HOST bytes the brain is accounting for, and a column's integrity checksum.
+    MemorySpace column_tier(uint64_t id) const { return catalog_.at(id)->tier(); }
+    MemorySpace manager_tier(uint64_t id) const { return tier_mgr_.tier_of(id); }
+    size_t host_resident_bytes() const { return tier_mgr_.resident_bytes(MemorySpace::HOST); }
+    uint64_t column_checksum(uint64_t id) const { return catalog_.at(id)->checksum(); }
 
     ~CPUMockEngine() override {
         // Make the fixed-capacity overflow seam loud (not silent) even in release builds:
@@ -96,13 +126,17 @@ public:
     }
 
     void execute_scan(DatabaseQuery& q) override {
-        // Filter-count over the resident column. Runs on the scan path's own thread, so
-        // it never blocks point ops. Touches only scan_* state (disjoint from the store).
+        // id==0 -> the legacy fixed resident column (unchanged); id>0 -> a tiered catalog column.
         const uint32_t threshold = matrix_get_scan_threshold(q);
+        const uint64_t col_id = matrix_get_scan_column_id(q);
         const auto st0 = std::chrono::steady_clock::now();
         uint64_t c = 0;
-        for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
-            c += (scan_column_[s2] > threshold);
+        if (col_id == 0) {
+            for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
+                c += (scan_column_[s2] > threshold);
+        } else {
+            c = scan_tiered_column(col_id, threshold);
+        }
         scan_time_s_ += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - st0).count();
         q.transaction_id = c;
@@ -159,11 +193,47 @@ public:
     }
 
 private:
+    // Scan one catalog column for value>threshold. A cold column is borrowed to HOST for the
+    // scan then returned to its home tier, so the engine's residency always matches the brain's
+    // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
+    // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
+    // HOST columns to SSD under the budget.
+    uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold) {
+        auto it = catalog_.find(col_id);
+        assert(it != catalog_.end() && "scan of unregistered column id");
+        TieredColumn& col = *it->second;
+        tier_mgr_.record_access(col_id, col.size_bytes());          // heat signal
+
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) col.migrate_to(MemorySpace::HOST); // pull SSD->RAM to scan
+        const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
+        const size_t nvals = col.size_bytes() / sizeof(uint32_t);
+        uint64_t c = 0;
+        for (size_t i = 0; i < nvals; ++i) c += (vals[i] > threshold);
+        // ponytail: returning the borrow rewrites the COLD file each cold scan; skip-if-unchanged
+        // (or a TierManager note_residency) is the upgrade path if cold-scan churn ever matters.
+        if (home != MemorySpace::HOST) col.migrate_to(home);        // return the borrow
+
+        if (++scans_since_rebalance_ >= REBALANCE_EVERY) {
+            std::unordered_map<uint64_t, TieredColumn*> ptrs;
+            for (auto& kv : catalog_) ptrs[kv.first] = kv.second.get();
+            executor_.apply(tier_mgr_.rebalance(), ptrs);
+            scans_since_rebalance_ = 0;
+        }
+        return c;
+    }
+
     // Point-op store: a real hash table (gap DM-1). Distinct keys never overwrite; a full
     // table is an explicit error, not silent loss. Sized with headroom over the demo's
     // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
     KVStore kv_{1u << 16}; // 65536 slots
     std::unique_ptr<ColdStore> cold_store_; // null = durability off (default); set via WAL path
+    // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
+    static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
+    TierManager tier_mgr_;                              // decides migrations (heat-driven)
+    MigrationExecutor executor_;                        // moves the bytes per decision
+    std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
+    uint64_t scans_since_rebalance_ = 0;
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column
