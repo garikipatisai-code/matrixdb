@@ -39,6 +39,24 @@ static void test_host_ptr() {
     std::cout << "[host_ptr] ok\n";
 }
 
+static void test_cold_path_uniqueness() {
+    // Two columns with the SAME id must NOT share a COLD file (else one's demote silently
+    // clobbers the other's bytes). Distinct values; round-trip both through COLD independently.
+    std::vector<uint32_t> a(4), b(4);
+    for (uint32_t i = 0; i < 4; ++i) { a[i] = i; b[i] = 100 + i; }
+    TieredColumn ca(7, reinterpret_cast<const unsigned char*>(a.data()), a.size() * sizeof(uint32_t));
+    TieredColumn cb(7, reinterpret_cast<const unsigned char*>(b.data()), b.size() * sizeof(uint32_t)); // same id 7
+    const uint64_t cka = ca.checksum(), ckb = cb.checksum();
+    assert(cka != ckb);
+    ca.migrate_to(MemorySpace::COLD);
+    cb.migrate_to(MemorySpace::COLD);             // shared path would overwrite ca's file here
+    ca.migrate_to(MemorySpace::HOST);
+    cb.migrate_to(MemorySpace::HOST);
+    assert(ca.checksum() == cka && "column A intact — not clobbered by same-id column B");
+    assert(cb.checksum() == ckb && "column B intact");
+    std::cout << "[cold-path uniqueness] ok\n";
+}
+
 static void test_tiered_single_column() {
     const size_t N = 1000;
     std::vector<uint32_t> col(N);
@@ -104,11 +122,47 @@ static void test_eviction_holds_more_than_ram() {
     std::cout << "[eviction holds-more-than-RAM + borrow] ok\n";
 }
 
+static void test_repromotion_under_pressure() {
+    const size_t N = 1000;
+    const size_t S = N * sizeof(uint32_t);
+    std::vector<uint32_t> col(N);
+    for (size_t i = 0; i < N; ++i) col[i] = static_cast<uint32_t>(i);
+
+    CPUMockEngine eng(0, "", /*host_cap=*/2 * S);   // room for 2 of 3 columns
+    eng.load_scan_column(1, col.data(), N);
+    eng.load_scan_column(2, col.data(), N);
+    eng.load_scan_column(3, col.data(), N);
+
+    const uint32_t T = 250;
+    auto scan = [&](uint64_t id) {
+        DatabaseQuery q{};
+        matrix_set_scan_target(q, T, id);
+        eng.execute_scan(q);
+        assert(q.transaction_id == N - 1 - T);       // 749, regardless of tier
+    };
+
+    // Phase 1: cols 1 & 2 hot, col 3 never -> col 3 demoted to COLD (the INT-1 baseline).
+    for (int r = 0; r < 8; ++r) { scan(1); scan(2); }
+    assert(eng.column_tier(3) == MemorySpace::COLD && "phase 1: col 3 demoted to SSD");
+
+    // Phase 2: FLIP the heat — col 3 scanned 3x/round (decisively hot, clears the COLD->HOST
+    // promotion gate), col 1 once, col 2 NEVER. Col 2 cools to keep_score 0; col 3 re-heats and
+    // is RE-PROMOTED to resident HOST (swap-on-promote displaces the now-cold col 2).
+    for (int r = 0; r < 16; ++r) { scan(3); scan(1); scan(3); scan(3); }
+    assert(eng.column_tier(3)  == MemorySpace::HOST && "col 3 re-promoted to RESIDENT RAM (not just borrowed)");
+    assert(eng.manager_tier(3) == MemorySpace::HOST && "brain agrees col 3 is resident");
+    assert(eng.column_tier(2)  == MemorySpace::COLD && "col 2 displaced to SSD");
+    assert(eng.host_resident_bytes() <= 2 * S       && "HOST within budget");
+    std::cout << "[re-promotion under pressure] ok\n";
+}
+
 int main() {
     test_codec();
     test_host_ptr();
+    test_cold_path_uniqueness();
     test_tiered_single_column();
     test_eviction_holds_more_than_ram();
+    test_repromotion_under_pressure();
     std::cout << "ALL LIVE-TIERING TESTS PASSED\n";
     return 0;
 }

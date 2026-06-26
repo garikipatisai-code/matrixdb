@@ -34,6 +34,8 @@ public:
     static constexpr double HYSTERESIS = 1.5;          // promote only if benefit > 1.5x cost
     static constexpr int    SCAN_HORIZON = 8;          // cap on est. future scans
     static constexpr uint64_t MIN_RESIDENCY_TICKS = 2; // anti-thrash: min ticks before evict
+    static constexpr double SWAP_MARGIN = 1.5;         // swap-on-promote: candidate must be > 1.5x
+                                                       // the victim's keep-value (anti-thrash band)
 
     // Record that `bytes` of column `id` were scanned. O(1); accumulates until rebalance.
     void record_access(uint64_t id, size_t bytes) {
@@ -71,8 +73,13 @@ public:
             Column& c = cols_.at(id);
             const MemorySpace to = faster_tier(c.tier);
             const size_t cap = capacity_of(to);
-            // cap == 0 means unbounded; otherwise the column must fit after current residents.
-            if (cap != 0 && resident_bytes(to) + c.bytes > cap) continue; // doesn't fit: skip
+            const bool fits = (cap == 0) || (resident_bytes(to) + c.bytes <= cap);
+            if (!fits) {
+                // `to` is full. Swap-on-promote: displace a colder resident if cand is worth it.
+                // (Free-space promotion is the common path above; this is the contended path.)
+                try_swap_promote(c, to, cap, decisions); // does nothing if no worthwhile victim
+                continue;
+            }
             const MemorySpace from = c.tier;
             decisions.push_back(MigrationDecision{c.id, from, to});
             c.tier = to;
@@ -192,6 +199,49 @@ private:
         const double penalty = (cm_.scan_us(slower, c.bytes) - cm_.scan_us(c.tier, c.bytes))
                                * static_cast<double>(est_future_scans(c));
         return penalty; // time/heat that would be lost by demoting
+    }
+
+    // Swap-on-promote: `cand` wants to move up into tier `to` but `to` is full. If the lowest-
+    // keep_score resident of `to` (a) is past MIN_RESIDENCY_TICKS and (b) is decisively colder
+    // than cand (promote_eval(cand).benefit > SWAP_MARGIN * keep_score(victim)), and evicting that
+    // one victim makes room, demote the victim one tier down and promote cand. Emits both
+    // decisions, updates tiers/arrival ticks, returns true. Single victim by design (see spec §2).
+    //
+    // The comparison is gross-benefit vs gross-keep (both are horizon scan-µs deltas, so it's
+    // dimensionally sound). cand's one-time migration cost is omitted here, but cand only reaches
+    // this path after should_promote (benefit > HYSTERESIS*cost), so net benefit is already
+    // positive; SWAP_MARGIN then demands cand be 1.5x the incumbent's keep value to displace it.
+    // ponytail: single-pass + best-first. On a true 3-tier system a HOST column could be both a
+    // DEVICE-promotion candidate and a swap victim this tick — cols_.at(id) re-reads the live tier
+    // so there is no corruption, only a transient sub-optimal order that self-corrects next tick.
+    // (Moot on the CPU build: DEVICE is inert via device_cap=1.)
+    bool try_swap_promote(Column& cand, MemorySpace to, size_t cap,
+                          std::vector<MigrationDecision>& decisions) {
+        if (cap == 0) return false; // unbounded tier never needs to evict to fit
+        Column* victim = nullptr;
+        double worst = 1e301;
+        for (auto& kv : cols_) {
+            Column& v = kv.second;
+            if (v.tier != to) continue;
+            if (tick_ - v.arrived_tick < MIN_RESIDENCY_TICKS) continue; // don't evict a fresh arrival
+            const double s = keep_score(v);
+            if (s < worst) { worst = s; victim = &v; }
+        }
+        if (!victim) return false;                                   // nothing evictable
+        // Margin gate: cand must be decisively more valuable than the incumbent to displace it.
+        // Note by design this does NOT protect a stone-cold victim: when keep_score(victim)==0
+        // (idle, heat decayed out), SWAP_MARGIN*0==0 and any positive-benefit candidate wins —
+        // a worthless resident SHOULD yield. The margin only damps swaps between close-heat columns.
+        if (promote_eval(cand).benefit <= SWAP_MARGIN * keep_score(*victim)) return false; // not worth it
+        if (resident_bytes(to) - victim->bytes + cand.bytes > cap) return false; // one eviction won't fit cand
+        const MemorySpace v_to = slower_tier(to);
+        decisions.push_back(MigrationDecision{victim->id, victim->tier, v_to});
+        victim->tier = v_to;
+        victim->arrived_tick = tick_;
+        decisions.push_back(MigrationDecision{cand.id, cand.tier, to});
+        cand.tier = to;
+        cand.arrived_tick = tick_;
+        return true;
     }
 
     CostModel cm_;

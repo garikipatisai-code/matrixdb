@@ -131,6 +131,39 @@ int main() {
         assert(on_device == 1 && "exactly one column fits the 1-column DEVICE");
     }
 
+    // --- Swap-on-promote: a re-hot lower-tier column displaces a COLDER resident of a full tier ---
+    {
+        const size_t COL = 64u*1024*1024;
+        // HOST holds exactly 2 columns; DEVICE inert (cap 1 => nothing fits, like the CPU engine).
+        TierManager tm(make_cm(), /*device_cap*/ 1, /*host_cap*/ 2*COL);
+        tm.register_column(1, COL, MemorySpace::HOST); // kept hot -> stays
+        tm.register_column(2, COL, MemorySpace::HOST); // goes idle -> the victim
+        tm.register_column(3, COL, MemorySpace::COLD); // re-hot candidate -> must swap in
+        for (int r = 0; r < 4; ++r) {
+            for (int i = 0; i < 50; ++i) { tm.record_access(1, COL); tm.record_access(3, COL); }
+            // col 2 idle: heat decays to ~0 -> lowest keep_score -> the displaced victim
+            tm.rebalance();
+        }
+        assert(tm.tier_of(3) == MemorySpace::HOST && "hot COLD column swapped into the full HOST tier");
+        assert(tm.tier_of(2) == MemorySpace::COLD && "idle HOST resident displaced to COLD");
+        assert(tm.tier_of(1) == MemorySpace::HOST && "hot resident kept (cost-benefit, not LRU)");
+        assert(tm.resident_bytes(MemorySpace::HOST) <= 2*COL && "HOST within budget after the swap");
+    }
+    // --- Swap margin (anti-thrash): an equally-hot candidate canNOT displace a resident ---
+    {
+        const size_t COL = 64u*1024*1024;
+        TierManager tm(make_cm(), /*device_cap*/ 1, /*host_cap*/ 2*COL);
+        tm.register_column(1, COL, MemorySpace::HOST);
+        tm.register_column(2, COL, MemorySpace::HOST);
+        tm.register_column(3, COL, MemorySpace::COLD);
+        for (int r = 0; r < 4; ++r) {
+            // all three equally hot -> value(col3) == value(col2) -> not > 1.5x -> no swap
+            for (int i = 0; i < 50; ++i) { tm.record_access(1, COL); tm.record_access(2, COL); tm.record_access(3, COL); }
+            tm.rebalance();
+        }
+        assert(tm.tier_of(3) == MemorySpace::COLD && "equally-hot candidate cannot clear the SWAP_MARGIN");
+        assert(tm.resident_bytes(MemorySpace::HOST) <= 2*COL && "HOST within budget");
+    }
     // --- Task 5: determinism — identical access sequence -> identical decisions ---
     {
         auto run = []() {

@@ -200,7 +200,12 @@ private:
     // HOST columns to SSD under the budget.
     uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold) {
         auto it = catalog_.find(col_id);
-        assert(it != catalog_.end() && "scan of unregistered column id");
+        if (it == catalog_.end()) {
+            assert(false && "scan of unregistered column id"); // debug: catch the caller bug
+            std::cerr << "CPUMockEngine: scan of unregistered column id " << col_id
+                      << " — empty result\n";                 // release: diagnosable, no null-deref
+            return 0;
+        }
         TieredColumn& col = *it->second;
         tier_mgr_.record_access(col_id, col.size_bytes());          // heat signal
 
