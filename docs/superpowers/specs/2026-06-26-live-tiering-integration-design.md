@@ -109,10 +109,14 @@ engine's RAM budget for the catalog (a ctor parameter; tests use a tiny budget t
 
 **Borrow-and-return** keeps the engine's actual residency in lockstep with the TierManager's
 accounting: a cold column is in HOST only transiently during its own scan, then rests back on
-COLD until a `rebalance()` *promotes* it (evicting a colder resident) once its heat earns a HOST
-slot. No side-channel migration is invisible to the brain, so its byte budget stays honest.
-`ponytail:` returning the borrow rewrites the COLD file each cold scan; a skip-if-unchanged (or a
-TierManager `note_residency`) optimization is the upgrade path if cold-scan churn ever matters.
+its home COLD tier. No side-channel migration is invisible to the brain, so its byte budget
+stays honest. **Note (delivered scope):** a re-hot COLD column is served by this transient
+borrow on every scan — it is *not* re-promoted to resident HOST under a full budget. TierManager
+promotion only fills *free* HOST space; with no spare RAM it cannot displace a colder resident
+(there is no swap-on-promote yet). Heat-driven resident re-promotion under memory pressure
+(swap-on-promote) is the immediate follow-up increment (INT-1b). `ponytail:` returning the
+borrow rewrites the COLD file each cold scan; the skip-if-unchanged optimization rides along
+with INT-1b.
 
 ---
 
@@ -146,10 +150,20 @@ tests stay green; notebook regenerated with a live-tiering test cell.
 
 ## 6. Open / deferred (not blockers)
 
+- **Heat-driven resident re-promotion (swap-on-promote) — INT-1b, the immediate follow-up.** A
+  re-hot COLD column today is served by transient borrow each scan, never re-promoted to resident
+  HOST under a full budget. INT-1b adds swap-on-promote to TierManager (displace a colder resident
+  when the candidate is decisively hotter, with hysteresis to avoid thrash) + a re-promotion-under-
+  pressure test. This makes the "hot data migrates back to RAM" half of auto-tiering real.
+- **Per-column COLD file uniqueness — fold into INT-1b.** `TieredColumn` keys its COLD path on
+  column id alone (`/tmp/matrixdb_tcol_<id>.bin`); two engine instances sharing an id would
+  collide. Latent today (one engine per process), but on the live auto-demote path now — add a
+  process/instance-unique discriminator. Also: a release-safe guard for a scan of an unregistered
+  id (today an `assert`, which is a null-deref under `-DNDEBUG`).
 - GPU catalog promotion (DEVICE tier) — wire the CUDA engine's catalog + promote hot columns to
   VRAM; the migration mechanics are proven (Inc 4). Next GPU increment.
 - WAL activation in the live pipeline (INT-2) — make the running engine durable by default/flag.
 - Unify the legacy fixed column into the catalog once it's no longer the perf fixture.
-- Eviction of the column mid-scan / concurrency — single-threaded scan consumer today, so no race;
-  revisit with multi-client.
+- The HOST budget is a *soft* cap: `MIN_RESIDENCY_TICKS` anti-thrash means it can be transiently
+  exceeded by one rebalance cycle after a load, then trimmed to budget at steady state.
 - Column-id assignment + a real load/query API — comes with the query layer (DM-4/DM-5).
