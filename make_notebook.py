@@ -15,6 +15,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_query.cpp",
            "test_observability.cpp",
            "test_column_io.cpp",
+           "test_catalog_snapshot.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -115,6 +116,11 @@ cells += [
        "COLD-tier column); a reloaded column queries identically."),
     code("!clang++ -std=c++20 -O2 test_column_io.cpp -o /tmp/tcio 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_column_io.cpp -o /tmp/tcio; /tmp/tcio"),
+    md("### Catalog snapshot durability\n"
+       "save_catalog / load_catalog snapshot the whole tiered catalog to one file and restore it "
+       "into a fresh engine (incl. COLD columns) — the analytical store survives a restart."),
+    code("!clang++ -std=c++20 -O2 test_catalog_snapshot.cpp -o /tmp/tcs2 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_catalog_snapshot.cpp -o /tmp/tcs2; /tmp/tcs2"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
