@@ -61,12 +61,14 @@ in the current env (CPU, no network) vs needs real infra.
 
 | ID | Gap | Why | Sev | Effort | Local? |
 |----|-----|-----|-----|--------|--------|
-| DU-1 | **Everything in-memory — total loss on restart/crash** | A database that loses all data on exit is not a database | P0 | L | yes |
-| DU-2 | No write-ahead log (WAL) | No way to recover committed writes after crash | P0 | L | yes |
-| DU-3 | No crash recovery / replay | Can't reconstruct state from log | P0 | L | yes |
+| DU-1 | **Everything in-memory — total loss on restart/crash** | A database that loses all data on exit is not a database **[FIXED — Inc 3: ColdStore WAL]** | P0 | L | yes |
+| DU-2 | No write-ahead log (WAL) | No way to recover committed writes after crash **[FIXED — Inc 3: ColdStore WAL]** | P0 | L | yes |
+| DU-3 | No crash recovery / replay | Can't reconstruct state from log **[FIXED — Inc 3: ColdStore WAL]** | P0 | L | yes |
 | DU-4 | No checkpoint/snapshot | Recovery would replay the entire log forever | P1 | M | yes |
 | DU-5 | No `fsync` discipline / durability guarantee levels | Can't promise "committed = survives power loss" | P1 | M | yes |
 | DU-6 | No backup / restore | Ops can't protect data | P1 | M | yes |
+
+*Inc 3 landed: `cold_store.hpp` — synchronous CRC-framed append-only WAL, wired into CPUMockEngine (append-before-commit + replay-on-construct). Committed point-op writes survive restart (DU-1/2/3 fixed). Checkpoint/compaction (DU-4) and cold-column spill (Inc 4) still pending. See spec 2026-06-25-increment-3-cold-store-wal-design.md.*
 
 ## 3. Transactions & concurrency correctness
 
