@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <unistd.h>   // getpid — per-process COLD-file namespace
 #if defined(MATRIX_USE_CUDA)
 #include <cuda_runtime.h>
 #endif
@@ -79,8 +81,19 @@ public:
 #endif
 
 private:
+    // Process-unique serial so two columns (even with the same logical id, even in two engine
+    // instances) never share a COLD file. Assigned once at construction, stable for the object's
+    // life (so HOST<->COLD round-trips hit the same path).
+    static uint64_t next_serial() {
+        static std::atomic<uint64_t> counter{0};
+        return counter.fetch_add(1, std::memory_order_relaxed);
+    }
+
     std::string cold_path() const {
-        return std::string("/tmp/matrixdb_tcol_") + std::to_string(id_) + ".bin";
+        // pid + per-object serial: unique within and across engine instances/processes.
+        return std::string("/tmp/matrixdb_tcol_")
+             + std::to_string(static_cast<long long>(getpid())) + "_"
+             + std::to_string(serial_) + ".bin";
     }
 
     std::vector<unsigned char> read_to_host() const {
@@ -137,5 +150,6 @@ private:
     uint64_t id_;
     size_t size_;
     MemorySpace tier_;
+    const uint64_t serial_ = next_serial();
     std::vector<unsigned char> host_;
 };
