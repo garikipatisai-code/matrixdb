@@ -12,6 +12,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
            "test_migration.cpp", "test_live_tiering.cpp", "test_aggregations.cpp",
            "test_group_by.cpp",
+           "test_query.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -97,6 +98,11 @@ cells += [
        "verified against hand-worked and brute-force oracles — including over COLD-demoted columns."),
     code("!clang++ -std=c++20 -O2 test_group_by.cpp -o /tmp/tgby 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_group_by.cpp -o /tmp/tgby; /tmp/tgby"),
+    md("### Unified query API\n"
+       "One `execute_query(MatrixQuery)` composes scalar/grouped × filtered/unfiltered aggregation "
+       "over tiered catalog columns — verified against closed-form and brute-force oracles."),
+    code("!clang++ -std=c++20 -O2 test_query.cpp -o /tmp/tq 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_query.cpp -o /tmp/tq; /tmp/tq"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

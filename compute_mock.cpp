@@ -113,6 +113,21 @@ public:
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
 
+    // Unified analytical query over catalog columns. Routes the 4 cases (scalar/grouped ×
+    // unfiltered/filtered) to the existing primitives. Scalar results occupy out[0]; grouped
+    // results occupy out[0..num_groups). Operates on catalog columns only (value_col/key_col > 0;
+    // the legacy id-0 fixed column is the benchmark fixture, not a query target).
+    void execute_query(const MatrixQuery& q, std::vector<uint64_t>& out) {
+        assert(q.value_col != 0 && "execute_query: value_col must be a catalog column (id > 0)");
+        if (q.grouped) {
+            assert(q.key_col != 0 && "execute_query: grouped query needs a key_col (id > 0)");
+            if (q.has_filter) grouped_aggregate_where(q.key_col, q.value_col, q.num_groups, q.agg, q.threshold, out);
+            else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
+        } else {
+            out.assign(1, scan_tiered_column(q.value_col, q.threshold, q.agg, q.has_filter));
+        }
+    }
+
     ~CPUMockEngine() override {
         // Make the fixed-capacity overflow seam loud (not silent) even in release builds:
         // if any write was dropped because the KVStore filled, report it. Inc 3's SSD
@@ -245,7 +260,7 @@ private:
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
     // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
     // HOST columns to SSD under the budget.
-    uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold, MatrixAggOp op) {
+    uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold, MatrixAggOp op, bool has_filter = true) {
         auto it = catalog_.find(col_id);
         if (it == catalog_.end()) {
             assert(false && "scan of unregistered column id"); // debug: catch the caller bug
@@ -260,7 +275,8 @@ private:
         if (home != MemorySpace::HOST) col.migrate_to(MemorySpace::HOST); // pull SSD->RAM to scan
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
         const size_t nvals = col.size_bytes() / sizeof(uint32_t);
-        const uint64_t result = matrix_cpu_reduce(vals, nvals, threshold, op);
+        const uint64_t result = has_filter ? matrix_cpu_reduce(vals, nvals, threshold, op)
+                                           : matrix_cpu_reduce_all(vals, nvals, op);
         // ponytail: returning the borrow rewrites the COLD file each cold scan; skip-if-unchanged
         // (or a TierManager note_residency) is the upgrade path if cold-scan churn ever matters.
         if (home != MemorySpace::HOST) col.migrate_to(home);        // return the borrow
