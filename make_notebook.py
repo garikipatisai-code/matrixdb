@@ -11,6 +11,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
            "test_migration.cpp", "test_live_tiering.cpp", "test_aggregations.cpp",
+           "test_group_by.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -91,6 +92,11 @@ cells += [
        "the legacy column and a tiered catalog column — verified against closed-form oracles."),
     code("!clang++ -std=c++20 -O2 test_aggregations.cpp -o /tmp/tagg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_aggregations.cpp -o /tmp/tagg; /tmp/tagg"),
+    md("### Grouped aggregation (GROUP BY)\n"
+       "Per-group COUNT/SUM/MIN/MAX over two aligned tiered columns (a key and a value), "
+       "verified against hand-worked and brute-force oracles — including over COLD-demoted columns."),
+    code("!clang++ -std=c++20 -O2 test_group_by.cpp -o /tmp/tgby 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_group_by.cpp -o /tmp/tgby; /tmp/tgby"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
