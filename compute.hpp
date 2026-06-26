@@ -127,6 +127,29 @@ inline uint64_t matrix_cpu_reduce(const uint32_t* v, size_t n, uint32_t threshol
     }
 }
 
+// Grouped reduction (GROUP BY key): for each row i, fold values[i] into out[keys[i]] by `op`,
+// for dense groups [0, num_groups). Keys >= num_groups are ignored (no bucket). `out` (length
+// num_groups) is initialized here per op — empty-group sentinels match matrix_cpu_reduce:
+// COUNT/SUM/MAX -> 0, MIN -> UINT64_MAX. SUM accumulates in u64. One pass; the op branch is
+// inside the loop because grouped reduction is scatter-bound (random out[k] writes), not branch-bound.
+inline void matrix_cpu_group_reduce(const uint32_t* keys, const uint32_t* values, size_t n,
+                                    uint32_t num_groups, MatrixAggOp op, uint64_t* out) {
+    const uint64_t init = (op == AGG_MIN) ? UINT64_MAX : 0;
+    for (uint32_t g = 0; g < num_groups; ++g) out[g] = init;
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t k = keys[i];
+        if (k >= num_groups) continue;               // out-of-range key: ignored
+        const uint32_t v = values[i];
+        switch (op) {
+            case AGG_SUM:   out[k] += v; break;
+            case AGG_MIN:   if (v < out[k]) out[k] = v; break;
+            case AGG_MAX:   if (v > out[k]) out[k] = v; break;
+            case AGG_COUNT:
+            default:        out[k] += 1; break;
+        }
+    }
+}
+
 /**
  * @brief Stable counting-sort of a batch by owning page (the "bin in the batcher" step).
  * Fills `binned` with the queries grouped by page — order within a page preserved, so
