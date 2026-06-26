@@ -45,10 +45,49 @@ static void test_agg_codec() {
     std::cout << "[agg codec] ok\n";
 }
 
+static void test_engine_agg_legacy() {
+    CPUMockEngine eng(0);                          // legacy fixed column (id 0)
+    const uint64_t SIZE = MATRIX_SCAN_COLUMN_SIZE;
+    const uint32_t T = 8000000;                    // < SIZE
+    auto run = [&](MatrixAggOp op) {
+        DatabaseQuery q{}; matrix_set_scan_target(q, T, 0); matrix_set_scan_agg_op(q, op);
+        eng.execute_scan(q); return q.transaction_id;
+    };
+    const uint64_t cnt = SIZE - 1 - T;
+    assert(run(AGG_COUNT) == cnt);
+    assert(run(AGG_MIN)   == static_cast<uint64_t>(T) + 1);
+    assert(run(AGG_MAX)   == SIZE - 1);
+    const uint64_t sum = (static_cast<uint64_t>(SIZE - 1) + (static_cast<uint64_t>(T) + 1)) * cnt / 2;
+    assert(run(AGG_SUM)   == sum);
+    std::cout << "[engine agg legacy] ok\n";
+}
+
+static void test_engine_agg_tiered() {
+    const size_t N = 1000;
+    std::vector<uint32_t> col(N);
+    for (size_t i = 0; i < N; ++i) col[i] = static_cast<uint32_t>(i);
+    CPUMockEngine eng(0, "", /*host_cap=*/SIZE_MAX);
+    eng.load_scan_column(1, col.data(), N);
+    const uint32_t T = 600;
+    auto run = [&](MatrixAggOp op) {
+        DatabaseQuery q{}; matrix_set_scan_target(q, T, 1); matrix_set_scan_agg_op(q, op);
+        eng.execute_scan(q); return q.transaction_id;
+    };
+    const uint64_t cnt = N - 1 - T;
+    assert(run(AGG_COUNT) == cnt);
+    assert(run(AGG_MIN)   == static_cast<uint64_t>(T) + 1);
+    assert(run(AGG_MAX)   == N - 1);
+    uint64_t sum = 0; for (uint64_t i = T + 1; i <= N - 1; ++i) sum += i;
+    assert(run(AGG_SUM)   == sum);
+    std::cout << "[engine agg tiered] ok\n";
+}
+
 int main() {
     test_reduce_closed_form();
     test_reduce_empty();
     test_agg_codec();
+    test_engine_agg_legacy();
+    test_engine_agg_tiered();
     std::cout << "ALL AGGREGATION TESTS PASSED\n";
     return 0;
 }

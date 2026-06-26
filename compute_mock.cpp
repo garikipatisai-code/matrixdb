@@ -126,16 +126,17 @@ public:
     }
 
     void execute_scan(DatabaseQuery& q) override {
-        // id==0 -> the legacy fixed resident column (unchanged); id>0 -> a tiered catalog column.
+        // id==0 -> the legacy fixed resident column; id>0 -> a tiered catalog column. The agg op
+        // (default AGG_COUNT) selects the reduction; AGG_COUNT preserves the original count result.
         const uint32_t threshold = matrix_get_scan_threshold(q);
         const uint64_t col_id = matrix_get_scan_column_id(q);
+        const MatrixAggOp op = matrix_get_scan_agg_op(q);
         const auto st0 = std::chrono::steady_clock::now();
         uint64_t c = 0;
         if (col_id == 0) {
-            for (size_t s2 = 0; s2 < MATRIX_SCAN_COLUMN_SIZE; ++s2)
-                c += (scan_column_[s2] > threshold);
+            c = matrix_cpu_reduce(scan_column_.data(), MATRIX_SCAN_COLUMN_SIZE, threshold, op);
         } else {
-            c = scan_tiered_column(col_id, threshold);
+            c = scan_tiered_column(col_id, threshold, op);
         }
         scan_time_s_ += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - st0).count();
@@ -198,7 +199,7 @@ private:
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
     // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
     // HOST columns to SSD under the budget.
-    uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold) {
+    uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold, MatrixAggOp op) {
         auto it = catalog_.find(col_id);
         if (it == catalog_.end()) {
             assert(false && "scan of unregistered column id"); // debug: catch the caller bug
@@ -213,8 +214,7 @@ private:
         if (home != MemorySpace::HOST) col.migrate_to(MemorySpace::HOST); // pull SSD->RAM to scan
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
         const size_t nvals = col.size_bytes() / sizeof(uint32_t);
-        uint64_t c = 0;
-        for (size_t i = 0; i < nvals; ++i) c += (vals[i] > threshold);
+        const uint64_t result = matrix_cpu_reduce(vals, nvals, threshold, op);
         // ponytail: returning the borrow rewrites the COLD file each cold scan; skip-if-unchanged
         // (or a TierManager note_residency) is the upgrade path if cold-scan churn ever matters.
         if (home != MemorySpace::HOST) col.migrate_to(home);        // return the borrow
@@ -225,7 +225,7 @@ private:
             executor_.apply(tier_mgr_.rebalance(), ptrs);
             scans_since_rebalance_ = 0;
         }
-        return c;
+        return result;
     }
 
     // Point-op store: a real hash table (gap DM-1). Distinct keys never overwrite; a full
