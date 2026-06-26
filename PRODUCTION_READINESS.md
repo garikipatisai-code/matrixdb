@@ -94,8 +94,6 @@ in the current env (CPU, no network) vs needs real infra.
 
 *VAL-1 landed (query input validation, CPU): `execute_query` now returns `MatrixQueryStatus` (OK / ERR_UNKNOWN_COLUMN / ERR_INVALID_GROUP / ERR_TOO_MANY_GROUPS) and validates at the boundary — unknown/zero column id, self-group (key==value), key/value length mismatch, num_groups==0, and num_groups>MAX_QUERY_GROUPS (1<<28) are all rejected gracefully (out cleared) with NO assert/throw/crash. The `||` short-circuit (catalog_has before `.at()`) makes the error paths release-safe — proven under `-DNDEBUG` (a reviewer wrapped a bad query in try/catch: no throw). The query trust boundary no longer crashes on malformed input. Existing callers (demo, test_query) ignore the new return and still compile. 15-test suite + oracle green. See spec/plan 2026-06-26-query-validation. Validating the admin/persistence entry points is the follow-up.*
 
-## 3. Transactions & concurrency correctness
-
 **GPU batch (queued for the user's next Colab run — host `<<<>>>` syntax is not clang-compilable, so these can't be verified autonomously; each carries the cross-backend invariant GPU==`matrix_cpu_*` as its correctness anchor):** AGG-2 GPU SUM/MIN/MAX reduction (atomicAdd/atomicMin/atomicMax variants of the u32x4 scan kernel, dispatched on the agg op); GPU grouped-reduction (atomics into per-group accumulators); DEVICE/VRAM catalog promotion (wire the tiered catalog into the CUDA engine with a real VRAM budget — the 24x scan win; migration mechanics proven by Inc 4). Fully-local CPU increments are preferred while autonomous. **→ Turnkey plan with exact kernels + the cross-backend verification harness: `docs/superpowers/plans/2026-06-26-gpu-batch-colab-ready.md` (research+plan done; implement+verify on Colab, merge per-piece when green).**
 
 ## 3. Transactions & concurrency correctness
@@ -106,6 +104,8 @@ in the current env (CPU, no network) vs needs real infra.
 | TX-2 | No isolation levels / MVCC | Concurrent readers/writers have no defined semantics | P1 | XL | yes |
 | TX-3 | Full OCC (TEV lock-bit + read-set validation) never built (spec'd, deferred) | The conflict path the spec designed is absent | P1 | L | yes |
 | TX-4 | Commit/visibility semantics undefined | When is a write visible to a reader? No answer today | P1 | M | yes |
+
+*TX-1 landed (atomic transactions, CPU — fully local, no infra): `CPUMockEngine::begin/txn_put/commit/rollback` over a WAL-backed group commit. A transaction buffers writes; `commit()` durably appends them as one group (`append_txn_put × N` + a CRC'd commit marker, fsync) then applies; `rollback()` discards (writes nothing). **Crash-atomic:** a transaction is all-or-nothing across a crash — replay buffers `OP_TXN_WRITE` records and applies them only on a commit marker, discarding an uncommitted (trailing) group. Additive to the WAL: the `OP_WRITE` auto-commit path is byte-identical, so `test_cold_store`/`test_engine_restart` pass unchanged (a reviewer proved crash-atomicity with a 6-case adversarial harness; the OP_WRITE refactor is byte-for-byte behavior-preserving). Delivers ACID **A**(tomicity) on top of the existing **D**(urability). 16-test suite + oracle green. See spec/plan 2026-06-26-transactions. **Remaining TX (all local): TX-2 isolation/MVCC, TX-4 reader-visibility/snapshot semantics — bigger, deferred.***
 
 ## 4. Networking, API & multi-client
 
