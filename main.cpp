@@ -190,6 +190,67 @@ void routing_demo(Router& router) {
               << ", 64MB column -> " << sp[(int)router.home_of(large_id)] << std::endl;
 }
 
+// Demonstrates the full analytical stack live (not just in tests): load catalog columns into a
+// RAM-constrained engine, run unified queries via execute_query, show auto-tiering hold a working
+// set larger than RAM, and self-verify every result against an in-function brute-force oracle.
+// Uses its own engine + catalog columns (id>0) — disjoint from the benchmark pipeline + scan oracle.
+void analytical_query_demo() {
+    const size_t N = 1u << 20;                 // 1M rows
+    const uint32_t G = 4;                       // 4 groups
+    const size_t S = N * sizeof(uint32_t);
+    std::vector<uint32_t> keys(N), va(N), vb(N);
+    for (size_t i = 0; i < N; ++i) {
+        keys[i] = static_cast<uint32_t>(i % G);
+        va[i]   = static_cast<uint32_t>(i % 1000);
+        vb[i]   = static_cast<uint32_t>(i % 1000);
+    }
+    // Brute-force oracles (independent of the engine).
+    std::vector<uint64_t> g_oracle(G, 0);
+    uint64_t vb_sum = 0;
+    for (size_t i = 0; i < N; ++i) { if (va[i] > 500) g_oracle[keys[i]] += va[i]; vb_sum += vb[i]; }
+
+    CPUMockEngine demo(0, "", /*host_cap=*/2 * S);   // RAM holds 2 of the 3 columns
+    demo.load_scan_column(1, keys.data(), N);        // key (group) column
+    demo.load_scan_column(2, va.data(),  N);         // value column A
+    demo.load_scan_column(3, vb.data(),  N);         // value column B
+
+    std::cout << "\n=== Analytical query demo (tiered catalog + execute_query) ===" << std::endl;
+    std::cout << "Loaded 3 columns (" << (3 * S) / (1024 * 1024) << " MB) into a "
+              << (2 * S) / (1024 * 1024) << " MB RAM budget." << std::endl;
+
+    // SELECT key, SUM(va) WHERE va > 500 GROUP BY key
+    std::vector<uint64_t> grouped;
+    demo.execute_query(MatrixQuery{.value_col = 2, .agg = AGG_SUM, .has_filter = true, .threshold = 500,
+                                   .grouped = true, .key_col = 1, .num_groups = G}, grouped);
+    assert(grouped == g_oracle && "grouped query result matches oracle");
+    std::cout << "SELECT key, SUM(va) WHERE va>500 GROUP BY key:" << std::endl;
+    for (uint32_t g = 0; g < G; ++g)
+        std::cout << "   group " << g << " -> " << grouped[g] << std::endl;
+
+    // Drive tiering: keep cols 1 & 2 hot (scalar scans), never touch col 3 -> col 3 (heat 0) is the
+    // deterministic eviction victim once past MIN_RESIDENCY_TICKS.
+    std::vector<uint64_t> scalar;
+    for (int k = 0; k < 16; ++k) {
+        demo.execute_query(MatrixQuery{.value_col = 1, .agg = AGG_COUNT}, scalar);
+        demo.execute_query(MatrixQuery{.value_col = 2, .agg = AGG_COUNT}, scalar);
+    }
+    assert(demo.column_tier(3) == MemorySpace::COLD && "idle column auto-demoted to SSD");
+    assert(demo.column_tier(1) == MemorySpace::HOST && demo.column_tier(2) == MemorySpace::HOST
+           && "hot columns kept resident");
+
+    const char* sp[] = {"HOST", "DEVICE", "COLD", "UNIFIED"};
+    std::cout << "After a hot workload on cols 1 & 2, tier residency: col1="
+              << sp[(int)demo.column_tier(1)] << " col2=" << sp[(int)demo.column_tier(2)]
+              << " col3=" << sp[(int)demo.column_tier(3)]
+              << "  (3-column working set in a 2-column RAM budget; col 3 auto-tiered to SSD)" << std::endl;
+
+    // Query the demoted column -> pulled back to RAM, correct regardless of tier.
+    demo.execute_query(MatrixQuery{.value_col = 3, .agg = AGG_SUM}, scalar);
+    assert(scalar.size() == 1 && scalar[0] == vb_sum && "query over the SSD-resident column is correct");
+    std::cout << "SELECT SUM(vb)  [col 3 was on SSD] -> " << scalar[0]
+              << "  (pulled back to RAM, correct). Demo OK." << std::endl;
+}
+
 int main() {
     std::cout << "MatrixDB Bare-Metal Engine Booting..." << std::endl;
 
@@ -429,6 +490,7 @@ int main() {
                   << "max=" << latencies_ns.back() << std::endl;
     }
 
+    analytical_query_demo();
     std::cout << "Engine execution loop completed successfully." << std::endl;
     return 0;
 }
