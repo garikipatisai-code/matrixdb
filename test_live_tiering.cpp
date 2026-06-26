@@ -39,9 +39,33 @@ static void test_host_ptr() {
     std::cout << "[host_ptr] ok\n";
 }
 
+static void test_tiered_single_column() {
+    const size_t N = 1000;
+    std::vector<uint32_t> col(N);
+    for (size_t i = 0; i < N; ++i) col[i] = static_cast<uint32_t>(i); // value[i]=i
+    CPUMockEngine eng(0, "", /*host_cap=*/SIZE_MAX);                   // generous: no eviction
+    eng.load_scan_column(1, col.data(), N);
+
+    DatabaseQuery q{};
+    const uint32_t T = 500;
+    matrix_set_scan_target(q, T, 1);
+    eng.execute_scan(q);
+    assert(q.transaction_id == N - 1 - T);                            // count of i>T == 499
+    assert(eng.column_tier(1) == MemorySpace::HOST);                  // fits budget, stays resident
+
+    // legacy id==0 path still scans the fixed column correctly
+    DatabaseQuery ql{};
+    const uint32_t TL = 1000;
+    matrix_set_scan_threshold(ql, TL);
+    eng.execute_scan(ql);
+    assert(ql.transaction_id == MATRIX_SCAN_COLUMN_SIZE - 1 - TL);
+    std::cout << "[tiered single-column + legacy] ok\n";
+}
+
 int main() {
     test_codec();
     test_host_ptr();
+    test_tiered_single_column();
     std::cout << "ALL LIVE-TIERING TESTS PASSED\n";
     return 0;
 }
