@@ -160,13 +160,19 @@ engine holds **more than fits in RAM**, and a scan of the cold column borrows it
 returns correct results, and releases it. Proven non-vacuous (disable the rebalance trigger and
 the test fails). This makes seed #2 ("resident-first analytics") *partly real*.
 
-**The honest seam:** what's delivered is *borrow-on-access*, not *heat-driven residency*. Under a
-full budget, a column that becomes hot again is re-read from SSD on every scan — the TierManager
-wants to promote it back (its `should_promote` fires) but can't, because promotion only fills
-*free* HOST space and there's no swap-on-promote to evict a colder resident. So "hot columns
-pinned in VRAM/RAM" — the actual win in seed #2 — needs swap-on-promote. That's INT-1b. The
-lesson repeats Inc 2's: a unit test under *ample* capacity proved promotion works; only the live
-integration under *pressure* exposed that promotion can't reclaim occupied space.
+**The honest seam (CLOSED by INT-1b):** what INT-1 delivered was *borrow-on-access*, not
+*heat-driven residency*. Under a full budget, a column that becomes hot again was re-read from SSD
+on every scan — the TierManager wanted to promote it back (its `should_promote` fired) but couldn't,
+because promotion only filled *free* HOST space with no swap-on-promote to evict a colder resident.
+INT-1b added swap-on-promote: a re-hot column now displaces the lowest-keep_score resident (when
+it's >1.5x more valuable and the victim is past min-residency), so "hot columns pinned in RAM" —
+the actual win in seed #2 — is now real and live. The lesson repeated Inc 2's: a unit test under
+*ample* capacity proved promotion works; only the live integration under *pressure* exposed that
+promotion couldn't reclaim occupied space. A second lesson from INT-1b: the re-promotion test first
+*failed* because the column wasn't scanned hard enough to clear the COLD→HOST cost-benefit gate —
+"re-hot" must mean *worth the SSD→RAM migration*, not merely "accessed again." The economics gate
+is correct; the test parameters were wrong. The full RAM↔SSD auto-tiering loop (demote cold +
+re-promote hot) now runs in the live CPU engine; VRAM is the remaining tier (needs the GPU).
 
 ---
 
