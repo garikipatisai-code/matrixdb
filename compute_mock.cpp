@@ -86,7 +86,7 @@ public:
         const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
         const size_t n = kc.size_bytes() / sizeof(uint32_t);
-        out.assign(num_groups, 0);
+        out.resize(num_groups);   // matrix_cpu_group_reduce initializes every slot per op (MIN sentinel ≠ 0)
         matrix_cpu_group_reduce(keys, vals, n, num_groups, op, out.data());
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);       // return borrows
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
