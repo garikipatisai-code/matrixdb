@@ -193,19 +193,24 @@ public:
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
 
-    // Unified analytical query over catalog columns. Routes the 4 cases (scalar/grouped ×
-    // unfiltered/filtered) to the existing primitives. Scalar results occupy out[0]; grouped
-    // results occupy out[0..num_groups). Operates on catalog columns only (value_col/key_col > 0;
-    // the legacy id-0 fixed column is the benchmark fixture, not a query target).
-    void execute_query(const MatrixQuery& q, std::vector<uint64_t>& out) {
-        assert(q.value_col != 0 && "execute_query: value_col must be a catalog column (id > 0)");
+    // Unified analytical query over catalog columns. Validates input at the boundary and returns a
+    // status (never crashes on caller input); on any ERR, out is cleared. Scalar -> out[0];
+    // grouped -> out[0..num_groups). Catalog columns only (the legacy id-0 fixed column is the
+    // benchmark fixture, not a query target).
+    MatrixQueryStatus execute_query(const MatrixQuery& q, std::vector<uint64_t>& out) {
+        out.clear();
+        if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
         if (q.grouped) {
-            assert(q.key_col != 0 && "execute_query: grouped query needs a key_col (id > 0)");
+            if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
+                || catalog_.at(q.key_col)->size_bytes() != catalog_.at(q.value_col)->size_bytes())
+                return MatrixQueryStatus::ERR_INVALID_GROUP;
+            if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
             if (q.has_filter) grouped_aggregate_where(q.key_col, q.value_col, q.num_groups, q.agg, q.threshold, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
         } else {
             out.assign(1, scan_tiered_column(q.value_col, q.threshold, q.agg, q.has_filter));
         }
+        return MatrixQueryStatus::OK;
     }
 
     ~CPUMockEngine() override {
@@ -335,6 +340,9 @@ public:
     }
 
 private:
+    // True iff `id` names a real catalog column (id 0 is the legacy fixed column, never a query target).
+    bool catalog_has(uint64_t id) const { return id != 0 && catalog_.count(id) != 0; }
+
     // Scan one catalog column for value>threshold. A cold column is borrowed to HOST for the
     // scan then returned to its home tier, so the engine's residency always matches the brain's
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
@@ -379,6 +387,7 @@ private:
     // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
     static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
     static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434154u; // 'MCAT' — catalog snapshot v0
+    static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // grouped-query num_groups ceiling (out alloc guard)
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column

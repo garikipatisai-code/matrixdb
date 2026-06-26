@@ -153,6 +153,10 @@ struct MatrixQuery {
     uint32_t    num_groups = 0;
 };
 
+// Result of CPUMockEngine::execute_query — OK or a specific input-validation rejection (the query
+// boundary never crashes on caller input; on any ERR the out vector is left empty).
+enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TOO_MANY_GROUPS };
+
 // Grouped reduction core (GROUP BY key). Filtered==true applies WHERE value > threshold (compiled
 // out when false via if constexpr, so the unfiltered path is byte-identical to the original). Dense
 // groups [0, num_groups); keys >= num_groups ignored; out initialized per op (empty-group sentinels
