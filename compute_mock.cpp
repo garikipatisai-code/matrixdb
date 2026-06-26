@@ -101,6 +101,52 @@ public:
         load_scan_column(id, data.data(), data.size());
     }
 
+    // Snapshot every catalog column to `path`: [u32 magic][u64 num_cols] then per column
+    // [u64 id][u64 count][count×u32]. Borrows COLD columns to HOST to read, returns them.
+    // Fail-loud on I/O error (never leave a half-written snapshot mistaken for valid).
+    void save_catalog(const std::string& path) {
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) { std::fprintf(stderr, "save_catalog: open failed %s\n", path.c_str()); std::abort(); }
+        const uint32_t magic = MATRIX_CATALOG_MAGIC;
+        const uint64_t ncols = catalog_.size();
+        bool ok = std::fwrite(&magic, sizeof magic, 1, f) == 1
+               && std::fwrite(&ncols, sizeof ncols, 1, f) == 1;
+        for (auto& kv : catalog_) {
+            if (!ok) break;
+            TieredColumn& col = *kv.second;
+            const MemorySpace home = col.tier();
+            if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+            const uint64_t id = kv.first;
+            const uint64_t count = col.size_bytes() / sizeof(uint32_t);
+            const uint32_t* data = reinterpret_cast<const uint32_t*>(col.host_ptr());
+            ok = std::fwrite(&id, sizeof id, 1, f) == 1
+              && std::fwrite(&count, sizeof count, 1, f) == 1
+              && (count == 0 || std::fwrite(data, sizeof(uint32_t), count, f) == count);
+            if (home != MemorySpace::HOST) col.migrate_to(home);
+        }
+        std::fclose(f);
+        if (!ok) { std::fprintf(stderr, "save_catalog: short write %s\n", path.c_str()); std::abort(); }
+    }
+    // Restore a snapshot into the catalog (columns land in HOST; the TierManager re-tiers under load).
+    void load_catalog(const std::string& path) {
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) { std::fprintf(stderr, "load_catalog: open failed %s\n", path.c_str()); std::abort(); }
+        uint32_t magic = 0; uint64_t ncols = 0;
+        bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && magic == MATRIX_CATALOG_MAGIC
+               && std::fread(&ncols, sizeof ncols, 1, f) == 1;
+        std::vector<uint32_t> data;
+        for (uint64_t c = 0; ok && c < ncols; ++c) {
+            uint64_t id = 0, count = 0;
+            ok = std::fread(&id, sizeof id, 1, f) == 1 && std::fread(&count, sizeof count, 1, f) == 1;
+            if (!ok) break;
+            data.resize(static_cast<size_t>(count));
+            ok = (count == 0 || std::fread(data.data(), sizeof(uint32_t), data.size(), f) == data.size());
+            if (ok) load_scan_column(id, data.data(), data.size());
+        }
+        std::fclose(f);
+        if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }
+    }
+
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
     // g in [0, num_groups). key_id and value_id are distinct catalog columns of equal length
     // (uint32). Borrows both to HOST for the reduction, then returns each to its home tier (so
@@ -332,6 +378,7 @@ private:
     std::unique_ptr<ColdStore> cold_store_; // null = durability off (default); set via WAL path
     // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
     static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
+    static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434154u; // 'MCAT' — catalog snapshot v0
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
