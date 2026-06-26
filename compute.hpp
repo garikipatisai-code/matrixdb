@@ -103,6 +103,30 @@ inline uint32_t matrix_get_scan_threshold(const DatabaseQuery& q) {
     return *reinterpret_cast<const uint32_t*>(q.payload);
 }
 
+// OP_SCAN's aggregate op lives at payload offset 16 (u32). Default 0 == AGG_COUNT (the original
+// count semantics), so a query built with only set_scan_target/set_scan_threshold reduces by COUNT.
+inline void matrix_set_scan_agg_op(DatabaseQuery& q, MatrixAggOp op) {
+    *reinterpret_cast<uint32_t*>(q.payload + 16) = static_cast<uint32_t>(op);
+}
+inline MatrixAggOp matrix_get_scan_agg_op(const DatabaseQuery& q) {
+    return static_cast<MatrixAggOp>(*reinterpret_cast<const uint32_t*>(q.payload + 16));
+}
+
+// Filtered reduction over a uint32 column: reduce the values matching the predicate
+// (value > threshold) by `op`. One tight loop per op (dispatch OUTSIDE the loop, so the COUNT
+// loop stays exactly as fast as the original scan). Empty match-set sentinels: COUNT/SUM -> 0,
+// MIN -> UINT64_MAX, MAX -> 0 (matched values are > threshold >= 0, i.e. >= 1, so 0 / UINT64_MAX
+// unambiguously signal "no match"). SUM accumulates in u64 (no overflow for the engine's columns).
+inline uint64_t matrix_cpu_reduce(const uint32_t* v, size_t n, uint32_t threshold, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) if (v[i] > threshold) s += v[i]; return s; }
+        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if (v[i] > threshold && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if (v[i] > threshold && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { uint64_t c = 0; for (size_t i = 0; i < n; ++i) c += (v[i] > threshold); return c; }
+    }
+}
+
 /**
  * @brief Stable counting-sort of a batch by owning page (the "bin in the batcher" step).
  * Fills `binned` with the queries grouped by page — order within a page preserved, so
