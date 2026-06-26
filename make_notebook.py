@@ -10,7 +10,8 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
-           "test_migration.cpp", "test_live_tiering.cpp", "test_migration_gpu.cpp"]
+           "test_migration.cpp", "test_live_tiering.cpp", "test_aggregations.cpp",
+           "test_migration_gpu.cpp"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -85,6 +86,11 @@ cells += [
        "TierManager demotes the coldest to SSD and a scan pulls a cold column back, results intact."),
     code("!clang++ -std=c++20 -O2 test_live_tiering.cpp -o /tmp/tlt 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_live_tiering.cpp -o /tmp/tlt; /tmp/tlt"),
+    md("### Analytical aggregations\n"
+       "OP_SCAN computes COUNT / SUM / MIN / MAX over the values matching the predicate, on both "
+       "the legacy column and a tiered catalog column — verified against closed-form oracles."),
+    code("!clang++ -std=c++20 -O2 test_aggregations.cpp -o /tmp/tagg 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_aggregations.cpp -o /tmp/tagg; /tmp/tagg"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
