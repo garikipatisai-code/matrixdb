@@ -20,14 +20,9 @@ enum class SyncPolicy {
     SYNC_OFF,   // no fsync — tests / throughput; crash loses unflushed tail
 };
 
-// One logged mutation. Fixed 20-byte serialized payload (key 8 + value 8 + opcode 4).
-struct WalRecord {
-    uint64_t key;
-    uint64_t value;
-    uint32_t opcode;
-};
-
-constexpr size_t MATRIX_WAL_PAYLOAD_BYTES = 20;     // 8 + 8 + 4, serialized explicitly
+// On-disk payload layout (serialized explicitly, NOT a C struct — avoids padding/ABI
+// dependence): key (8 bytes) + value (8 bytes) + opcode (4 bytes) = 20 bytes.
+constexpr size_t MATRIX_WAL_PAYLOAD_BYTES = 20;
 constexpr uint32_t MATRIX_WAL_MAX_RECORD = 4096;    // sane upper bound for the length field
 
 // Standard CRC32 (reflected, poly 0xEDB88320). Inline, no dependency.
@@ -96,6 +91,9 @@ public:
             unsigned char buf[MATRIX_WAL_MAX_RECORD];
             if (std::fread(buf, 1, length, r) != length) break;            // torn tail
             if (matrix_crc32(buf, length) != crc) break;                   // corruption
+            // Only the current 20-byte put record is understood today. A CRC-valid record
+            // of a different length is a future record type — skip it and keep scanning
+            // (intentional forward-compat; silent because no such record exists yet).
             if (length == MATRIX_WAL_PAYLOAD_BYTES) {
                 uint64_t key = 0, value = 0;
                 std::memcpy(&key,   buf + 0, 8);
