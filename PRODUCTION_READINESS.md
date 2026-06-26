@@ -72,6 +72,8 @@ in the current env (CPU, no network) vs needs real infra.
 
 *Inc 4 landed: `tiered_column.hpp` + `migration_executor.hpp` — cross-tier byte movement (HOST/RAM ↔ DEVICE/VRAM ↔ COLD/SSD via HOST), checksum-invariant, driven by TierManager decisions. A VRAM-promoted column is proven GPU-scannable in place. The heat→decision→migration loop is closed on the TieredColumn primitive. Live-engine integration (the OP_SCAN column becoming a managed TieredColumn) is the next step. See spec 2026-06-26-increment-4-migration-executor-design.md.*
 
+*INT-1 landed (integration debt closed): the previously tested-but-dormant TierManager + MigrationExecutor + TieredColumn are now WIRED INTO the live `CPUMockEngine`. OP_SCAN carries a column id (id 0 = legacy fixed column, oracle unchanged); id>0 targets a tiered catalog the engine auto-tiers by access heat — demoting the coldest columns to SSD under a RAM budget so the engine holds a working set larger than RAM, and borrowing a cold column back to RAM for a scan (results correct regardless of tier). Proven non-vacuous (the test fails if rebalancing is disabled). CPU/HOST↔COLD only; DEVICE inert on the CPU build via device_cap=1. See spec/plan 2026-06-26-live-tiering-integration. **Honest scope:** delivers borrow-on-access, NOT heat-driven resident re-promotion under a full budget (TierManager promotion only fills free HOST space — no swap-on-promote yet). That + per-column COLD-file uniqueness + a release-safe unregistered-id guard = INT-1b, the immediate next increment.*
+
 ## 3. Transactions & concurrency correctness
 
 | ID | Gap | Why | Sev | Effort | Local? |

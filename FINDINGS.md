@@ -149,6 +149,27 @@ wasted optimization pass.
 
 ---
 
+## 6b. Live tiering integration (INT-1) — the brain is now driving
+
+The TierManager/MigrationExecutor/TieredColumn machinery was built and tested across Inc 2/4
+but sat **dormant** — nothing in the live engine called it. INT-1 wired it in: the engine now
+holds a *catalog* of analytical columns (OP_SCAN targets one by id; id 0 stays the legacy fixed
+column, oracle unchanged) and auto-tiers them by access heat under a RAM budget. A 3-column
+catalog in a 2-column budget keeps the two hottest in RAM and demotes the coldest to SSD — the
+engine holds **more than fits in RAM**, and a scan of the cold column borrows it back to RAM,
+returns correct results, and releases it. Proven non-vacuous (disable the rebalance trigger and
+the test fails). This makes seed #2 ("resident-first analytics") *partly real*.
+
+**The honest seam:** what's delivered is *borrow-on-access*, not *heat-driven residency*. Under a
+full budget, a column that becomes hot again is re-read from SSD on every scan — the TierManager
+wants to promote it back (its `should_promote` fires) but can't, because promotion only fills
+*free* HOST space and there's no swap-on-promote to evict a colder resident. So "hot columns
+pinned in VRAM/RAM" — the actual win in seed #2 — needs swap-on-promote. That's INT-1b. The
+lesson repeats Inc 2's: a unit test under *ample* capacity proved promotion works; only the live
+integration under *pressure* exposed that promotion can't reclaim occupied space.
+
+---
+
 ## 7. Disruptive-tech seeds (for the future brainstorm)
 
 Raw ideas the findings suggest. Not committed — just captured while fresh.
