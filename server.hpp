@@ -23,6 +23,20 @@ struct MatrixResponse {
     std::vector<uint64_t> results;
 };
 
+// One audited request: principal, kind (ReqKind value, or 0 for a malformed request), the response
+// status, and the target (GET/PUT key; QUERY value_col). The irrelevant target field is 0.
+struct AuditEntry { uint64_t principal; uint32_t kind; uint32_t status; uint64_t key; uint64_t column; };
+
+// Append-only audit trail of served requests (allowed, denied, and malformed alike).
+class AuditLog {
+public:
+    void record(const AuditEntry& e) { entries_.push_back(e); }
+    const std::vector<AuditEntry>& entries() const { return entries_; }
+    size_t size() const { return entries_.size(); }
+private:
+    std::vector<AuditEntry> entries_;
+};
+
 // Per-principal authorization. Grants are additive; a principal with no grants can do nothing.
 // permissive() allows everything (the no-auth / backward-compat default).
 class AccessPolicy {
@@ -104,17 +118,22 @@ inline bool matrix_deserialize_response(const std::vector<uint8_t>& b, MatrixRes
     return r.ok && r.done();
 }
 
-// Authorizing dispatch: deserialize -> authorize the principal for this request -> run -> serialize.
-// A bad request -> ERR_BADREQUEST; an unauthorized one -> ERR_FORBIDDEN (no engine call, no side
-// effects); else the NW-1 dispatch. `principal` is supplied by the authenticated caller (NOT the
-// payload). GET needs read, PUT needs write, QUERY needs query-access to value_col (+ key_col if grouped).
-inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy& policy,
-                                         uint64_t principal, const std::vector<uint8_t>& req_bytes) {
+namespace matrixsrv_detail {
+// The full serve pipeline (deserialize -> authorize -> dispatch), also filling `out` with the
+// audit record for this request. Returns the serialized response. Shared by all matrix_serve overloads.
+inline std::vector<uint8_t> serve_core(CPUMockEngine& eng, const AccessPolicy& policy,
+                                       uint64_t principal, const std::vector<uint8_t>& req_bytes,
+                                       AuditEntry& out) {
     MatrixRequest req; MatrixResponse resp;
+    out.principal = principal; out.kind = 0; out.key = 0; out.column = 0;
     if (!matrix_deserialize_request(req_bytes, req)) {
         resp.status = static_cast<uint32_t>(ServerStatus::ERR_BADREQUEST);
+        out.status = resp.status;
         return matrix_serialize_response(resp);
     }
+    out.kind = static_cast<uint32_t>(req.kind);
+    out.key = req.key;
+    out.column = req.query.value_col;
     bool authorized = false;
     switch (req.kind) {
         case ReqKind::GET:   authorized = policy.can_read(principal);  break;
@@ -124,6 +143,7 @@ inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy&
     }
     if (!authorized) {
         resp.status = static_cast<uint32_t>(ServerStatus::ERR_FORBIDDEN);
+        out.status = resp.status;
         return matrix_serialize_response(resp);
     }
     switch (req.kind) {
@@ -138,17 +158,35 @@ inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy&
             break;
         }
         case ReqKind::QUERY: {
-            std::vector<uint64_t> out;
-            const MatrixQueryStatus st = eng.execute_query(req.query, out);
+            std::vector<uint64_t> o;
+            const MatrixQueryStatus st = eng.execute_query(req.query, o);
             resp.status = static_cast<uint32_t>(st);
-            resp.results = std::move(out);
+            resp.results = std::move(o);
             break;
         }
     }
+    out.status = resp.status;
     return matrix_serialize_response(resp);
 }
+} // namespace matrixsrv_detail
 
-// No-auth convenience (backward-compat): serve with a permissive policy as the anonymous principal.
+// Authorizing dispatch (principal supplied by the authenticated caller; denied -> ERR_FORBIDDEN
+// with no engine side effects; bad request -> ERR_BADREQUEST). See SE-2.
+inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy& policy,
+                                         uint64_t principal, const std::vector<uint8_t>& req_bytes) {
+    AuditEntry ignored;
+    return matrixsrv_detail::serve_core(eng, policy, principal, req_bytes, ignored);
+}
+// Same, but records the request (allowed / denied / malformed) to `audit`.
+inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy& policy,
+                                         uint64_t principal, const std::vector<uint8_t>& req_bytes,
+                                         AuditLog& audit) {
+    AuditEntry entry;
+    auto resp = matrixsrv_detail::serve_core(eng, policy, principal, req_bytes, entry);
+    audit.record(entry);
+    return resp;
+}
+// No-auth convenience (backward-compat): permissive policy, anonymous principal.
 inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const std::vector<uint8_t>& req_bytes) {
     static const AccessPolicy permissive = AccessPolicy::permissive();
     return matrix_serve(eng, permissive, /*principal=*/0, req_bytes);
