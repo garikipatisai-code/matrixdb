@@ -183,13 +183,13 @@ public:
             const MemorySpace home = col.tier();
             if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
             const uint64_t id = kv.first;
-            // Fail loud (not assert — must hold in release): the u32 snapshot format would mis-encode int64 bytes.
-            if (column_type(id) != MatrixType::U32) { std::fprintf(stderr, "save_catalog: typed-column persistence is DM-3c (id %llu)\n", static_cast<unsigned long long>(id)); std::abort(); }
-            const uint64_t count = col.size_bytes() / sizeof(uint32_t);
-            const uint32_t* data = reinterpret_cast<const uint32_t*>(col.host_ptr());
-            ok = std::fwrite(&id, sizeof id, 1, f) == 1
+            const uint32_t type = static_cast<uint32_t>(column_type(id));   // 0=U32, 1=I64
+            const uint64_t count = column_rows(id);                          // type-aware row count
+            ok = std::fwrite(&id,    sizeof id,    1, f) == 1
+              && std::fwrite(&type,  sizeof type,  1, f) == 1
               && std::fwrite(&count, sizeof count, 1, f) == 1
-              && (count == 0 || std::fwrite(data, sizeof(uint32_t), count, f) == count);
+              && (col.size_bytes() == 0
+                  || std::fwrite(col.host_ptr(), 1, col.size_bytes(), f) == col.size_bytes());  // raw bytes
             if (home != MemorySpace::HOST) col.migrate_to(home);
         }
         std::fclose(f);
@@ -202,14 +202,22 @@ public:
         uint32_t magic = 0; uint64_t ncols = 0;
         bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && magic == MATRIX_CATALOG_MAGIC
                && std::fread(&ncols, sizeof ncols, 1, f) == 1;
-        std::vector<uint32_t> data;
         for (uint64_t c = 0; ok && c < ncols; ++c) {
-            uint64_t id = 0, count = 0;
-            ok = std::fread(&id, sizeof id, 1, f) == 1 && std::fread(&count, sizeof count, 1, f) == 1;
+            uint64_t id = 0, count = 0; uint32_t type = 0;
+            ok = std::fread(&id, sizeof id, 1, f) == 1 && std::fread(&type, sizeof type, 1, f) == 1
+              && std::fread(&count, sizeof count, 1, f) == 1;
             if (!ok) break;
-            data.resize(static_cast<size_t>(count));
-            ok = (count == 0 || std::fread(data.data(), sizeof(uint32_t), data.size(), f) == data.size());
-            if (ok) load_scan_column(id, data.data(), data.size());
+            if (type == static_cast<uint32_t>(MatrixType::I64)) {
+                std::vector<int64_t> d(static_cast<size_t>(count));
+                ok = (count == 0 || std::fread(d.data(), sizeof(int64_t), d.size(), f) == d.size());
+                if (ok) load_scan_column_i64(id, d.data(), d.size());
+            } else if (type == static_cast<uint32_t>(MatrixType::U32)) {
+                std::vector<uint32_t> d(static_cast<size_t>(count));
+                ok = (count == 0 || std::fread(d.data(), sizeof(uint32_t), d.size(), f) == d.size());
+                if (ok) load_scan_column(id, d.data(), d.size());
+            } else {
+                ok = false;   // unknown element type -> bad/corrupt snapshot, fail loud below
+            }
         }
         std::fclose(f);
         if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }
@@ -560,7 +568,7 @@ private:
     uint64_t checkpoints_ = 0;        // DU-4: number of WAL compactions performed
     // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
     static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
-    static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434154u; // 'MCAT' — catalog snapshot v0
+    static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434131u; // 'MCA1' — typed catalog snapshot v1 (DM-3d)
     static constexpr uint32_t MATRIX_CKPT_MAGIC = 0x4D434B50u; // 'MCKP' — point-op checkpoint file
     static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // grouped-query num_groups ceiling (out alloc guard)
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
