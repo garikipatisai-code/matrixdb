@@ -20,6 +20,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_query_validation.cpp",
            "test_transactions.cpp",
            "test_server.cpp",
+           "test_security.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -141,6 +142,11 @@ cells += [
        "(The TCP accept-loop adapter runs on a non-sandboxed machine.)"),
     code("!clang++ -std=c++20 -O2 test_server.cpp -o /tmp/tsv 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_server.cpp -o /tmp/tsv; /tmp/tsv"),
+    md("### Authorization / access control\n"
+       "AccessPolicy enforces per-principal column-level query access + read/write grants at the "
+       "matrix_serve boundary; unpermitted requests are ERR_FORBIDDEN with no engine side-effects."),
+    code("!clang++ -std=c++20 -O2 test_security.cpp -o /tmp/tsec 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_security.cpp -o /tmp/tsec; /tmp/tsec"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
