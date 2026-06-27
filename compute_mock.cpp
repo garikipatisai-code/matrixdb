@@ -134,7 +134,8 @@ public:
 
     // Persist a catalog column's bytes to `path` (borrows to HOST to read, returns the borrow).
     void save_column(uint64_t id, const std::string& path) {
-        assert(column_type(id) == MatrixType::U32 && "typed-column persistence is DM-3c");
+        // Fail loud (not assert — must hold in release): the u32 file format would mis-encode int64 bytes.
+        if (column_type(id) != MatrixType::U32) { std::fprintf(stderr, "save_column: typed-column persistence is DM-3c (id %llu)\n", static_cast<unsigned long long>(id)); std::abort(); }
         TieredColumn& col = *catalog_.at(id);
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
@@ -176,7 +177,8 @@ public:
             const MemorySpace home = col.tier();
             if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
             const uint64_t id = kv.first;
-            assert(column_type(id) == MatrixType::U32 && "typed-column persistence is DM-3c");
+            // Fail loud (not assert — must hold in release): the u32 snapshot format would mis-encode int64 bytes.
+            if (column_type(id) != MatrixType::U32) { std::fprintf(stderr, "save_catalog: typed-column persistence is DM-3c (id %llu)\n", static_cast<unsigned long long>(id)); std::abort(); }
             const uint64_t count = col.size_bytes() / sizeof(uint32_t);
             const uint32_t* data = reinterpret_cast<const uint32_t*>(col.host_ptr());
             ok = std::fwrite(&id, sizeof id, 1, f) == 1
@@ -313,6 +315,10 @@ public:
             if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
                 || catalog_.at(q.key_col)->size_bytes() != catalog_.at(q.value_col)->size_bytes())
                 return MatrixQueryStatus::ERR_INVALID_GROUP;
+            // A typed (int64) GROUP BY key would be reinterpreted as uint32 by grouped_aggregate; an
+            // 8N-byte int64 key of N rows even passes the byte-length guard above (== a 2N-row u32 value).
+            // Reject it — typed-key grouping lands in DM-3b. (value_col is already known U32 here.)
+            if (column_type(q.key_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
             if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
             if (q.has_filter) grouped_aggregate_pred(q.key_col, q.value_col, q.num_groups, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
