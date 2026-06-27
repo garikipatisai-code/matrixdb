@@ -26,6 +26,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_csv_ingest.cpp",
            "test_checkpoint.cpp",
            "test_query_predicates.cpp",
+           "test_typed_columns.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -172,6 +173,11 @@ cells += [
        "columns (not just value>threshold) — verified per-operator against brute-force oracles."),
     code("!clang++ -std=c++20 -O2 test_query_predicates.cpp -o /tmp/tqp 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_query_predicates.cpp -o /tmp/tqp; /tmp/tqp"),
+    md("### Typed columns — int64\n"
+       "load_scan_column_i64 registers a signed 64-bit column (values beyond uint32 range, and "
+       "negatives); execute_query aggregates it (COUNT/SUM/MIN/MAX) — the first slice of real types."),
+    code("!clang++ -std=c++20 -O2 test_typed_columns.cpp -o /tmp/ttyp 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_columns.cpp -o /tmp/ttyp; /tmp/ttyp"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
