@@ -25,6 +25,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_audit.cpp",
            "test_csv_ingest.cpp",
            "test_checkpoint.cpp",
+           "test_query_predicates.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -166,6 +167,11 @@ cells += [
        "loads the snapshot then replays only newer records — WAL size and restart time stay bounded."),
     code("!clang++ -std=c++20 -O2 test_checkpoint.cpp -o /tmp/tckpt 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_checkpoint.cpp -o /tmp/tckpt; /tmp/tckpt"),
+    md("### Richer scan predicates\n"
+       "execute_query's WHERE clause supports GT / GE / LT / LE / EQ / NE / BETWEEN over catalog "
+       "columns (not just value>threshold) — verified per-operator against brute-force oracles."),
+    code("!clang++ -std=c++20 -O2 test_query_predicates.cpp -o /tmp/tqp 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_query_predicates.cpp -o /tmp/tqp; /tmp/tqp"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

@@ -256,10 +256,9 @@ public:
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
 
-    // GROUP BY key WHERE value > threshold (filtered grouped aggregate). Same contract and double
-    // borrow-and-return as grouped_aggregate; only rows with value > threshold contribute.
-    void grouped_aggregate_where(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
-                                 MatrixAggOp op, uint32_t threshold, std::vector<uint64_t>& out) {
+    // GROUP BY key WHERE <predicate> — same double borrow-and-return as grouped_aggregate_where.
+    void grouped_aggregate_pred(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
+                                MatrixAggOp op, const MatrixPredicate& pred, std::vector<uint64_t>& out) {
         assert(key_id != value_id && "group-by key and value must be distinct columns");
         TieredColumn& kc = *catalog_.at(key_id);
         TieredColumn& vc = *catalog_.at(value_id);
@@ -272,9 +271,16 @@ public:
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
         const size_t n = kc.size_bytes() / sizeof(uint32_t);
         out.resize(num_groups);
-        matrix_cpu_group_reduce_where(keys, vals, n, num_groups, op, threshold, out.data());
+        matrix_cpu_group_reduce_pred(keys, vals, n, num_groups, op, pred, out.data());
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
+    }
+
+    // GROUP BY key WHERE value > threshold (filtered grouped aggregate). Same contract and double
+    // borrow-and-return as grouped_aggregate; only rows with value > threshold contribute.
+    void grouped_aggregate_where(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
+                                 MatrixAggOp op, uint32_t threshold, std::vector<uint64_t>& out) {
+        grouped_aggregate_pred(key_id, value_id, num_groups, op, MatrixPredicate{MatrixCmp::GT, threshold, 0}, out);
     }
 
     // Unified analytical query over catalog columns. Validates input at the boundary and returns a
@@ -289,10 +295,10 @@ public:
                 || catalog_.at(q.key_col)->size_bytes() != catalog_.at(q.value_col)->size_bytes())
                 return MatrixQueryStatus::ERR_INVALID_GROUP;
             if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
-            if (q.has_filter) grouped_aggregate_where(q.key_col, q.value_col, q.num_groups, q.agg, q.threshold, out);
+            if (q.has_filter) grouped_aggregate_pred(q.key_col, q.value_col, q.num_groups, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
         } else {
-            out.assign(1, scan_tiered_column(q.value_col, q.threshold, q.agg, q.has_filter));
+            out.assign(1, scan_tiered_column(q.value_col, MatrixPredicate{q.cmp, q.threshold, q.upper}, q.agg, q.has_filter));
         }
         return MatrixQueryStatus::OK;
     }
@@ -356,7 +362,7 @@ public:
         if (col_id == 0) {
             c = matrix_cpu_reduce(scan_column_.data(), MATRIX_SCAN_COLUMN_SIZE, threshold, op);
         } else {
-            c = scan_tiered_column(col_id, threshold, op);
+            c = scan_tiered_column(col_id, MatrixPredicate{MatrixCmp::GT, threshold, 0}, op);
         }
         scan_time_s_ += std::chrono::duration<double>(
             std::chrono::steady_clock::now() - st0).count();
@@ -422,7 +428,7 @@ private:
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
     // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
     // HOST columns to SSD under the budget.
-    uint64_t scan_tiered_column(uint64_t col_id, uint32_t threshold, MatrixAggOp op, bool has_filter = true) {
+    uint64_t scan_tiered_column(uint64_t col_id, MatrixPredicate pred, MatrixAggOp op, bool has_filter = true) {
         auto it = catalog_.find(col_id);
         if (it == catalog_.end()) {
             assert(false && "scan of unregistered column id"); // debug: catch the caller bug
@@ -437,7 +443,7 @@ private:
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); } // pull SSD->RAM to scan
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
         const size_t nvals = col.size_bytes() / sizeof(uint32_t);
-        const uint64_t result = has_filter ? matrix_cpu_reduce(vals, nvals, threshold, op)
+        const uint64_t result = has_filter ? matrix_cpu_reduce_pred(vals, nvals, pred, op)
                                            : matrix_cpu_reduce_all(vals, nvals, op);
         // ponytail: returning the borrow rewrites the COLD file each cold scan; skip-if-unchanged
         // (or a TierManager note_residency) is the upgrade path if cold-scan churn ever matters.
