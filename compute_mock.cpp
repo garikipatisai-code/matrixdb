@@ -307,8 +307,9 @@ public:
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
         if (column_type(q.value_col) == MatrixType::I64) {
-            if (q.grouped || q.has_filter) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE; // DM-3b
-            out.assign(1, static_cast<uint64_t>(scan_tiered_column_i64(q.value_col, q.agg)));
+            if (q.grouped) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;   // grouped int64 = DM-3c
+            out.assign(1, static_cast<uint64_t>(
+                scan_tiered_column_i64(q.value_col, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
         }
         if (q.grouped) {
@@ -474,6 +475,13 @@ private:
         // (or a TierManager note_residency) is the upgrade path if cold-scan churn ever matters.
         if (home != MemorySpace::HOST) col.migrate_to(home);        // return the borrow
 
+        maybe_rebalance();
+        return result;
+    }
+
+    // Every REBALANCE_EVERY scans, run the brain + executor: promote hot (DEVICE inert here), demote the
+    // coldest HOST columns to SSD under the budget. Shared by the u32 and int64 scan paths.
+    void maybe_rebalance() {
         if (++scans_since_rebalance_ >= REBALANCE_EVERY) {
             std::unordered_map<uint64_t, TieredColumn*> ptrs;
             for (auto& kv : catalog_) ptrs[kv.first] = kv.second.get();
@@ -481,22 +489,23 @@ private:
             ++rebalances_;
             scans_since_rebalance_ = 0;
         }
-        return result;
     }
 
-    // int64 unfiltered scalar scan over a catalog column (DM-3a). Same borrow-to-HOST-and-return as
-    // scan_tiered_column: record heat, pull a COLD column to RAM, reinterpret the raw bytes as int64,
-    // reduce by op, then return the borrow to its home tier. No rebalance trigger here (scalar int64 is
-    // the slice's only int64 path; the U32 scan path owns the heat-driven rebalance cadence).
-    int64_t scan_tiered_column_i64(uint64_t col_id, MatrixAggOp op) {
+    // int64 scalar scan over a catalog column (DM-3a unfiltered; DM-3b adds the filtered path). Same
+    // borrow-to-HOST-and-return as scan_tiered_column: record heat, pull a COLD column to RAM, reinterpret
+    // the raw bytes as int64, reduce by op (filtered when has_filter, else over all), return the borrow to
+    // its home tier, and drive the shared rebalance cadence (int64 scans now count too — DM-3a follow-up).
+    int64_t scan_tiered_column_i64(uint64_t col_id, MatrixPredicateI64 pred, MatrixAggOp op, bool has_filter = false) {
         TieredColumn& col = *catalog_.at(col_id);
         tier_mgr_.record_access(col_id, col.size_bytes());
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
         const int64_t* vals = reinterpret_cast<const int64_t*>(col.host_ptr());
         const size_t nvals = col.size_bytes() / sizeof(int64_t);
-        const int64_t result = matrix_cpu_reduce_all_i64(vals, nvals, op);
+        const int64_t result = has_filter ? matrix_cpu_reduce_pred_i64(vals, nvals, pred, op)
+                                          : matrix_cpu_reduce_all_i64(vals, nvals, op);
         if (home != MemorySpace::HOST) col.migrate_to(home);
+        maybe_rebalance();
         return result;
     }
 

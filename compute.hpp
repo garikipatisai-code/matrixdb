@@ -190,6 +190,36 @@ inline uint64_t matrix_cpu_reduce_pred(const uint32_t* v, size_t n, const Matrix
     }
 }
 
+// int64 value predicate for WHERE (the signed sibling of MatrixPredicate). a = primary bound / BETWEEN
+// lower (inclusive); b = BETWEEN upper (inclusive). Signed comparisons so negatives order correctly.
+struct MatrixPredicateI64 { MatrixCmp cmp = MatrixCmp::GT; int64_t a = 0; int64_t b = 0; };
+
+inline bool matrix_pred_match_i64(int64_t v, const MatrixPredicateI64& p) {
+    switch (p.cmp) {
+        case MatrixCmp::GE:      return v >= p.a;
+        case MatrixCmp::LT:      return v <  p.a;
+        case MatrixCmp::LE:      return v <= p.a;
+        case MatrixCmp::EQ:      return v == p.a;
+        case MatrixCmp::NE:      return v != p.a;
+        case MatrixCmp::BETWEEN: return v >= p.a && v <= p.b;
+        case MatrixCmp::GT:
+        default:                 return v >  p.a;
+    }
+}
+
+// Filtered signed scalar reduce — the int64 sibling of matrix_cpu_reduce_pred. Same empty sentinels as
+// matrix_cpu_reduce_all_i64 (SUM/COUNT 0, MIN INT64_MAX, MAX INT64_MIN; the MAX sentinel is ambiguous
+// only for a column literally containing INT64_MIN — read COUNT).
+inline int64_t matrix_cpu_reduce_pred_i64(const int64_t* v, size_t n, const MatrixPredicateI64& p, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { int64_t s = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_i64(v[i], p)) s += v[i]; return s; }
+        case AGG_MIN: { int64_t m = INT64_MAX; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_i64(v[i], p) && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { int64_t m = INT64_MIN; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_i64(v[i], p) && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { int64_t c = 0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match_i64(v[i], p); return c; }
+    }
+}
+
 // A structured analytical query over catalog columns (value_col / key_col > 0). has_filter applies
 // WHERE value <cmp> threshold (BETWEEN uses [threshold, upper]); grouped applies GROUP BY key_col into num_groups dense buckets.
 struct MatrixQuery {
@@ -199,6 +229,8 @@ struct MatrixQuery {
     uint32_t    threshold  = 0;
     MatrixCmp   cmp        = MatrixCmp::GT;   // comparison op for the filter (default keeps value>threshold)
     uint32_t    upper      = 0;               // BETWEEN's inclusive upper bound (ignored for other ops)
+    int64_t     lo_i64     = 0;   // int64 filter primary bound / BETWEEN lower (I64 columns; not wire-serialized)
+    int64_t     hi_i64     = 0;   // int64 filter BETWEEN upper (I64 columns)
     bool        grouped    = false;
     uint64_t    key_col    = 0;
     uint32_t    num_groups = 0;
