@@ -351,6 +351,38 @@ inline void matrix_cpu_group_reduce_i64_pred(const uint32_t* keys, const int64_t
     matrix_group_reduce_i64_impl<true>(keys, values, n, num_groups, op, pred, out);
 }
 
+// Grouped reduction over a double value column keyed by a uint32 key column (dense group ids). Double
+// accumulators; empty-group sentinels COUNT/SUM 0.0, MIN +inf, MAX -inf (MAX inits -inf so a negative
+// group yields the right max). Filtered applies the double predicate.
+template <bool Filtered>
+inline void matrix_group_reduce_f64_impl(const uint32_t* keys, const double* values, size_t n,
+                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out) {
+    for (uint32_t g = 0; g < num_groups; ++g)
+        out[g] = (op == AGG_MIN) ? std::numeric_limits<double>::infinity()
+               : (op == AGG_MAX ? -std::numeric_limits<double>::infinity() : 0.0);
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t k = keys[i];
+        if (k >= num_groups) continue;
+        const double v = values[i];
+        if constexpr (Filtered) { if (!matrix_pred_match_f64(v, pred)) continue; }
+        switch (op) {
+            case AGG_SUM:   out[k] += v; break;
+            case AGG_MIN:   if (v < out[k]) out[k] = v; break;
+            case AGG_MAX:   if (v > out[k]) out[k] = v; break;
+            case AGG_COUNT:
+            default:        out[k] += 1.0; break;
+        }
+    }
+}
+inline void matrix_cpu_group_reduce_f64(const uint32_t* keys, const double* values, size_t n,
+                                        uint32_t num_groups, MatrixAggOp op, double* out) {
+    matrix_group_reduce_f64_impl<false>(keys, values, n, num_groups, op, MatrixPredicateF64{}, out);
+}
+inline void matrix_cpu_group_reduce_f64_pred(const uint32_t* keys, const double* values, size_t n,
+                                             uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out) {
+    matrix_group_reduce_f64_impl<true>(keys, values, n, num_groups, op, pred, out);
+}
+
 /**
  * @brief Stable counting-sort of a batch by owning page (the "bin in the batcher" step).
  * Fills `binned` with the queries grouped by page — order within a page preserved, so
