@@ -74,12 +74,24 @@ public:
         tier_mgr_.register_column(id, bytes, MemorySpace::HOST);
     }
 
+    // Register a signed int64 analytical column (born HOST-resident, like load_scan_column). DM-3a.
+    void load_scan_column_i64(uint64_t id, const int64_t* data, size_t n) {
+        assert(id != 0 && "column id 0 is reserved for the legacy fixed scan column");
+        assert(catalog_.find(id) == catalog_.end() && "column id already registered");
+        const size_t bytes = n * sizeof(int64_t);
+        catalog_[id] = std::make_unique<TieredColumn>(id, reinterpret_cast<const unsigned char*>(data), bytes);
+        tier_mgr_.register_column(id, bytes, MemorySpace::HOST);
+        col_types_[id] = MatrixType::I64;
+    }
+
     // Inspection (tests): where the bytes actually live vs where the brain believes, the
     // HOST bytes the brain is accounting for, and a column's integrity checksum.
     MemorySpace column_tier(uint64_t id) const { return catalog_.at(id)->tier(); }
     MemorySpace manager_tier(uint64_t id) const { return tier_mgr_.tier_of(id); }
     size_t host_resident_bytes() const { return tier_mgr_.resident_bytes(MemorySpace::HOST); }
     uint64_t column_checksum(uint64_t id) const { return catalog_.at(id)->checksum(); }
+    // A column's element type (DM-3a). Absent from col_types_ ⇒ U32 (every legacy/untagged column).
+    MatrixType column_type(uint64_t id) const { auto it = col_types_.find(id); return it == col_types_.end() ? MatrixType::U32 : it->second; }
 
     // Point-op read accessor (tests): true + sets out if present. Mirrors execute_batch's OP_READ.
     bool kv_get(uint64_t key, uint64_t& out) const { return kv_.get(key, out); }
@@ -122,6 +134,8 @@ public:
 
     // Persist a catalog column's bytes to `path` (borrows to HOST to read, returns the borrow).
     void save_column(uint64_t id, const std::string& path) {
+        // Fail loud (not assert — must hold in release): the u32 file format would mis-encode int64 bytes.
+        if (column_type(id) != MatrixType::U32) { std::fprintf(stderr, "save_column: typed-column persistence is DM-3c (id %llu)\n", static_cast<unsigned long long>(id)); std::abort(); }
         TieredColumn& col = *catalog_.at(id);
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
@@ -163,6 +177,8 @@ public:
             const MemorySpace home = col.tier();
             if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
             const uint64_t id = kv.first;
+            // Fail loud (not assert — must hold in release): the u32 snapshot format would mis-encode int64 bytes.
+            if (column_type(id) != MatrixType::U32) { std::fprintf(stderr, "save_catalog: typed-column persistence is DM-3c (id %llu)\n", static_cast<unsigned long long>(id)); std::abort(); }
             const uint64_t count = col.size_bytes() / sizeof(uint32_t);
             const uint32_t* data = reinterpret_cast<const uint32_t*>(col.host_ptr());
             ok = std::fwrite(&id, sizeof id, 1, f) == 1
@@ -290,10 +306,19 @@ public:
     MatrixQueryStatus execute_query(const MatrixQuery& q, std::vector<uint64_t>& out) {
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
+        if (column_type(q.value_col) == MatrixType::I64) {
+            if (q.grouped || q.has_filter) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE; // DM-3b
+            out.assign(1, static_cast<uint64_t>(scan_tiered_column_i64(q.value_col, q.agg)));
+            return MatrixQueryStatus::OK;
+        }
         if (q.grouped) {
             if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
                 || catalog_.at(q.key_col)->size_bytes() != catalog_.at(q.value_col)->size_bytes())
                 return MatrixQueryStatus::ERR_INVALID_GROUP;
+            // A typed (int64) GROUP BY key would be reinterpreted as uint32 by grouped_aggregate; an
+            // 8N-byte int64 key of N rows even passes the byte-length guard above (== a 2N-row u32 value).
+            // Reject it — typed-key grouping lands in DM-3b. (value_col is already known U32 here.)
+            if (column_type(q.key_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
             if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
             if (q.has_filter) grouped_aggregate_pred(q.key_col, q.value_col, q.num_groups, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
@@ -459,6 +484,22 @@ private:
         return result;
     }
 
+    // int64 unfiltered scalar scan over a catalog column (DM-3a). Same borrow-to-HOST-and-return as
+    // scan_tiered_column: record heat, pull a COLD column to RAM, reinterpret the raw bytes as int64,
+    // reduce by op, then return the borrow to its home tier. No rebalance trigger here (scalar int64 is
+    // the slice's only int64 path; the U32 scan path owns the heat-driven rebalance cadence).
+    int64_t scan_tiered_column_i64(uint64_t col_id, MatrixAggOp op) {
+        TieredColumn& col = *catalog_.at(col_id);
+        tier_mgr_.record_access(col_id, col.size_bytes());
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        const int64_t* vals = reinterpret_cast<const int64_t*>(col.host_ptr());
+        const size_t nvals = col.size_bytes() / sizeof(int64_t);
+        const int64_t result = matrix_cpu_reduce_all_i64(vals, nvals, op);
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+        return result;
+    }
+
     // Point-op store: a real hash table (gap DM-1). Distinct keys never overwrite; a full
     // table is an explicit error, not silent loss. Sized with headroom over the demo's
     // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
@@ -474,6 +515,7 @@ private:
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
+    std::unordered_map<uint64_t, MatrixType> col_types_; // id -> element type (absent ⇒ U32); DM-3a
     uint64_t scans_since_rebalance_ = 0;
     uint64_t cold_borrows_ = 0;    // observability: COLD->HOST borrows
     uint64_t rebalances_ = 0;      // observability: rebalance passes

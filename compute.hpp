@@ -141,6 +141,23 @@ inline uint64_t matrix_cpu_reduce_all(const uint32_t* v, size_t n, MatrixAggOp o
     }
 }
 
+// Per-column element type. U32 == 0 is the default (an untagged column is uint32). int64 columns
+// (DM-3a) hold signed 64-bit values — negatives and values beyond UINT32_MAX, which uint32 cannot.
+enum class MatrixType : uint32_t { U32 = 0, I64 };
+
+// Signed unfiltered scalar reduce over an int64 column (the int64 sibling of matrix_cpu_reduce_all).
+// COUNT -> n; SUM -> Σv (int64; see the overflow note in the design); MIN/MAX over all (empty
+// sentinels MIN INT64_MAX / MAX INT64_MIN, reachable only when n == 0).
+inline int64_t matrix_cpu_reduce_all_i64(const int64_t* v, size_t n, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { int64_t s = 0; for (size_t i = 0; i < n; ++i) s += v[i]; return s; }
+        case AGG_MIN: { int64_t m = INT64_MAX; for (size_t i = 0; i < n; ++i) if (v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { int64_t m = INT64_MIN; for (size_t i = 0; i < n; ++i) if (v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      return static_cast<int64_t>(n);
+    }
+}
+
 enum class MatrixCmp : uint32_t { GT = 0, GE, LT, LE, EQ, NE, BETWEEN }; // GT == 0 == the default
 
 // A value predicate for WHERE. `a` = primary bound (threshold; inclusive lower for BETWEEN);
@@ -189,7 +206,7 @@ struct MatrixQuery {
 
 // Result of CPUMockEngine::execute_query — OK or a specific input-validation rejection (the query
 // boundary never crashes on caller input; on any ERR the out vector is left empty).
-enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TOO_MANY_GROUPS };
+enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TOO_MANY_GROUPS, ERR_UNSUPPORTED_TYPE };
 
 // Grouped reduction core (GROUP BY key). Filtered==true applies WHERE matrix_pred_match(value, pred) (compiled
 // out when false via if constexpr, so the unfiltered path is byte-identical to the original). Dense
