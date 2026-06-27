@@ -28,6 +28,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_query_predicates.cpp",
            "test_typed_columns.cpp",
            "test_typed_predicates.cpp",
+           "test_typed_grouped.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -184,6 +185,11 @@ cells += [
        "(negatives and values beyond uint32) — verified per-operator against brute-force oracles."),
     code("!clang++ -std=c++20 -O2 test_typed_predicates.cpp -o /tmp/ttp 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_predicates.cpp -o /tmp/ttp; /tmp/ttp"),
+    md("### Grouped int64 aggregation\n"
+       "GROUP BY a uint32 key over an int64 value column (filtered + unfiltered) — completing int64 "
+       "query parity; verified incl. negative-group MAX and mixed-width row-count guards."),
+    code("!clang++ -std=c++20 -O2 test_typed_grouped.cpp -o /tmp/ttg 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_grouped.cpp -o /tmp/ttg; /tmp/ttg"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
