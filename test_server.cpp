@@ -1,0 +1,87 @@
+// CPU test for the server core (request/response protocol + matrix_serve dispatch).
+#include "server.hpp"
+#include <cassert>
+#include <cstdint>
+#include <vector>
+#include <cstdio>
+#include <iostream>
+
+static void test_request_roundtrip() {
+    MatrixRequest r; r.kind = ReqKind::QUERY; r.key = 7; r.value = 70;
+    r.query = MatrixQuery{.value_col=2, .agg=AGG_SUM, .has_filter=true, .threshold=5,
+                          .grouped=true, .key_col=1, .num_groups=4};
+    auto b = matrix_serialize_request(r);
+    MatrixRequest r2;
+    assert(matrix_deserialize_request(b, r2));
+    assert(r2.kind == ReqKind::QUERY && r2.key == 7 && r2.value == 70);
+    assert(r2.query.value_col == 2 && r2.query.agg == AGG_SUM && r2.query.has_filter
+           && r2.query.threshold == 5 && r2.query.grouped && r2.query.key_col == 1 && r2.query.num_groups == 4);
+    b.pop_back(); assert(!matrix_deserialize_request(b, r2) && "truncated request rejected");
+    std::cout << "[request round-trip] ok\n";
+}
+
+static void test_response_roundtrip() {
+    MatrixResponse r; r.status = 3; r.results = {10, 20, 30};
+    auto b = matrix_serialize_response(r);
+    MatrixResponse r2;
+    assert(matrix_deserialize_response(b, r2) && r2.status == 3 && (r2.results == std::vector<uint64_t>{10,20,30}));
+    MatrixResponse e; auto be = matrix_serialize_response(e);
+    MatrixResponse e2; assert(matrix_deserialize_response(be, e2) && e2.status == 0 && e2.results.empty());
+    b.pop_back(); assert(!matrix_deserialize_response(b, r2) && "truncated response rejected");
+    std::cout << "[response round-trip] ok\n";
+}
+
+static void test_serve_get_put() {
+    const std::string wal = "/tmp/matrixdb_srv.bin"; std::remove(wal.c_str());
+    {
+        CPUMockEngine eng(0, wal);
+        MatrixRequest put; put.kind = ReqKind::PUT; put.key = 5; put.value = 500;
+        MatrixResponse pr; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(put)), pr) && pr.status == 0);
+        MatrixRequest get; get.kind = ReqKind::GET; get.key = 5;
+        MatrixResponse gr; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(get)), gr));
+        assert(gr.results.size() == 1 && gr.results[0] == 500);
+        MatrixRequest miss; miss.kind = ReqKind::GET; miss.key = 999;
+        MatrixResponse mr; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(miss)), mr) && mr.results.empty());
+    }
+    {
+        CPUMockEngine eng2(0, wal);
+        MatrixRequest get; get.kind = ReqKind::GET; get.key = 5;
+        MatrixResponse gr; assert(matrix_deserialize_response(matrix_serve(eng2, matrix_serialize_request(get)), gr));
+        assert(gr.results.size() == 1 && gr.results[0] == 500 && "PUT durable through the wire");
+    }
+    std::remove(wal.c_str());
+    std::cout << "[serve get/put + durable] ok\n";
+}
+
+static void test_serve_query() {
+    const size_t N = 1000; std::vector<uint32_t> col(N);
+    for (size_t i = 0; i < N; ++i) col[i] = static_cast<uint32_t>(i);
+    CPUMockEngine eng(0, "", SIZE_MAX); eng.load_scan_column(2, col.data(), N);
+    MatrixRequest q; q.kind = ReqKind::QUERY; q.query = MatrixQuery{.value_col = 2, .agg = AGG_SUM};
+    MatrixResponse r; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(q)), r));
+    assert(r.status == 0 && r.results.size() == 1);
+    std::vector<uint64_t> direct; eng.execute_query(MatrixQuery{.value_col = 2, .agg = AGG_SUM}, direct);
+    assert(r.results == direct && "serve QUERY == direct execute_query");
+    MatrixRequest bad; bad.kind = ReqKind::QUERY; bad.query = MatrixQuery{.value_col = 999, .agg = AGG_SUM};
+    MatrixResponse br; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(bad)), br));
+    assert(br.status == static_cast<uint32_t>(MatrixQueryStatus::ERR_UNKNOWN_COLUMN) && br.results.empty());
+    std::cout << "[serve query] ok\n";
+}
+
+static void test_bad_request() {
+    CPUMockEngine eng(0, "", SIZE_MAX);
+    std::vector<uint8_t> garbage = {1, 2, 3};
+    MatrixResponse r; assert(matrix_deserialize_response(matrix_serve(eng, garbage), r));
+    assert(r.status == static_cast<uint32_t>(ServerStatus::ERR_BADREQUEST) && "bad request -> ERR_BADREQUEST, no crash");
+    std::cout << "[bad request] ok\n";
+}
+
+int main() {
+    test_request_roundtrip();
+    test_response_roundtrip();
+    test_serve_get_put();
+    test_serve_query();
+    test_bad_request();
+    std::cout << "ALL SERVER TESTS PASSED\n";
+    return 0;
+}
