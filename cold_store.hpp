@@ -81,6 +81,18 @@ public:
         ++records_written_;
     }
 
+    // Empty the log after its contents are captured in a checkpoint. Durable per SyncPolicy.
+    void truncate() {
+        std::fclose(fp_);
+        fp_ = std::fopen(path_.c_str(), "wb");   // "wb" truncates to zero length
+        if (!fp_) { std::fprintf(stderr, "ColdStore::truncate: reopen failed %s\n", path_.c_str()); std::abort(); }
+        if (policy_ == SyncPolicy::SYNC_EACH) ::fsync(::fileno(fp_));
+        std::fclose(fp_);
+        fp_ = std::fopen(path_.c_str(), "ab");   // back to append mode
+        if (!fp_) { std::fprintf(stderr, "ColdStore::truncate: reopen-append failed %s\n", path_.c_str()); std::abort(); }
+        records_written_ = 0;
+    }
+
     // Replay every intact record in append order, calling apply(key, value). Stops at the
     // first short read or CRC mismatch (torn/corrupt tail). Missing/empty file → nothing.
     template <typename Apply>

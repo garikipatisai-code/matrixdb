@@ -24,6 +24,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_security.cpp",
            "test_audit.cpp",
            "test_csv_ingest.cpp",
+           "test_checkpoint.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -160,6 +161,11 @@ cells += [
        "catalog — and reports malformed input gracefully (false, no crash) rather than aborting."),
     code("!clang++ -std=c++20 -O2 test_csv_ingest.cpp -o /tmp/tcsv 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_csv_ingest.cpp -o /tmp/tcsv; /tmp/tcsv"),
+    md("### WAL checkpoint / compaction\n"
+       "checkpoint() snapshots the point-op store and truncates the write-ahead log, so recovery "
+       "loads the snapshot then replays only newer records — WAL size and restart time stay bounded."),
+    code("!clang++ -std=c++20 -O2 test_checkpoint.cpp -o /tmp/tckpt 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_checkpoint.cpp -o /tmp/tckpt; /tmp/tckpt"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

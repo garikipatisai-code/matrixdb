@@ -63,6 +63,10 @@ public:
         return sum;
     }
 
+    // Visit every live entry (snapshot / iteration). Allocation-free; same walk as checksum().
+    template <typename F>
+    void for_each(F&& f) const { for (const Slot& s : slots_) if (s.occupied) f(s.key, s.value); }
+
 private:
     struct Slot { uint64_t key = 0; uint64_t value = 0; bool occupied = false; };
 

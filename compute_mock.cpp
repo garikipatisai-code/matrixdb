@@ -50,8 +50,10 @@ public:
         // Durability is opt-in: with a WAL path, recover the point-op store by replaying
         // the log into kv_ (a write committed before a crash is restored here).
         if (!wal_path.empty()) {
+            checkpoint_path_ = wal_path + ".ckpt";
+            load_checkpoint(checkpoint_path_);                                    // restore the last compaction (no-op if none)
             cold_store_ = std::make_unique<ColdStore>(wal_path);
-            cold_store_->replay([this](uint64_t k, uint64_t v){ kv_.put(k, v); });
+            cold_store_->replay([this](uint64_t k, uint64_t v){ kv_.put(k, v); }); // post-checkpoint records on top
         }
         std::cout << "CPUMockEngine initialized (page-ownership, "
                   << MATRIX_PAGE_COUNT << " pages, "
@@ -98,6 +100,18 @@ public:
     void rollback() { assert(in_txn_ && "rollback without begin"); in_txn_ = false; ++transactions_rolled_back_; txn_buf_.clear(); }
     uint64_t transactions_committed() const { return transactions_committed_; }
     uint64_t transactions_rolled_back() const { return transactions_rolled_back_; }
+
+    // Compact the WAL: snapshot the point-op store, then truncate the log (DU-4). No-op if durability off.
+    void checkpoint() {
+        assert(!in_txn_ && "checkpoint inside a transaction");
+        if (!cold_store_) return;
+        save_checkpoint(checkpoint_path_);
+        cold_store_->truncate();
+        ++checkpoints_;
+    }
+
+    uint64_t checkpoints() const { return checkpoints_; }
+    uint64_t wal_records() const { return cold_store_ ? cold_store_->records_written() : 0; }
 
     // Observability snapshot (counters since construction + current resident-bytes gauges).
     EngineStats stats() const {
@@ -177,6 +191,44 @@ public:
         }
         std::fclose(f);
         if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }
+    }
+
+    // Snapshot kv_ atomically to `path`: write temp -> fsync -> rename (POSIX-atomic replace). Fail-loud.
+    // ponytail: file data is fsync'd; the rename's own power-loss durability would need a directory fsync
+    // (a pre-existing gap shared with the WAL) — the upgrade path if rename-durability matters.
+    void save_checkpoint(const std::string& path) {
+        const std::string tmp = path + ".tmp";
+        FILE* f = std::fopen(tmp.c_str(), "wb");
+        if (!f) { std::fprintf(stderr, "save_checkpoint: open failed %s\n", tmp.c_str()); std::abort(); }
+        const uint32_t magic = MATRIX_CKPT_MAGIC;
+        const uint64_t count = kv_.size();
+        bool ok = std::fwrite(&magic, sizeof magic, 1, f) == 1
+               && std::fwrite(&count, sizeof count, 1, f) == 1;
+        kv_.for_each([&](uint64_t k, uint64_t v) {
+            ok = ok && std::fwrite(&k, sizeof k, 1, f) == 1 && std::fwrite(&v, sizeof v, 1, f) == 1;
+        });
+        std::fflush(f);
+        ::fsync(::fileno(f));                       // checkpoint durable BEFORE it replaces the old one
+        std::fclose(f);
+        if (!ok) { std::fprintf(stderr, "save_checkpoint: short write %s\n", tmp.c_str()); std::abort(); }
+        if (std::rename(tmp.c_str(), path.c_str()) != 0) { std::fprintf(stderr, "save_checkpoint: rename failed\n"); std::abort(); }
+    }
+
+    // Load a checkpoint into kv_. Missing file -> false (none taken yet). Bad/short -> abort (our format).
+    bool load_checkpoint(const std::string& path) {
+        FILE* f = std::fopen(path.c_str(), "rb");
+        if (!f) return false;
+        uint32_t magic = 0; uint64_t count = 0;
+        bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && magic == MATRIX_CKPT_MAGIC
+               && std::fread(&count, sizeof count, 1, f) == 1;
+        for (uint64_t i = 0; ok && i < count; ++i) {
+            uint64_t k = 0, v = 0;
+            ok = std::fread(&k, sizeof k, 1, f) == 1 && std::fread(&v, sizeof v, 1, f) == 1;
+            if (ok) kv_.put(k, v);
+        }
+        std::fclose(f);
+        if (!ok) { std::fprintf(stderr, "load_checkpoint: bad/short %s\n", path.c_str()); std::abort(); }
+        return true;
     }
 
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
@@ -406,9 +458,12 @@ private:
     // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
     KVStore kv_{1u << 16}; // 65536 slots
     std::unique_ptr<ColdStore> cold_store_; // null = durability off (default); set via WAL path
+    std::string checkpoint_path_;     // <wal_path>.ckpt — last point-op compaction snapshot
+    uint64_t checkpoints_ = 0;        // DU-4: number of WAL compactions performed
     // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
     static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
     static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434154u; // 'MCAT' — catalog snapshot v0
+    static constexpr uint32_t MATRIX_CKPT_MAGIC = 0x4D434B50u; // 'MCKP' — point-op checkpoint file
     static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // grouped-query num_groups ceiling (out alloc guard)
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
     MigrationExecutor executor_;                        // moves the bytes per decision
