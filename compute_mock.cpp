@@ -4,6 +4,7 @@
 #include "migration_executor.hpp"  // MigrationExecutor + TierManager + TieredColumn + CostModel
 #include "memory_model.hpp"        // MemorySpace, MemoryModel
 #include "column_io.hpp"           // matrix_write_column / matrix_read_column (binary column persistence)
+#include "csv_ingest.hpp"          // matrix_read_csv_column (CSV column ingest, graceful on bad input)
 #include <unordered_map>
 #include <memory>
 #include <string>
@@ -119,6 +120,17 @@ public:
         std::vector<uint32_t> data;
         matrix_read_column(path, data);
         load_scan_column(id, data.data(), data.size());
+    }
+
+    // Ingest one uint32 column from a CSV file into the catalog under `id` (born HOST-resident, like
+    // load_column_from_file). Returns false (no catalog entry created) if the CSV is malformed — CSV is
+    // untrusted input, so a bad file is reported, never a crash. See DM-5b / VAL-1.
+    bool load_column_from_csv(uint64_t id, const std::string& path, size_t col_index,
+                              bool has_header = false, char delim = ',') {
+        std::vector<uint32_t> data;
+        if (!matrix_read_csv_column(path, col_index, has_header, delim, data)) return false;
+        load_scan_column(id, data.data(), data.size());
+        return true;
     }
 
     // Snapshot every catalog column to `path`: [u32 magic][u64 num_cols] then per column
