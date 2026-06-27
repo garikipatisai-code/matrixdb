@@ -117,6 +117,8 @@ in the current env (CPU, no network) vs needs real infra.
 | NW-4 | No client driver/libraries | Nothing for an app to import | P1 | L | partial |
 | NW-5 | No connection management (pooling, limits, timeouts, backpressure) | Can't handle real connection churn | P1 | M | partial |
 
+*NW-1/NW-3 substantially landed (server core, CPU — the logic, not the socket): `server.hpp` defines a serializable request/response wire protocol (`MatrixRequest` GET/PUT/QUERY + `MatrixResponse` status+results, host-endian, fail-loud, OOB/huge-alloc-guarded — fuzzed clean under ASan/UBSan) + a stateless `matrix_serve(engine, bytes) → bytes` dispatcher (GET→kv_get, PUT→durable txn commit, QUERY→execute_query; bad request → ERR_BADREQUEST, never crashes). The engine is now request-serveable; serialize→serve→deserialize round-trips equal direct engine calls, and a PUT through the wire is durable (replays into a fresh engine). 17-test suite + oracle green. See spec/plan 2026-06-26-server-core. **Only the literal transport remains (NW-1 socket layer):** the TCP/Unix-socket `accept`/`recv`/`send` loop is a thin adapter that shuttles these byte buffers — sandbox-blocked here (proven: loopback `bind` denied), runs on a non-sandboxed machine. NW-2 (multi-producer/concurrent serving) + NW-4 (client driver) + NW-5 still open.*
+
 ## 5. Security
 
 | ID | Gap | Why | Sev | Effort | Local? |
