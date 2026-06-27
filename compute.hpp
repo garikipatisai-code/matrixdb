@@ -280,6 +280,38 @@ inline void matrix_cpu_group_reduce_pred(const uint32_t* keys, const uint32_t* v
     matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, pred, out);
 }
 
+// Grouped reduction over an int64 value column keyed by a uint32 key column (dense group ids). Same
+// semantics as matrix_group_reduce_impl but values + accumulators are signed int64. Empty-group
+// sentinels: COUNT/SUM 0, MIN INT64_MAX, MAX INT64_MIN. NOTE: MAX inits to INT64_MIN (not 0) because
+// int64 values may be negative. Filtered applies the int64 predicate.
+template <bool Filtered>
+inline void matrix_group_reduce_i64_impl(const uint32_t* keys, const int64_t* values, size_t n,
+                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicateI64& pred, int64_t* out) {
+    for (uint32_t g = 0; g < num_groups; ++g)
+        out[g] = (op == AGG_MIN) ? INT64_MAX : (op == AGG_MAX ? INT64_MIN : 0);
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t k = keys[i];
+        if (k >= num_groups) continue;
+        const int64_t v = values[i];
+        if constexpr (Filtered) { if (!matrix_pred_match_i64(v, pred)) continue; }
+        switch (op) {
+            case AGG_SUM:   out[k] += v; break;
+            case AGG_MIN:   if (v < out[k]) out[k] = v; break;
+            case AGG_MAX:   if (v > out[k]) out[k] = v; break;
+            case AGG_COUNT:
+            default:        out[k] += 1; break;
+        }
+    }
+}
+inline void matrix_cpu_group_reduce_i64(const uint32_t* keys, const int64_t* values, size_t n,
+                                        uint32_t num_groups, MatrixAggOp op, int64_t* out) {
+    matrix_group_reduce_i64_impl<false>(keys, values, n, num_groups, op, MatrixPredicateI64{}, out);
+}
+inline void matrix_cpu_group_reduce_i64_pred(const uint32_t* keys, const int64_t* values, size_t n,
+                                             uint32_t num_groups, MatrixAggOp op, const MatrixPredicateI64& pred, int64_t* out) {
+    matrix_group_reduce_i64_impl<true>(keys, values, n, num_groups, op, pred, out);
+}
+
 /**
  * @brief Stable counting-sort of a batch by owning page (the "bin in the batcher" step).
  * Fills `binned` with the queries grouped by page — order within a page preserved, so

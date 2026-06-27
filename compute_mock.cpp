@@ -93,6 +93,12 @@ public:
     // A column's element type (DM-3a). Absent from col_types_ ⇒ U32 (every legacy/untagged column).
     MatrixType column_type(uint64_t id) const { auto it = col_types_.find(id); return it == col_types_.end() ? MatrixType::U32 : it->second; }
 
+    // Type-aware row count of a catalog column (U32 = 4 bytes/row, I64 = 8).
+    size_t column_rows(uint64_t id) const {
+        const size_t w = (column_type(id) == MatrixType::I64) ? sizeof(int64_t) : sizeof(uint32_t);
+        return catalog_.at(id)->size_bytes() / w;
+    }
+
     // Point-op read accessor (tests): true + sets out if present. Mirrors execute_batch's OP_READ.
     bool kv_get(uint64_t key, uint64_t& out) const { return kv_.get(key, out); }
 
@@ -299,6 +305,29 @@ public:
         grouped_aggregate_pred(key_id, value_id, num_groups, op, MatrixPredicate{MatrixCmp::GT, threshold, 0}, out);
     }
 
+    // GROUP BY a uint32 key over an int64 value column (DM-3c). Double borrow-and-return like
+    // grouped_aggregate; out holds int64 group aggregates as uint64 bit-patterns. No rebalance (GROUP BY
+    // is not scan-driven, matching grouped_aggregate).
+    void grouped_aggregate_i64(uint64_t key_id, uint64_t value_id, uint32_t num_groups, MatrixAggOp op,
+                               const MatrixPredicateI64& pred, bool has_filter, std::vector<uint64_t>& out) {
+        TieredColumn& kc = *catalog_.at(key_id);
+        TieredColumn& vc = *catalog_.at(value_id);
+        tier_mgr_.record_access(key_id, kc.size_bytes());
+        tier_mgr_.record_access(value_id, vc.size_bytes());
+        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) { ++cold_borrows_; kc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
+        const int64_t*  vals = reinterpret_cast<const int64_t*>(vc.host_ptr());
+        const size_t n = vc.size_bytes() / sizeof(int64_t);
+        std::vector<int64_t> tmp(num_groups);
+        if (has_filter) matrix_cpu_group_reduce_i64_pred(keys, vals, n, num_groups, op, pred, tmp.data());
+        else            matrix_cpu_group_reduce_i64(keys, vals, n, num_groups, op, tmp.data());
+        out.resize(num_groups);
+        for (uint32_t g = 0; g < num_groups; ++g) out[g] = static_cast<uint64_t>(tmp[g]);
+        if (vh != MemorySpace::HOST) vc.migrate_to(vh);
+        if (kh != MemorySpace::HOST) kc.migrate_to(kh);
+    }
+
     // Unified analytical query over catalog columns. Validates input at the boundary and returns a
     // status (never crashes on caller input); on any ERR, out is cleared. Scalar -> out[0];
     // grouped -> out[0..num_groups). Catalog columns only (the legacy id-0 fixed column is the
@@ -307,7 +336,20 @@ public:
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
         if (column_type(q.value_col) == MatrixType::I64) {
-            if (q.grouped) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;   // grouped int64 = DM-3c
+            if (q.grouped) {
+                // Key-type check FIRST: an int64 GROUP BY key is unsupported (DM-3d) regardless of whether
+                // it aliases the value column — i64val+i64key must report ERR_UNSUPPORTED_TYPE (spec §1),
+                // not the ERR_INVALID_GROUP that the key==value/row-count guard below would otherwise give.
+                if (catalog_has(q.key_col) && column_type(q.key_col) != MatrixType::U32)
+                    return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE; // int64 key = DM-3d
+                if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
+                    || column_rows(q.key_col) != column_rows(q.value_col))
+                    return MatrixQueryStatus::ERR_INVALID_GROUP;
+                if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
+                grouped_aggregate_i64(q.key_col, q.value_col, q.num_groups, q.agg,
+                                      MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.has_filter, out);
+                return MatrixQueryStatus::OK;
+            }
             out.assign(1, static_cast<uint64_t>(
                 scan_tiered_column_i64(q.value_col, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
