@@ -29,6 +29,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_columns.cpp",
            "test_typed_predicates.cpp",
            "test_typed_grouped.cpp",
+           "test_typed_snapshot.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -190,6 +191,11 @@ cells += [
        "query parity; verified incl. negative-group MAX and mixed-width row-count guards."),
     code("!clang++ -std=c++20 -O2 test_typed_grouped.cpp -o /tmp/ttg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_grouped.cpp -o /tmp/ttg; /tmp/ttg"),
+    md("### Typed catalog snapshot (int64 durability)\n"
+       "save_catalog / load_catalog round-trip a mixed uint32 + int64 catalog (types + values), so an "
+       "int64 analytical store survives a restart — not just RAM-resident."),
+    code("!clang++ -std=c++20 -O2 test_typed_snapshot.cpp -o /tmp/tts 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_snapshot.cpp -o /tmp/tts; /tmp/tts"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
