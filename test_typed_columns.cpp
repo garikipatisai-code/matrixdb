@@ -40,9 +40,10 @@ static void test_engine_i64() {
     // The > UINT32_MAX value proves genuine 64-bit: a uint32 read of 5000000000 would be 705032704.
     { MatrixQuery q{}; q.value_col = 7; q.agg = AGG_MAX; std::vector<uint64_t> o; eng.execute_query(q, o);
       assert(static_cast<int64_t>(o[0]) == 5000000000LL && static_cast<int64_t>(o[0]) != 705032704); }
-    // Graceful: filtered / grouped int64 are not yet supported.
-    { MatrixQuery q{}; q.value_col = 7; q.agg = AGG_SUM; q.has_filter = true; q.threshold = 0;
-      std::vector<uint64_t> o; assert(eng.execute_query(q, o) == MatrixQueryStatus::ERR_UNSUPPORTED_TYPE && o.empty()); }
+    // DM-3b: filtered int64 now works (default cmp GT, lo_i64 0 -> value > 0); grouped int64 stays unsupported (DM-3c).
+    { MatrixQuery q{}; q.value_col = 7; q.agg = AGG_SUM; q.has_filter = true; q.lo_i64 = 0;   // WHERE value > 0
+      std::vector<uint64_t> o; assert(eng.execute_query(q, o) == MatrixQueryStatus::OK
+        && static_cast<int64_t>(o[0]) == 5000000000LL + 2147483648LL + 5 + 100); }   // 5,5e9,2147483648,100
     { MatrixQuery q{}; q.value_col = 7; q.agg = AGG_COUNT; q.grouped = true; q.key_col = 7; q.num_groups = 2;
       std::vector<uint64_t> o; assert(eng.execute_query(q, o) == MatrixQueryStatus::ERR_UNSUPPORTED_TYPE); }
     std::cout << "[engine i64] ok\n";

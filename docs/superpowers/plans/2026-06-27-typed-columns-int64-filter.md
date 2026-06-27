@@ -126,7 +126,7 @@ int main() {
 
 - [ ] **Step 5: Run to verify it passes** — `clang++ -std=c++20 -O2 -Wall -Wextra test_typed_predicates.cpp -o /tmp/ttp && /tmp/ttp` → PASS: `[pred match i64] ok`, `[reduce pred i64] ok`, `[engine i64 filtered] ok`, `[i64 drives rebalance] ok`, `ALL TYPED-PREDICATE TESTS PASSED`. Zero warnings.
 
-- [ ] **Step 6: Confirm no regression** — `scan_tiered_column` (rebalance extraction), `scan_tiered_column_i64` (signature), and `execute_query` changed, so these MUST still pass unmodified:
+- [ ] **Step 6: Confirm no regression** — `scan_tiered_column` (rebalance extraction), `scan_tiered_column_i64` (signature), and `execute_query` changed. NOTE: `test_typed_columns.cpp` (DM-3a) asserts filtered int64 → `ERR_UNSUPPORTED_TYPE` at its line 44-45 — DM-3b makes that work, so that ONE assertion must be updated (replace it with a filtered-works assert using `lo_i64`; keep the grouped-rejection case). The spec's backward-compat note anticipated this ("the test's filter rejection updates"). After that edit, these MUST pass:
   - `for t in test_typed_columns test_live_tiering test_aggregations test_group_by test_query test_query_predicates test_query_validation test_observability test_server test_catalog_snapshot; do clang++ -std=c++20 -O2 $t.cpp -o /tmp/$t 2>/dev/null && /tmp/$t | tail -1; done`
   - `clang++ -std=c++20 -O3 -mcpu=apple-m1 main.cpp -o /tmp/mdb && /tmp/mdb 2>&1 | grep "Scan result sum"` → `83886070 (oracle 83886070)`.
   If any differ, STOP / report BLOCKED (esp. `test_typed_columns` — its unfiltered int64 path now goes through the generalized signature with `has_filter=false`; and `test_live_tiering` — the rebalance extraction must be byte-identical).
