@@ -130,6 +130,8 @@ in the current env (CPU, no network) vs needs real infra.
 | SE-5 | No input validation at trust boundaries | The payload `reinterpret_cast` etc. is safe in-process but not from a wire boundary that doesn't exist yet | P1 | M | yes |
 | SE-6 | No audit logging | No record of who did what | P2 | S | yes |
 
+*SE-2 landed (authorization / access control, CPU): `AccessPolicy` (per-principal grants — `allow_column` for QUERY column-level access, `allow_read`/`allow_write` for point GET/PUT, `permissive()` default) + an authorizing `matrix_serve(eng, policy, principal, bytes)` that checks the principal BEFORE any engine call — a denied request returns `ERR_FORBIDDEN` with zero side effects (a reviewer's runtime probe confirmed a denied PUT leaves the WAL at 0 bytes) and no existence leak (authz precedes existence). Principal is supplied by the authenticated caller, never the payload (no spoofing). The 2-arg `matrix_serve` delegates to a permissive policy (NW-1 unchanged). 18-test suite + oracle green. See spec/plan 2026-06-27-access-control. Remaining SE (local): SE-6 audit log, SE-4 encryption-at-rest; SE-1 authn + SE-3 TLS ride the deferred transport.*
+
 ## 6. Resource management & failure handling
 
 | ID | Gap | Why | Sev | Effort | Local? |
