@@ -7,6 +7,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "memory_model.hpp", "tier_model.hpp", "cost_model.hpp", "router.hpp",
            "kv_store.hpp", "cold_store.hpp", "tier_manager.hpp",
            "tiered_column.hpp", "migration_executor.hpp", "column_io.hpp",
+           "csv_ingest.hpp",
            "server.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
@@ -22,6 +23,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_server.cpp",
            "test_security.cpp",
            "test_audit.cpp",
+           "test_csv_ingest.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -153,6 +155,11 @@ cells += [
        "malformed — at the matrix_serve boundary; the forensic trail of who did what."),
     code("!clang++ -std=c++20 -O2 test_audit.cpp -o /tmp/taud 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_audit.cpp -o /tmp/taud; /tmp/taud"),
+    md("### CSV ingest\n"
+       "load_column_from_csv reads a uint32 column straight out of a CSV file into the tiered "
+       "catalog — and reports malformed input gracefully (false, no crash) rather than aborting."),
+    code("!clang++ -std=c++20 -O2 test_csv_ingest.cpp -o /tmp/tcsv 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_csv_ingest.cpp -o /tmp/tcsv; /tmp/tcsv"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
