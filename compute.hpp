@@ -141,6 +141,38 @@ inline uint64_t matrix_cpu_reduce_all(const uint32_t* v, size_t n, MatrixAggOp o
     }
 }
 
+enum class MatrixCmp : uint32_t { GT = 0, GE, LT, LE, EQ, NE, BETWEEN }; // GT == 0 == the default
+
+// A value predicate for WHERE. `a` = primary bound (threshold; inclusive lower for BETWEEN);
+// `b` = inclusive upper for BETWEEN (ignored otherwise). uint32 to match the column element type.
+struct MatrixPredicate { MatrixCmp cmp = MatrixCmp::GT; uint32_t a = 0; uint32_t b = 0; };
+
+inline bool matrix_pred_match(uint32_t v, const MatrixPredicate& p) {
+    switch (p.cmp) {
+        case MatrixCmp::GE:      return v >= p.a;
+        case MatrixCmp::LT:      return v <  p.a;
+        case MatrixCmp::LE:      return v <= p.a;
+        case MatrixCmp::EQ:      return v == p.a;
+        case MatrixCmp::NE:      return v != p.a;
+        case MatrixCmp::BETWEEN: return v >= p.a && v <= p.b;   // inclusive [a, b]
+        case MatrixCmp::GT:
+        default:                 return v >  p.a;
+    }
+}
+
+// Predicate-aware filtered scalar reduce — the general sibling of matrix_cpu_reduce. Same empty-set
+// sentinels (COUNT/SUM 0, MIN UINT64_MAX, MAX 0; see the MAX caveat in the design). matrix_cpu_reduce
+// (the GT fast path) is intentionally left untouched so the id-0 oracle scan is byte-identical.
+inline uint64_t matrix_cpu_reduce_pred(const uint32_t* v, size_t n, const MatrixPredicate& p, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(v[i], p)) s += v[i]; return s; }
+        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(v[i], p) && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(v[i], p) && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { uint64_t c = 0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match(v[i], p); return c; }
+    }
+}
+
 // A structured analytical query over catalog columns (value_col / key_col > 0). has_filter applies
 // WHERE value > threshold; grouped applies GROUP BY key_col into num_groups dense buckets.
 struct MatrixQuery {
@@ -148,6 +180,8 @@ struct MatrixQuery {
     MatrixAggOp agg        = AGG_COUNT;
     bool        has_filter = false;
     uint32_t    threshold  = 0;
+    MatrixCmp   cmp        = MatrixCmp::GT;   // comparison op for the filter (default keeps value>threshold)
+    uint32_t    upper      = 0;               // BETWEEN's inclusive upper bound (ignored for other ops)
     bool        grouped    = false;
     uint64_t    key_col    = 0;
     uint32_t    num_groups = 0;
@@ -165,14 +199,14 @@ enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TO
 // not branch-bound.
 template <bool Filtered>
 inline void matrix_group_reduce_impl(const uint32_t* keys, const uint32_t* values, size_t n,
-                                     uint32_t num_groups, MatrixAggOp op, uint32_t threshold, uint64_t* out) {
+                                     uint32_t num_groups, MatrixAggOp op, const MatrixPredicate& pred, uint64_t* out) {
     const uint64_t init = (op == AGG_MIN) ? UINT64_MAX : 0;
     for (uint32_t g = 0; g < num_groups; ++g) out[g] = init;
     for (size_t i = 0; i < n; ++i) {
         const uint32_t k = keys[i];
         if (k >= num_groups) continue;                       // out-of-range key: ignored
         const uint32_t v = values[i];
-        if constexpr (Filtered) { if (v <= threshold) continue; }  // WHERE value > threshold
+        if constexpr (Filtered) { if (!matrix_pred_match(v, pred)) continue; }  // WHERE predicate
         switch (op) {
             case AGG_SUM:   out[k] += v; break;
             case AGG_MIN:   if (v < out[k]) out[k] = v; break;
@@ -185,12 +219,16 @@ inline void matrix_group_reduce_impl(const uint32_t* keys, const uint32_t* value
 // GROUP BY key (all rows). Unchanged signature from GBY-1 — now a thin wrapper.
 inline void matrix_cpu_group_reduce(const uint32_t* keys, const uint32_t* values, size_t n,
                                     uint32_t num_groups, MatrixAggOp op, uint64_t* out) {
-    matrix_group_reduce_impl<false>(keys, values, n, num_groups, op, /*threshold*/0, out);
+    matrix_group_reduce_impl<false>(keys, values, n, num_groups, op, MatrixPredicate{}, out);
 }
 // GROUP BY key WHERE value > threshold.
 inline void matrix_cpu_group_reduce_where(const uint32_t* keys, const uint32_t* values, size_t n,
                                           uint32_t num_groups, MatrixAggOp op, uint32_t threshold, uint64_t* out) {
-    matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, threshold, out);
+    matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, MatrixPredicate{MatrixCmp::GT, threshold, 0}, out);
+}
+inline void matrix_cpu_group_reduce_pred(const uint32_t* keys, const uint32_t* values, size_t n,
+                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicate& pred, uint64_t* out) {
+    matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, pred, out);
 }
 
 /**
