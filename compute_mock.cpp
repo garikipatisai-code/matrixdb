@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -84,6 +85,16 @@ public:
         col_types_[id] = MatrixType::I64;
     }
 
+    // Register a double (float64) analytical column (born HOST-resident, like load_scan_column). DM-3e.
+    void load_scan_column_f64(uint64_t id, const double* data, size_t n) {
+        assert(id != 0 && "column id 0 is reserved for the legacy fixed scan column");
+        assert(catalog_.find(id) == catalog_.end() && "column id already registered");
+        const size_t bytes = n * sizeof(double);
+        catalog_[id] = std::make_unique<TieredColumn>(id, reinterpret_cast<const unsigned char*>(data), bytes);
+        tier_mgr_.register_column(id, bytes, MemorySpace::HOST);
+        col_types_[id] = MatrixType::F64;
+    }
+
     // Inspection (tests): where the bytes actually live vs where the brain believes, the
     // HOST bytes the brain is accounting for, and a column's integrity checksum.
     MemorySpace column_tier(uint64_t id) const { return catalog_.at(id)->tier(); }
@@ -93,9 +104,9 @@ public:
     // A column's element type (DM-3a). Absent from col_types_ ⇒ U32 (every legacy/untagged column).
     MatrixType column_type(uint64_t id) const { auto it = col_types_.find(id); return it == col_types_.end() ? MatrixType::U32 : it->second; }
 
-    // Type-aware row count of a catalog column (U32 = 4 bytes/row, I64 = 8).
+    // Type-aware row count of a catalog column (U32 = 4 bytes/row, I64 and F64 = 8).
     size_t column_rows(uint64_t id) const {
-        const size_t w = (column_type(id) == MatrixType::I64) ? sizeof(int64_t) : sizeof(uint32_t);
+        const size_t w = (column_type(id) == MatrixType::I64 || column_type(id) == MatrixType::F64) ? 8 : sizeof(uint32_t);
         return catalog_.at(id)->size_bytes() / w;
     }
 
@@ -211,6 +222,10 @@ public:
                 std::vector<int64_t> d(static_cast<size_t>(count));
                 ok = (count == 0 || std::fread(d.data(), sizeof(int64_t), d.size(), f) == d.size());
                 if (ok) load_scan_column_i64(id, d.data(), d.size());
+            } else if (type == static_cast<uint32_t>(MatrixType::F64)) {
+                std::vector<double> d(static_cast<size_t>(count));
+                ok = (count == 0 || std::fread(d.data(), sizeof(double), d.size(), f) == d.size());
+                if (ok) load_scan_column_f64(id, d.data(), d.size());
             } else if (type == static_cast<uint32_t>(MatrixType::U32)) {
                 std::vector<uint32_t> d(static_cast<size_t>(count));
                 ok = (count == 0 || std::fread(d.data(), sizeof(uint32_t), d.size(), f) == d.size());
@@ -360,6 +375,12 @@ public:
             }
             out.assign(1, static_cast<uint64_t>(
                 scan_tiered_column_i64(q.value_col, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.agg, q.has_filter)));
+            return MatrixQueryStatus::OK;
+        }
+        if (column_type(q.value_col) == MatrixType::F64) {
+            if (q.grouped) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;   // grouped double = DM-3f
+            out.assign(1, std::bit_cast<uint64_t>(
+                scan_tiered_column_f64(q.value_col, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
         }
         if (q.grouped) {
@@ -554,6 +575,24 @@ private:
         const size_t nvals = col.size_bytes() / sizeof(int64_t);
         const int64_t result = has_filter ? matrix_cpu_reduce_pred_i64(vals, nvals, pred, op)
                                           : matrix_cpu_reduce_all_i64(vals, nvals, op);
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+        maybe_rebalance();
+        return result;
+    }
+
+    // double scalar scan over a catalog column (DM-3e). Same borrow-to-HOST-and-return as
+    // scan_tiered_column_i64: record heat, pull a COLD column to RAM, reinterpret the raw bytes as
+    // double, reduce by op (filtered when has_filter, else over all), return the borrow to its home
+    // tier, and drive the shared rebalance cadence.
+    double scan_tiered_column_f64(uint64_t col_id, MatrixPredicateF64 pred, MatrixAggOp op, bool has_filter = false) {
+        TieredColumn& col = *catalog_.at(col_id);
+        tier_mgr_.record_access(col_id, col.size_bytes());
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        const double* vals = reinterpret_cast<const double*>(col.host_ptr());
+        const size_t nvals = col.size_bytes() / sizeof(double);
+        const double result = has_filter ? matrix_cpu_reduce_pred_f64(vals, nvals, pred, op)
+                                         : matrix_cpu_reduce_all_f64(vals, nvals, op);
         if (home != MemorySpace::HOST) col.migrate_to(home);
         maybe_rebalance();
         return result;
