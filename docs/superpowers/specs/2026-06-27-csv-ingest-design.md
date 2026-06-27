@@ -49,7 +49,6 @@ A successful parse over an empty file (or header-only with `has_header`) yields 
 #include <cstdint>
 #include <charconv>      // std::from_chars — locale-free, no-throw integer parse
 #include <fstream>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -74,7 +73,7 @@ inline bool matrix_read_csv_column(const std::string& path, size_t col_index, bo
         size_t start = 0, field = 0;
         while (field < col_index) {
             size_t comma = line.find(delim, start);
-            if (comma == std::string::npos) return false;            // short row
+            if (comma == std::string::npos) { out.clear(); return false; }   // short row (clear: false ⇒ empty out)
             start = comma + 1;
             ++field;
         }
@@ -84,7 +83,7 @@ inline bool matrix_read_csv_column(const std::string& path, size_t col_index, bo
         const char* e = line.data() + end;
         uint32_t value = 0;
         auto [ptr, ec] = std::from_chars(b, e, value);
-        if (ec != std::errc{} || ptr != e) return false;             // non-integer, overflow, or trailing junk
+        if (ec != std::errc{} || ptr != e) { out.clear(); return false; }    // non-integer, overflow, or trailing junk
         out.push_back(value);
     }
     return true;
