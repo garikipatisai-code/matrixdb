@@ -3,6 +3,7 @@
 #include "types.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 /**
  * @brief Pure virtual interface defining the compute engine's entry point.
@@ -143,7 +144,7 @@ inline uint64_t matrix_cpu_reduce_all(const uint32_t* v, size_t n, MatrixAggOp o
 
 // Per-column element type. U32 == 0 is the default (an untagged column is uint32). int64 columns
 // (DM-3a) hold signed 64-bit values — negatives and values beyond UINT32_MAX, which uint32 cannot.
-enum class MatrixType : uint32_t { U32 = 0, I64 };
+enum class MatrixType : uint32_t { U32 = 0, I64, F64 };   // F64 == 2 (DM-3e)
 
 // Signed unfiltered scalar reduce over an int64 column (the int64 sibling of matrix_cpu_reduce_all).
 // COUNT -> n; SUM -> Σv (int64; see the overflow note in the design); MIN/MAX over all (empty
@@ -220,6 +221,42 @@ inline int64_t matrix_cpu_reduce_pred_i64(const int64_t* v, size_t n, const Matr
     }
 }
 
+// Unfiltered scalar reduce over a double column. COUNT (double)n; SUM Σv; MIN/MAX over all (empty
+// sentinels MIN +inf, MAX -inf). IEEE: NaN values are skipped by MIN/MAX (NaN compares false) and
+// poison SUM (NaN propagates) — documented, not special-cased.
+inline double matrix_cpu_reduce_all_f64(const double* v, size_t n, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { double s = 0.0; for (size_t i = 0; i < n; ++i) s += v[i]; return s; }
+        case AGG_MIN: { double m = std::numeric_limits<double>::infinity();  for (size_t i = 0; i < n; ++i) if (v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if (v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      return static_cast<double>(n);
+    }
+}
+
+struct MatrixPredicateF64 { MatrixCmp cmp = MatrixCmp::GT; double a = 0.0; double b = 0.0; };
+inline bool matrix_pred_match_f64(double v, const MatrixPredicateF64& p) {
+    switch (p.cmp) {
+        case MatrixCmp::GE:      return v >= p.a;
+        case MatrixCmp::LT:      return v <  p.a;
+        case MatrixCmp::LE:      return v <= p.a;
+        case MatrixCmp::EQ:      return v == p.a;
+        case MatrixCmp::NE:      return v != p.a;
+        case MatrixCmp::BETWEEN: return v >= p.a && v <= p.b;
+        case MatrixCmp::GT:
+        default:                 return v >  p.a;
+    }
+}
+inline double matrix_cpu_reduce_pred_f64(const double* v, size_t n, const MatrixPredicateF64& p, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { double s = 0.0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_f64(v[i], p)) s += v[i]; return s; }
+        case AGG_MIN: { double m = std::numeric_limits<double>::infinity();  for (size_t i = 0; i < n; ++i) if (matrix_pred_match_f64(v[i], p) && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if (matrix_pred_match_f64(v[i], p) && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { double c = 0.0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match_f64(v[i], p) ? 1.0 : 0.0; return c; }
+    }
+}
+
 // A structured analytical query over catalog columns (value_col / key_col > 0). has_filter applies
 // WHERE value <cmp> threshold (BETWEEN uses [threshold, upper]); grouped applies GROUP BY key_col into num_groups dense buckets.
 struct MatrixQuery {
@@ -231,6 +268,8 @@ struct MatrixQuery {
     uint32_t    upper      = 0;               // BETWEEN's inclusive upper bound (ignored for other ops)
     int64_t     lo_i64     = 0;   // int64 filter primary bound / BETWEEN lower (I64 columns; not wire-serialized)
     int64_t     hi_i64     = 0;   // int64 filter BETWEEN upper (I64 columns)
+    double      lo_f64     = 0.0; // double filter primary bound / BETWEEN lower (F64 columns; not wire-serialized)
+    double      hi_f64     = 0.0; // double filter BETWEEN upper (F64 columns)
     bool        grouped    = false;
     uint64_t    key_col    = 0;
     uint32_t    num_groups = 0;
