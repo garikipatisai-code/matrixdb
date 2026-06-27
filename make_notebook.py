@@ -30,6 +30,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_predicates.cpp",
            "test_typed_grouped.cpp",
            "test_typed_snapshot.cpp",
+           "test_typed_double.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -196,6 +197,11 @@ cells += [
        "int64 analytical store survives a restart — not just RAM-resident."),
     code("!clang++ -std=c++20 -O2 test_typed_snapshot.cpp -o /tmp/tts 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_snapshot.cpp -o /tmp/tts; /tmp/tts"),
+    md("### double (float64) columns\n"
+       "load_scan_column_f64 registers a 64-bit float column; execute_query aggregates it "
+       "(COUNT/SUM/MIN/MAX, filtered + unfiltered) and it survives a restart — fractional real data."),
+    code("!clang++ -std=c++20 -O2 test_typed_double.cpp -o /tmp/ttd 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_double.cpp -o /tmp/ttd; /tmp/ttd"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
