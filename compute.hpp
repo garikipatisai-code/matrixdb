@@ -174,7 +174,7 @@ inline uint64_t matrix_cpu_reduce_pred(const uint32_t* v, size_t n, const Matrix
 }
 
 // A structured analytical query over catalog columns (value_col / key_col > 0). has_filter applies
-// WHERE value > threshold; grouped applies GROUP BY key_col into num_groups dense buckets.
+// WHERE value <cmp> threshold (BETWEEN uses [threshold, upper]); grouped applies GROUP BY key_col into num_groups dense buckets.
 struct MatrixQuery {
     uint64_t    value_col  = 0;
     MatrixAggOp agg        = AGG_COUNT;
@@ -191,7 +191,7 @@ struct MatrixQuery {
 // boundary never crashes on caller input; on any ERR the out vector is left empty).
 enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TOO_MANY_GROUPS };
 
-// Grouped reduction core (GROUP BY key). Filtered==true applies WHERE value > threshold (compiled
+// Grouped reduction core (GROUP BY key). Filtered==true applies WHERE matrix_pred_match(value, pred) (compiled
 // out when false via if constexpr, so the unfiltered path is byte-identical to the original). Dense
 // groups [0, num_groups); keys >= num_groups ignored; out initialized per op (empty-group sentinels
 // match matrix_cpu_reduce: COUNT/SUM/MAX -> 0, MIN -> UINT64_MAX). SUM accumulates in u64. One pass;
