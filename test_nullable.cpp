@@ -54,4 +54,50 @@ static void test_nullable_typed() {
     std::cout << "[nullable typed] ok\n";
 }
 
-int main() { test_nullable(); test_nullable_typed(); std::cout << "ALL NULLABLE TESTS PASSED\n"; return 0; }
+static void grp(CPUMockEngine& eng, uint64_t key, uint64_t val, uint32_t ng, MatrixAggOp op, std::vector<uint64_t>& o) {
+    MatrixQuery q{}; q.value_col = val; q.key_col = key; q.num_groups = ng; q.grouped = true; q.agg = op;
+    assert(eng.execute_query(q, o) == MatrixQueryStatus::OK);
+}
+
+// Grouped aggregates now skip NULL rows too (the documented follow-up to scalar null-awareness): a NULL
+// row contributes to no group. Closes the scalar-vs-grouped asymmetry across U32/I64/F64.
+static void test_grouped_nullable() {
+    CPUMockEngine eng;
+    std::vector<uint32_t> region = {0, 1, 0, 2, 1}, amount = {10, 20, 30, 40, 50};
+    eng.load_scan_column(1, region.data(), region.size());
+    eng.load_scan_column(2, amount.data(), amount.size());
+    std::vector<uint64_t> o;
+    // baseline (maskless): g0 = 10+30 = 40, g1 = 20+50 = 70, g2 = 40  (oracle-safe: unchanged path)
+    grp(eng, 1, 2, 3, AGG_SUM, o);
+    assert(o[0] == 40 && o[1] == 70 && o[2] == 40 && "maskless grouped SUM unchanged");
+    // mark row 2 (region 0, amount 30) NULL -> g0 loses it
+    eng.set_column_nulls(2, {0, 0, 1, 0, 0});
+    grp(eng, 1, 2, 3, AGG_SUM, o);
+    assert(o[0] == 10 && o[1] == 70 && o[2] == 40 && "grouped SUM skips the null row (g0: 40 -> 10)");
+    grp(eng, 1, 2, 3, AGG_COUNT, o);
+    assert(o[0] == 1 && o[1] == 2 && o[2] == 1 && "grouped COUNT counts non-null per group");
+    grp(eng, 1, 2, 3, AGG_MAX, o);
+    assert(o[0] == 10 && "grouped MAX over g0 non-null is 10 (30 excluded)");
+
+    // int64 grouped nullable
+    std::vector<int64_t> iv = {-5, 100, 7, 5000000000LL};            // regions {0,0,1,1}
+    std::vector<uint32_t> ik = {0, 0, 1, 1};
+    eng.load_scan_column(3, ik.data(), ik.size());
+    eng.load_scan_column_i64(4, iv.data(), iv.size());
+    eng.set_column_nulls(4, {0, 1, 0, 0});                           // null row1 (region 0, val 100)
+    grp(eng, 3, 4, 2, AGG_SUM, o);
+    assert(static_cast<int64_t>(o[0]) == -5 && static_cast<int64_t>(o[1]) == 7 + 5000000000LL
+           && "int64 grouped SUM skips null (g0: -5 only)");
+
+    // double grouped nullable
+    std::vector<double> dv = {1.5, 2.5, 4.0, 8.0};                   // regions {0,0,1,1}
+    eng.load_scan_column(5, ik.data(), ik.size());
+    eng.load_scan_column_f64(6, dv.data(), dv.size());
+    eng.set_column_nulls(6, {1, 0, 0, 0});                           // null row0 (region 0, val 1.5)
+    grp(eng, 5, 6, 2, AGG_SUM, o);
+    assert(std::bit_cast<double>(o[0]) == 2.5 && std::bit_cast<double>(o[1]) == 12.0
+           && "double grouped SUM skips null (g0: 2.5 only)");
+    std::cout << "[grouped nullable] ok\n";
+}
+
+int main() { test_nullable(); test_nullable_typed(); test_grouped_nullable(); std::cout << "ALL NULLABLE TESTS PASSED\n"; return 0; }
