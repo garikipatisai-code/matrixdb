@@ -316,6 +316,15 @@ public:
     uint64_t checkpoints() const { return checkpoints_; }
     uint64_t wal_records() const { return cold_store_ ? cold_store_->records_written() : 0; }
 
+    // RM-4 graceful shutdown: stop cleanly and bound restart-recovery time. Rolls back any open
+    // (uncommitted) transaction — its writes are correctly discarded on a clean stop — then, if a WAL is
+    // attached, checkpoints (snapshot kv_ + truncate the log) so a restart replays an ~empty WAL.
+    // Idempotent and safe to call before destruction; a no-op without a WAL.
+    void shutdown() {
+        if (in_txn_) rollback();
+        if (cold_store_) checkpoint();
+    }
+
     // Observability snapshot (counters since construction + current resident-bytes gauges).
     EngineStats stats() const {
         return EngineStats{ cold_borrows_, rebalances_, migrations_, catalog_.size(),

@@ -53,6 +53,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_average.cpp",
            "test_count_distinct.cpp",
            "test_admission_control.cpp",
+           "test_shutdown.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -335,6 +336,12 @@ cells += [
        "no allocation. Runtime-settable (toward OB-4)."),
     code("!clang++ -std=c++20 -O2 test_admission_control.cpp -o /tmp/tac 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_admission_control.cpp -o /tmp/tac; /tmp/tac"),
+    md("### Graceful shutdown (RM-4)\n"
+       "shutdown() rolls back any open transaction, then checkpoints the WAL (snapshot + truncate) so a "
+       "restart replays an ~empty log — bounded recovery. Committed writes survive; uncommitted are discarded. "
+       "Idempotent; no-op without a WAL."),
+    code("!clang++ -std=c++20 -O2 test_shutdown.cpp -o /tmp/tsd 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_shutdown.cpp -o /tmp/tsd; /tmp/tsd"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
