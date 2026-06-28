@@ -25,6 +25,16 @@ inline bool matrix_set_recv_timeout(int fd, unsigned ms) {
     tv.tv_usec = static_cast<long>((ms % 1000) * 1000);
     return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) == 0;
 }
+// Symmetric send timeout (SO_SNDTIMEO): bound how long a send may block, so a client that connects but
+// never READS the response (slow-reader, the other half of the DoS) can't wedge the loop's send_all once
+// the socket buffers fill. Same kernel mechanism as the recv timeout (verified there) — send returns
+// EAGAIN past the deadline → send_all returns false → serve_conn returns false → the loop drops it.
+inline bool matrix_set_send_timeout(int fd, unsigned ms) {
+    struct timeval tv;
+    tv.tv_sec  = static_cast<long>(ms / 1000);
+    tv.tv_usec = static_cast<long>((ms % 1000) * 1000);
+    return ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) == 0;
+}
 
 namespace matrixsrv_detail {
 // Read/write EXACTLY n bytes over a stream socket, looping over partial transfers; false on EOF/error.
@@ -95,7 +105,8 @@ inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint
     for (;;) {
         const int c = ::accept(srv, nullptr, nullptr);
         if (c < 0) continue;
-        if (recv_timeout_ms) matrix_set_recv_timeout(c, recv_timeout_ms);   // NW-5: drop a stuck client
+        if (recv_timeout_ms) matrix_set_recv_timeout(c, recv_timeout_ms);   // NW-5: drop a stuck reader/writer
+        if (recv_timeout_ms) matrix_set_send_timeout(c, recv_timeout_ms);   // both directions, same deadline
         while (matrix_serve_conn(eng, policy, /*principal=*/0, c)) { /* serve until the peer closes */ }
         ::close(c);
     }
