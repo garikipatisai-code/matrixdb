@@ -27,4 +27,24 @@ static void test_top_groups() {
     std::cout << "[top groups] ok\n";
 }
 
-int main() { test_top_groups(); std::cout << "ALL TOP-GROUPS TESTS PASSED\n"; return 0; }
+// top_query: the string entry point — "... GROUP BY k ORDER BY <agg> DESC LIMIT n" -> parse + top_groups.
+static void test_top_query() {
+    std::vector<uint32_t> region = {0, 1, 0, 2, 1, 0}, amount = {10, 20, 30, 40, 50, 60};
+    CPUMockEngine eng;
+    eng.load_scan_column(1, region.data(), region.size());
+    eng.load_scan_column(2, amount.data(), amount.size());
+    eng.name_column(1, "region"); eng.name_column(2, "amount");   // parser resolves by name
+    // r0=100, r1=70, r2=40 -> top-2 desc = [(0,100),(1,70)]
+    assert((eng.top_query("SELECT SUM(amount) GROUP BY region ORDER BY SUM DESC LIMIT 2") == Pairs{{0, 100}, {1, 70}})
+           && "ORDER BY <agg> DESC LIMIT parses + ranks");
+    assert((eng.top_query("SELECT SUM(amount) GROUP BY region ORDER BY amount DESC LIMIT 2") == Pairs{{0, 100}, {1, 70}})
+           && "sort key may name the value column too");
+    // no LIMIT / not grouped / ASC / bad n -> empty (top_query is top-N only)
+    assert(eng.top_query("SELECT SUM(amount) GROUP BY region").empty() && "no LIMIT -> not a top-N query");
+    assert(eng.top_query("SELECT SUM(amount)").empty() && "non-grouped -> empty");
+    assert(eng.top_query("SELECT SUM(amount) GROUP BY region ORDER BY SUM ASC LIMIT 2").empty() && "ASC rejected");
+    assert(eng.top_query("SELECT SUM(amount) GROUP BY region ORDER BY SUM DESC LIMIT 0").empty() && "LIMIT 0 rejected");
+    std::cout << "[top query] ok\n";
+}
+
+int main() { test_top_groups(); test_top_query(); std::cout << "ALL TOP-GROUPS TESTS PASSED\n"; return 0; }

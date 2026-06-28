@@ -310,6 +310,7 @@ struct MatrixQuery {
     bool        grouped    = false;
     uint64_t    key_col    = 0;
     uint32_t    num_groups = 0;
+    uint64_t    limit      = 0;   // ORDER BY agg DESC LIMIT n -> top-N groups; 0 = no limit (parse-side; not wire-serialized)
 };
 
 // Result of CPUMockEngine::execute_query — OK or a specific input-validation rejection (the query
