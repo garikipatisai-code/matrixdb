@@ -1,8 +1,9 @@
-# GPU Batch — Colab-Ready Plan (AGG-2 + GPU GROUP BY + VRAM Promotion)
+# GPU Batch — Colab-Ready Plan (AGG-2 + GPU GROUP BY + VRAM Promotion + Predicates + Typed Columns)
 
 **Status:** research + plan complete; **implementation + verification are Colab/nvcc-only** and
 must NOT be merged to `main` until the cross-backend invariant passes on real hardware.
-**Date:** 2026-06-26.
+**Date:** 2026-06-26; **extended 2026-06-27** with GPU-4 (richer predicates, QRY-3) + GPU-5 (typed
+int64/double columns, DM-3) so the GPU phase covers the full current CPU engine.
 
 **Why this is a plan, not a merged increment:** CUDA kernel-launch syntax (`kernel<<<...>>>(...)`)
 is not compilable by clang/g++, and there is no `nvcc` in the autonomous environment — so GPU code
@@ -107,12 +108,65 @@ GPU-scannable via `device_ptr()` + `matrix_scan_kernel_u32x4`). The remaining wo
 
 ---
 
+## GPU-4: richer scan predicates (QRY-3 parity)
+
+Since this plan was written, the CPU gained `MatrixCmp` (GT/GE/LT/LE/EQ/NE/BETWEEN) +
+`matrix_pred_match` + `matrix_cpu_reduce_pred` (QRY-3). The GPU filter is currently hardcoded
+`data[i] > threshold`. Replace it with a `__device__` predicate so GPU scans match the CPU's WHERE.
+
+```cuda
+enum class MatrixCmp : uint32_t { GT=0, GE, LT, LE, EQ, NE, BETWEEN };   // mirror compute.hpp
+__device__ __forceinline__ bool matrix_pred_match_dev(uint32_t v, MatrixCmp c, uint32_t a, uint32_t b) {
+    switch (c) { case MatrixCmp::GE: return v>=a; case MatrixCmp::LT: return v<a; case MatrixCmp::LE: return v<=a;
+                 case MatrixCmp::EQ: return v==a; case MatrixCmp::NE: return v!=a;
+                 case MatrixCmp::BETWEEN: return v>=a && v<=b; default: return v>a; }   // GT
+}
+// Each GPU-1 kernel takes (MatrixCmp cmp, uint32_t a, uint32_t b) instead of (threshold) and replaces
+// `data[i] > threshold` with `matrix_pred_match_dev(data[i], cmp, a, b)`. (Pass the predicate by value.)
+```
+- **execute_query/scan dispatch** builds `{cmp, a, b}` from the query (the CPU already does this) and
+  launches the predicate kernel. COUNT/SUM/MIN/MAX share the one predicate.
+- **Verify:** for every `cmp` × {COUNT,SUM,MIN,MAX}, `gpu == matrix_cpu_reduce_pred(host, n, {cmp,a,b}, op)`
+  — including a 0-matching predicate (sentinel check). Merge gate. (MAX empty-sentinel `0` is ambiguous
+  for 0-matching predicates exactly as on the CPU — same documented behavior, so the invariant still holds.)
+
+## GPU-5: typed columns — int64 + double (DM-3 parity)
+
+The CPU now has `int64`/`double` columns with scalar (filtered/unfiltered) + grouped reducers
+(`matrix_cpu_reduce_all_i64`/`_pred_i64`, `matrix_cpu_reduce_all_f64`/`_pred_f64`,
+`matrix_group_reduce_i64`/`_f64`). The GPU kernels are the same grid-stride shape over the typed pointer;
+the column's `MatrixType` (carried in the catalog) selects which kernel to launch.
+
+```cuda
+// int64: signed atomics. atomicMin/Max exist for long long on arch>=3.5 (T4 7.5 ok). SUM via atomicAdd
+// on unsigned long long reinterpreted (two's-complement add is bit-identical) or use long long atomicAdd.
+__global__ void matrix_sum_kernel_i64(const long long* d, size_t n, MatrixCmp c, long long a, long long b,
+                                      long long* out) { /* local += d[i] if pred; atomicAdd(out, local) */ }
+// MIN init LLONG_MAX, MAX init LLONG_MIN (match matrix_cpu_reduce_all_i64 sentinels).
+
+// double: atomicAdd(double*) needs arch>=6.0 (T4 7.5 ok). MIN/MAX have no native double atomic — use a
+// CAS loop (atomicCAS on the unsigned long long bit-pattern) or a two-pass reduction. Empty sentinels
+// MIN +inf, MAX -inf (match matrix_cpu_reduce_all_f64). NaN: IEEE compares false — same as CPU.
+__global__ void matrix_sum_kernel_f64(const double* d, size_t n, MatrixCmp c, double a, double b, double* out);
+```
+- The predicate (GPU-4) is templated/duplicated per element type (`matrix_pred_match_dev` for int64/double
+  with signed/float compares — the CPU's `matrix_pred_match_i64`/`_f64`).
+- **Verify:** `gpu_i64 == matrix_cpu_reduce_all_i64 / _pred_i64` and `gpu_f64 == matrix_cpu_reduce_*_f64`
+  over the same bytes, with negatives + `> UINT32_MAX` + fractional data (the CPU tests' datasets). For
+  double, compare bit-patterns of exactly-representable inputs so `==` is exact. Grouped: vs
+  `matrix_group_reduce_i64`/`_f64`. Each is an independent merge gate.
+- **VRAM promotion (GPU-3) is type-agnostic** — `TieredColumn` moves raw bytes, so a promoted int64/double
+  column is already device-resident; only the scan kernel selection (by `MatrixType`) is new here.
+
+---
+
 ## Execution checklist (on Colab, in order)
 1. Open `matrixdb_colab.ipynb` (it embeds all sources incl. the CPU reducers as the oracle).
-2. Add the GPU-1 kernels to `compute_cuda.cuh`; build `-DMATRIX_USE_CUDA`; run the cross-backend
-   cell (GPU agg == CPU agg for all 4 ops + empty). Green → the SUM/MIN/MAX kernels are correct.
-3. GPU-2 grouped kernels; cross-backend cell vs `matrix_cpu_group_reduce(_where)`. Green.
-4. GPU-3 VRAM promotion; assert promote + GPU==CPU + capture the GB/s vs CPU (the 24× claim).
-5. Only after each cell is green, commit that piece to `main` (now hardware-verified).
+2. GPU-1 SUM/MIN/MAX (u32, GT); cross-backend cell vs `matrix_cpu_reduce`. Green.
+3. GPU-4 predicates: generalize the filter; cross-backend vs `matrix_cpu_reduce_pred` (all 7 ops). Green.
+4. GPU-2 grouped (u32); vs `matrix_cpu_group_reduce(_where/_pred)`. Green.
+5. GPU-5 typed int64/double scalar (+ grouped); vs the `_i64`/`_f64` reducers. Green.
+6. GPU-3 VRAM promotion; assert promote + GPU==CPU + capture GB/s vs CPU (the 24× thesis).
+7. Commit each piece to `main` only after its cell is green (now hardware-verified). No big-bang.
 
-Each piece is independently verifiable and independently mergeable once green — no big-bang.
+Each piece is independently verifiable and independently mergeable once green.
