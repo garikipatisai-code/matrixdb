@@ -51,6 +51,11 @@ static void test_avg_grouped() {
     MatrixQuery q{}; q.value_col = 2; q.key_col = 1; q.num_groups = 3; q.grouped = true;
     auto a = eng.average(q);                                        // g0=(10+30)/2=20, g1=20, g2=40
     assert(a.size() == 3 && a[0] == 20.0 && a[1] == 20.0 && a[2] == 40.0 && "grouped AVG per group");
+    // grouped AVG is NULL-aware too (grouped SUM+COUNT both skip nulls): null row 2 (region 0, amount 30)
+    // -> g0 = 10/1 = 10 (not 40/2 = 20)
+    eng.set_column_nulls(2, {0, 0, 1, 0});
+    auto an = eng.average(q);
+    assert(an.size() == 3 && an[0] == 10.0 && an[1] == 20.0 && an[2] == 40.0 && "grouped AVG skips null row");
     std::cout << "[avg grouped] ok\n";
 }
 

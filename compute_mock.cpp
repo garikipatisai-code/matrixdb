@@ -754,11 +754,10 @@ public:
     }
 
     // AVG(value_col) = SUM/COUNT as double(s), derived from the two existing aggregates — so it inherits
-    // their per-type handling (U32/I64/F64) and (scalar) NULL-skipping for free, with no new reducer op
-    // threaded through every typed/grouped/filtered/nullable path. A scalar query yields one element; a
-    // grouped query yields one per group. A zero-count set/group yields NaN (the average of nothing).
-    // ponytail: grouped AVG reuses the grouped SUM/COUNT, which don't yet skip NULLs (the documented
-    // grouped null-awareness follow-up) — scalar AVG is null-aware today; grouped AVG counts null rows.
+    // their per-type handling (U32/I64/F64) and NULL-skipping for free, with no new reducer op threaded
+    // through every typed/grouped/filtered/nullable path. A scalar query yields one element; a grouped
+    // query yields one per group. A zero-count set/group yields NaN (the average of nothing). NULL-aware on
+    // both paths: SUM and COUNT both skip NULLs (scalar always; grouped since the grouped reducers take the mask).
     std::vector<double> average(const MatrixQuery& q) {
         MatrixQuery sq = q; sq.agg = AGG_SUM;   std::vector<uint64_t> sv;
         MatrixQuery cq = q; cq.agg = AGG_COUNT; std::vector<uint64_t> cv;
