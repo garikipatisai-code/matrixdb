@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-enum class ReqKind : uint32_t { GET = 1, PUT = 2, QUERY = 3, HEALTH = 4 };
+enum class ReqKind : uint32_t { GET = 1, PUT = 2, QUERY = 3, HEALTH = 4, STATS = 5 };
 enum class ServerStatus : uint32_t { OK = 0, ERR_BADREQUEST = 1000, ERR_FORBIDDEN = 1001 };
 
 struct MatrixRequest {
@@ -91,7 +91,7 @@ inline bool matrix_deserialize_request(const std::vector<uint8_t>& b, MatrixRequ
     r.u64(out.query.value_col); r.u32(agg); r.u8(hf); r.u32(out.query.threshold);
     r.u8(gr); r.u64(out.query.key_col); r.u32(out.query.num_groups);
     if (!r.ok || !r.done()) return false;
-    if (kind < 1 || kind > 4) return false;
+    if (kind < 1 || kind > 5) return false;
     out.kind = static_cast<ReqKind>(kind);
     out.query.agg = static_cast<MatrixAggOp>(agg);
     out.query.has_filter = (hf != 0);
@@ -141,6 +141,7 @@ inline std::vector<uint8_t> serve_core(CPUMockEngine& eng, const AccessPolicy& p
         case ReqKind::QUERY: authorized = policy.can_query(principal, req.query.value_col)
                                  && (!req.query.grouped || policy.can_query(principal, req.query.key_col)); break;
         case ReqKind::HEALTH: authorized = true; break;   // operational status (no data) — always probeable
+        case ReqKind::STATS:  authorized = true; break;   // operational metrics (no row data) — always readable
     }
     if (!authorized) {
         resp.status = static_cast<uint32_t>(ServerStatus::ERR_FORBIDDEN);
@@ -172,6 +173,18 @@ inline std::vector<uint8_t> serve_core(CPUMockEngine& eng, const AccessPolicy& p
             resp.results = { h.ready ? 1u : 0u, h.durable ? 1u : 0u,
                              static_cast<uint64_t>(h.catalog_columns), static_cast<uint64_t>(h.host_resident_bytes),
                              h.wal_records_pending, h.dropped_writes };
+            resp.status = static_cast<uint32_t>(ServerStatus::OK);
+            break;
+        }
+        case ReqKind::STATS: {
+            // Operational metrics over the wire (OB-5/OB-2). Fixed order — the client reads by index:
+            // [cold_borrows, rebalances, migrations, catalog_columns, host_resident_bytes,
+            //  cold_resident_bytes, query_count, total_query_ns, max_query_ns, p50_ns, p99_ns].
+            const EngineStats s = eng.stats();
+            resp.results = { s.cold_borrows, s.rebalances, s.migrations,
+                             static_cast<uint64_t>(s.catalog_columns), static_cast<uint64_t>(s.host_resident_bytes),
+                             static_cast<uint64_t>(s.cold_resident_bytes), s.query_count, s.total_query_ns,
+                             s.max_query_ns, eng.query_latency_percentile_ns(0.50), eng.query_latency_percentile_ns(0.99) };
             resp.status = static_cast<uint32_t>(ServerStatus::OK);
             break;
         }
