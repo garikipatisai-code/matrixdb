@@ -31,6 +31,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_grouped.cpp",
            "test_typed_snapshot.cpp",
            "test_typed_double.cpp",
+           "test_typed_double_grouped.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -202,6 +203,11 @@ cells += [
        "(COUNT/SUM/MIN/MAX, filtered + unfiltered) and it survives a restart — fractional real data."),
     code("!clang++ -std=c++20 -O2 test_typed_double.cpp -o /tmp/ttd 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_double.cpp -o /tmp/ttd; /tmp/ttd"),
+    md("### Grouped double aggregation\n"
+       "GROUP BY a uint32 key over a double value column (filtered + unfiltered) — completing double "
+       "query parity; verified incl. negative-group MAX and mixed-width row-count guards."),
+    code("!clang++ -std=c++20 -O2 test_typed_double_grouped.cpp -o /tmp/tdg 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_double_grouped.cpp -o /tmp/tdg; /tmp/tdg"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
