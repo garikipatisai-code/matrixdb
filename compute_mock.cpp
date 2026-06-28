@@ -496,6 +496,35 @@ public:
         return pairs;
     }
 
+    // Inner hash equi-join on two int64 key columns (the typed sibling of hash_join — DM-8c). Same
+    // build-left / probe-right shape over int64 values; returns matching (left_row, right_row) pairs.
+    // (double-key joins are intentionally unsupported — exact float equality is semantically fraught.)
+    std::vector<std::pair<uint64_t, uint64_t>> hash_join_i64(uint64_t left_key_id, uint64_t right_key_id) {
+        assert(catalog_has(left_key_id) && catalog_has(right_key_id) && "hash_join_i64: unknown column id");
+        assert(column_type(left_key_id) == MatrixType::I64 && column_type(right_key_id) == MatrixType::I64
+               && "hash_join_i64: keys must be int64");
+        TieredColumn& lc = *catalog_.at(left_key_id);
+        TieredColumn& rc = *catalog_.at(right_key_id);
+        tier_mgr_.record_access(left_key_id, lc.size_bytes());
+        tier_mgr_.record_access(right_key_id, rc.size_bytes());
+        const MemorySpace lh = lc.tier(); if (lh != MemorySpace::HOST) { ++cold_borrows_; lc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace rh = rc.tier(); if (rh != MemorySpace::HOST) { ++cold_borrows_; rc.migrate_to(MemorySpace::HOST); }
+        const int64_t* lk = reinterpret_cast<const int64_t*>(lc.host_ptr());
+        const int64_t* rk = reinterpret_cast<const int64_t*>(rc.host_ptr());
+        const size_t ln = lc.size_bytes() / sizeof(int64_t);
+        const size_t rn = rc.size_bytes() / sizeof(int64_t);
+        std::unordered_map<int64_t, std::vector<uint64_t>> build;     // left value -> left rows
+        for (size_t i = 0; i < ln; ++i) build[lk[i]].push_back(static_cast<uint64_t>(i));
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        for (size_t j = 0; j < rn; ++j) {
+            auto it = build.find(rk[j]);
+            if (it != build.end()) for (uint64_t i : it->second) out.emplace_back(i, static_cast<uint64_t>(j));
+        }
+        if (rh != MemorySpace::HOST) rc.migrate_to(rh);
+        if (lh != MemorySpace::HOST) lc.migrate_to(lh);
+        return out;
+    }
+
     // GROUP BY key WHERE <predicate> — same double borrow-and-return as grouped_aggregate_where.
     void grouped_aggregate_pred(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
                                 MatrixAggOp op, const MatrixPredicate& pred, std::vector<uint64_t>& out) {

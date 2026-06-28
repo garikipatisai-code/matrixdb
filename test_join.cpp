@@ -63,5 +63,23 @@ static void test_join_cold() {
     std::cout << "[join cold] ok\n";
 }
 
-int main() { test_join_basic(); test_join_edges(); test_join_cold();
+static Pairs brute_i64(const std::vector<int64_t>& l, const std::vector<int64_t>& r) {
+    Pairs out;
+    for (uint64_t i = 0; i < l.size(); ++i) for (uint64_t j = 0; j < r.size(); ++j)
+        if (l[i] == r[j]) out.emplace_back(i, j);
+    return sorted(out);
+}
+static void test_join_i64() {
+    std::vector<int64_t> L = {-7, 5000000000LL, 30, 5000000000LL}, R = {5000000000LL, 40, -7};
+    CPUMockEngine eng;
+    eng.load_scan_column_i64(1, L.data(), L.size());
+    eng.load_scan_column_i64(2, R.data(), R.size());
+    Pairs got = sorted(eng.hash_join_i64(1, 2));
+    assert(got == brute_i64(L, R) && "int64 hash join == brute oracle");
+    // -7@0=-7@2, 5e9@1=5e9@0, 5e9@3=5e9@0 — >UINT32_MAX + negative keys (a u32 join would mismatch these)
+    assert((got == Pairs{{0,2},{1,0},{3,0}}) && "int64-key join incl. > UINT32_MAX + negative keys");
+    std::cout << "[join i64] ok\n";
+}
+
+int main() { test_join_basic(); test_join_edges(); test_join_cold(); test_join_i64();
     std::cout << "ALL JOIN TESTS PASSED\n"; return 0; }
