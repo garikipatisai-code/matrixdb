@@ -97,6 +97,13 @@ public:
                   << (cold_store_ ? ", WAL durability ON" : "") << ")." << std::endl;
     }
 
+    // RM-2 admission control: cap the groups a single grouped query may allocate (the out vector is
+    // num_groups * 8 bytes, so this bounds one query's result memory). Default is MAX_QUERY_GROUPS (2^28,
+    // ~2 GB); an operator can tighten it so one runaway GROUP BY can't OOM the box. A query above the cap
+    // returns ERR_TOO_MANY_GROUPS (no allocation). Runtime-settable (a step toward OB-4 runtime config).
+    void set_max_query_groups(uint32_t n) { max_query_groups_ = n; }
+    uint32_t max_query_groups() const { return max_query_groups_; }
+
     // Register a uint32 analytical column into the tiered catalog (born resident in HOST).
     // id must be > 0 (0 is reserved for the legacy fixed scan column).
     void load_scan_column(uint64_t id, const uint32_t* data, size_t n) {
@@ -997,7 +1004,7 @@ private:
                 if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
                     || column_rows(q.key_col) != column_rows(q.value_col))
                     return MatrixQueryStatus::ERR_INVALID_GROUP;
-                if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
+                if (q.num_groups > max_query_groups_) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
                 grouped_aggregate_i64(q.key_col, q.value_col, q.num_groups, q.agg,
                                       MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.has_filter, out);
                 return MatrixQueryStatus::OK;
@@ -1014,7 +1021,7 @@ private:
                 if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
                     || column_rows(q.key_col) != column_rows(q.value_col))
                     return MatrixQueryStatus::ERR_INVALID_GROUP;
-                if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
+                if (q.num_groups > max_query_groups_) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
                 grouped_aggregate_f64(q.key_col, q.value_col, q.num_groups, q.agg,
                                       MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.has_filter, out);
                 return MatrixQueryStatus::OK;
@@ -1032,7 +1039,7 @@ private:
             // 8N-byte int64 key of N rows even passes the byte-length guard above (== a 2N-row u32 value).
             // Reject it — typed-key grouping lands in DM-3b. (value_col is already known U32 here.)
             if (column_type(q.key_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
-            if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
+            if (q.num_groups > max_query_groups_) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
             if (q.has_filter) grouped_aggregate_pred(q.key_col, q.value_col, q.num_groups, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
         } else {
@@ -1310,7 +1317,8 @@ private:
     static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
     static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434132u; // 'MCA2' — typed+named catalog snapshot v2 (DM-2b)
     static constexpr uint32_t MATRIX_CKPT_MAGIC = 0x4D434B50u; // 'MCKP' — point-op checkpoint file
-    static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // grouped-query num_groups ceiling (out alloc guard)
+    static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // default grouped-query num_groups ceiling (out alloc guard)
+    uint32_t max_query_groups_ = MAX_QUERY_GROUPS;     // RM-2: runtime-tunable admission cap (default = the constant)
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column

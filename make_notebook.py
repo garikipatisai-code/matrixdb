@@ -52,6 +52,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_having.cpp",
            "test_average.cpp",
            "test_count_distinct.cpp",
+           "test_admission_control.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -328,6 +329,12 @@ cells += [
        "typed (U32/I64/F64), null-aware. A HyperLogLog sketch is the upgrade path for huge columns."),
     code("!clang++ -std=c++20 -O2 test_count_distinct.cpp -o /tmp/tcd 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_count_distinct.cpp -o /tmp/tcd; /tmp/tcd"),
+    md("### Admission control (RM-2)\n"
+       "set_max_query_groups caps a single grouped query's group count — bounding its result memory "
+       "(num_groups x 8 bytes) so one runaway GROUP BY can't OOM the box. Over the cap -> ERR_TOO_MANY_GROUPS, "
+       "no allocation. Runtime-settable (toward OB-4)."),
+    code("!clang++ -std=c++20 -O2 test_admission_control.cpp -o /tmp/tac 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_admission_control.cpp -o /tmp/tac; /tmp/tac"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
