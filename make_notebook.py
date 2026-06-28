@@ -47,6 +47,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_tables.cpp",
            "test_string_columns.cpp",
            "test_fuzz.cpp",
+           "test_stress.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -299,6 +300,11 @@ cells += [
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
     code("!clang++ -std=c++20 -O2 test_fuzz.cpp -o /tmp/tf 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_fuzz.cpp -o /tmp/tf; /tmp/tf"),
+    md("### Stress / load test\n"
+       "Sustained query load + heavy tiering churn + append + join at scale (50k-row columns in a tight "
+       "RAM budget), every result checked against a closed-form oracle — behavior under load."),
+    code("!clang++ -std=c++20 -O2 test_stress.cpp -o /tmp/tstr 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_stress.cpp -o /tmp/tstr; /tmp/tstr"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
