@@ -51,7 +51,8 @@ static void test_errors() {
     assert(eng.parse_query("SELECT SUM(qty) WHERE qty >", m) == MatrixQueryStatus::ERR_PARSE);   // missing value
     assert(eng.parse_query("SELECT SUM(qty) WHERE qty > x", m) == MatrixQueryStatus::ERR_PARSE); // non-numeric
     assert(eng.parse_query("SELECT SUM(qty) WHERE qty BETWEEN 1 5", m) == MatrixQueryStatus::ERR_PARSE); // missing AND
-    assert(eng.parse_query("SELECT SUM(qty) GROUP BY qty", m) == MatrixQueryStatus::ERR_PARSE);  // unsupported tail
+    assert(eng.parse_query("SELECT SUM(qty) GROUP qty", m) == MatrixQueryStatus::ERR_PARSE);       // GROUP without BY
+    assert(eng.parse_query("SELECT SUM(qty) GROUP BY nosuchkey", m) == MatrixQueryStatus::ERR_UNKNOWN_COLUMN);
     assert(eng.parse_query("SELECT SUM(qty) extra", m) == MatrixQueryStatus::ERR_PARSE);    // trailing junk
     // out is reset on a MID-parse failure (no partial state leaks to a caller that ignores the status).
     MatrixQuery dirty;
@@ -60,5 +61,24 @@ static void test_errors() {
     std::cout << "[parser errors] ok\n";
 }
 
-int main() { test_happy(); test_errors();
+static void test_groupby() {
+    std::vector<uint32_t> region = {0, 1, 0, 2}, amount = {10, 20, 30, 40};
+    CPUMockEngine eng;
+    eng.load_scan_column(2, region.data(), region.size()); eng.name_column(2, "region");
+    eng.load_scan_column(3, amount.data(), amount.size()); eng.name_column(3, "amount");
+    MatrixQuery m; std::vector<uint64_t> o;
+    // SUM(amount) GROUP BY region — num_groups derived as max(region)+1 = 3
+    assert(eng.parse_query("SELECT SUM(amount) GROUP BY region", m) == MatrixQueryStatus::OK);
+    assert(m.grouped && m.value_col == 3 && m.key_col == 2 && m.num_groups == 3 && "GROUP BY parsed; num_groups = max key + 1");
+    assert(eng.execute_query(m, o) == MatrixQueryStatus::OK && o.size() == 3);
+    assert(o[0] == 40 && o[1] == 20 && o[2] == 40 && "grouped SUM: r0=10+30, r1=20, r2=40");
+    // filtered grouped: COUNT(amount) WHERE amount > 15 GROUP BY region
+    assert(eng.parse_query("SELECT COUNT(amount) WHERE amount > 15 GROUP BY region", m) == MatrixQueryStatus::OK);
+    assert(m.grouped && m.has_filter && m.cmp == MatrixCmp::GT && m.threshold == 15 && m.key_col == 2);
+    assert(eng.execute_query(m, o) == MatrixQueryStatus::OK);
+    assert(o[0] == 1 && o[1] == 1 && o[2] == 1 && "amount>15 per region: r0{30}, r1{20}, r2{40}");
+    std::cout << "[parser group by] ok\n";
+}
+
+int main() { test_happy(); test_errors(); test_groupby();
     std::cout << "ALL QUERY-PARSER TESTS PASSED\n"; return 0; }
