@@ -38,6 +38,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_schema.cpp",
            "test_append.cpp",
            "test_kv_range.cpp",
+           "test_query_parser.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -244,6 +245,12 @@ cells += [
        "point-op store, beyond exact-key get. (O(n) scan; a sorted index is the deferred upgrade.)"),
     code("!clang++ -std=c++20 -O2 test_kv_range.cpp -o /tmp/tkr 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_kv_range.cpp -o /tmp/tkr; /tmp/tkr"),
+    md("### Text query parser\n"
+       "parse_query turns a SQL-ish string (SELECT AGG(col) [WHERE col <op> val [AND val]]) into a "
+       "MatrixQuery — resolving column names and placing the bound by column type; malformed input is a "
+       "graceful ERR_PARSE, never a crash."),
+    code("!clang++ -std=c++20 -O2 test_query_parser.cpp -o /tmp/tqparse 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_query_parser.cpp -o /tmp/tqparse; /tmp/tqparse"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

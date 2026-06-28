@@ -277,7 +277,7 @@ struct MatrixQuery {
 
 // Result of CPUMockEngine::execute_query — OK or a specific input-validation rejection (the query
 // boundary never crashes on caller input; on any ERR the out vector is left empty).
-enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TOO_MANY_GROUPS, ERR_UNSUPPORTED_TYPE };
+enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TOO_MANY_GROUPS, ERR_UNSUPPORTED_TYPE, ERR_PARSE };
 
 // Grouped reduction core (GROUP BY key). Filtered==true applies WHERE matrix_pred_match(value, pred) (compiled
 // out when false via if constexpr, so the unfiltered path is byte-identical to the original). Dense
