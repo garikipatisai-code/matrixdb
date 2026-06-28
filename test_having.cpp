@@ -32,4 +32,25 @@ static void test_having() {
     std::cout << "[having] ok\n";
 }
 
-int main() { test_having(); std::cout << "ALL HAVING TESTS PASSED\n"; return 0; }
+// having_query: the string entry point — "SELECT SUM(x) GROUP BY k HAVING SUM <cmp> v" -> parse + having().
+static void test_having_query() {
+    std::vector<uint32_t> region = {0, 1, 0, 2, 1, 0}, amount = {10, 20, 30, 40, 50, 60};
+    CPUMockEngine eng;
+    eng.load_scan_column(1, region.data(), region.size());
+    eng.load_scan_column(2, amount.data(), amount.size());
+    eng.name_column(1, "region"); eng.name_column(2, "amount");   // g0=100, g1=70, g2=40
+    assert((eng.having_query("SELECT SUM(amount) GROUP BY region HAVING SUM > 50") == Pairs{{0, 100}, {1, 70}})
+           && "HAVING SUM > 50 (agg-name key)");
+    assert((eng.having_query("SELECT SUM(amount) GROUP BY region HAVING amount < 50") == Pairs{{2, 40}})
+           && "sort key may name the value column too");
+    assert((eng.having_query("SELECT COUNT(amount) GROUP BY region HAVING COUNT >= 2") == Pairs{{0, 3}, {1, 2}})
+           && "HAVING COUNT >= 2");
+    // not a having query / malformed -> empty
+    assert(eng.having_query("SELECT SUM(amount) GROUP BY region").empty() && "no HAVING -> empty");
+    assert(eng.having_query("SELECT SUM(amount)").empty() && "non-grouped -> empty");
+    assert(eng.having_query("SELECT SUM(amount) GROUP BY region HAVING SUM > ten").empty() && "bad value -> empty");
+    assert(eng.having_query("SELECT SUM(amount) GROUP BY region HAVING bogus > 5").empty() && "bad sort key -> empty");
+    std::cout << "[having query] ok\n";
+}
+
+int main() { test_having(); test_having_query(); std::cout << "ALL HAVING TESTS PASSED\n"; return 0; }
