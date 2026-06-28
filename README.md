@@ -74,6 +74,7 @@ clang++ -std=c++20 -O3 -mcpu=apple-m1 main.cpp -o matrixdb_proto   # Apple Silic
 ./matrixdb_proto
 
 ./run_tests.sh   # CI gate: compile + run every CPU test + the pipeline oracle (exit non-zero on any failure)
+SAN=1 ./run_tests.sh   # same, under AddressSanitizer + UBSan (catches UB/OOB; slower)
 ```
 
 ## Test on Google Colab (GPU)

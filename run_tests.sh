@@ -13,13 +13,16 @@ cd "$(dirname "$0")"
 # Pick a compiler: $CXX, else clang++, else g++.
 if [ -n "${CXX:-}" ]; then :; elif command -v clang++ >/dev/null 2>&1; then CXX=clang++; else CXX=g++; fi
 TMP="${TMPDIR:-/tmp}"
+# SAN=1 builds every test under ASan+UBSan (QA-3) to catch UB/OOB — slower; use for a thorough pass.
+if [ "${SAN:-0}" = "1" ]; then FLAGS="-std=c++20 -O1 -g -fsanitize=address,undefined"; MODE=" [ASan+UBSan]";
+else FLAGS="-std=c++20 -O2 -Wall -Wextra"; MODE=""; fi
 pass=0; fail=0; failed=""
 
-echo "== MatrixDB CI (CXX=$CXX) =="
+echo "== MatrixDB CI (CXX=$CXX)$MODE =="
 for src in test_*.cpp; do
     [ "$src" = "test_migration_gpu.cpp" ] && continue        # GPU/Colab only (nvcc)
     name="${src%.cpp}"
-    if "$CXX" -std=c++20 -O2 -Wall -Wextra "$src" -o "$TMP/mdb_$name" 2>"$TMP/mdb_$name.err" \
+    if "$CXX" $FLAGS "$src" -o "$TMP/mdb_$name" 2>"$TMP/mdb_$name.err" \
        && "$TMP/mdb_$name" >"$TMP/mdb_$name.out" 2>&1; then
         pass=$((pass + 1))
     else

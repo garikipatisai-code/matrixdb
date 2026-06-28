@@ -197,7 +197,7 @@ in the current env (CPU, no network) vs needs real infra.
 |----|-----|-----|-----|--------|--------|
 | QA-1 | No CI/CD pipeline | Every change verified by hand; CUDA only via manual Colab **[local CI gate landed — `run_tests.sh`]** | P1 | M | partial |
 | QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through **[grown to 37 CPU tests; `test_integration.cpp` covers the full stack end-to-end]** | P1 | L | yes |
-| QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected | P1 | S | yes |
+| QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected **[ASan+UBSan: whole CPU suite clean; `SAN=1 ./run_tests.sh`]** | P1 | S | yes |
 | QA-4 | No fuzzing / property-based testing | Edge cases unexplored | P2 | M | yes |
 | QA-5 | No stress / chaos / failure-injection testing | Behavior under load & failure unknown | P2 | L | partial |
 | QA-6 | CUDA path has no automated test — host-syntax probe + manual runs only | GPU regressions only caught by hand | P1 | M | needs GPU CI |
