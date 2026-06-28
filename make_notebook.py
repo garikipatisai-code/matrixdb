@@ -34,6 +34,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_double_grouped.cpp",
            "test_typed_csv.cpp",
            "test_query_latency.cpp",
+           "test_backup.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -220,6 +221,11 @@ cells += [
        "call (OK and error) so query latency (count, mean, max) is observable, the #1 DB ops metric."),
     code("!clang++ -std=c++20 -O2 test_query_latency.cpp -o /tmp/tql 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_query_latency.cpp -o /tmp/tql; /tmp/tql"),
+    md("### Backup / restore\n"
+       "backup(prefix) snapshots the whole durable state (analytical catalog + point-op store) under one "
+       "path prefix; restore(prefix) brings it all back into a fresh engine — a basic ops capability."),
+    code("!clang++ -std=c++20 -O2 test_backup.cpp -o /tmp/tbk 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_backup.cpp -o /tmp/tbk; /tmp/tbk"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
