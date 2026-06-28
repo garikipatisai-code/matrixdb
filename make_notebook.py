@@ -11,6 +11,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "server.hpp",
            "server_tcp.hpp",
            "client.hpp",
+           "version.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
@@ -62,6 +63,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
            "test_client.cpp",
+           "test_version.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -388,6 +390,12 @@ cells += [
        "direct engine calls. (-pthread)"),
     code("!clang++ -std=c++20 -O2 -pthread test_client.cpp -o /tmp/tcl 2>/dev/null "
          "|| g++ -std=c++20 -O2 -pthread test_client.cpp -o /tmp/tcl; /tmp/tcl"),
+    md("### Build version (BP-3)\n"
+       "version.hpp carries the semver build version; the engine reports it (string + a packed "
+       "major<<32|minor<<16|patch numeric form), and STATS exposes the packed version over the wire so a "
+       "client can read/compare which build it's talking to."),
+    code("!clang++ -std=c++20 -O2 test_version.cpp -o /tmp/tver 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_version.cpp -o /tmp/tver; /tmp/tver"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

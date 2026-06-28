@@ -62,13 +62,19 @@ public:
         return true;
     }
 
-    // STATS -> the raw 11-field metrics vector (the STATS wire layout; see serve_core). False on error.
+    // STATS -> the raw 12-field metrics vector (the STATS wire layout; see serve_core). False on error.
     bool stats(std::vector<uint64_t>& out) {
         MatrixRequest r; r.kind = ReqKind::STATS;
         MatrixResponse resp;
-        if (!round_trip(r, resp) || resp.status != 0 || resp.results.size() != 11) return false;
+        if (!round_trip(r, resp) || resp.status != 0 || resp.results.size() != 12) return false;
         out = resp.results;
         return true;
+    }
+
+    // The server's build version (packed major<<32|minor<<16|patch), read from the STATS snapshot. 0 on error.
+    uint64_t server_version() {
+        std::vector<uint64_t> s;
+        return stats(s) ? s[11] : 0;
     }
 
 private:

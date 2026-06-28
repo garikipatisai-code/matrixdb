@@ -5,6 +5,7 @@
 #include "memory_model.hpp"        // MemorySpace, MemoryModel
 #include "column_io.hpp"           // matrix_write_column / matrix_read_column (binary column persistence)
 #include "csv_ingest.hpp"          // matrix_read_csv_column (CSV column ingest, graceful on bad input)
+#include "version.hpp"             // MATRIXDB_VERSION (BP-3)
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -123,6 +124,10 @@ public:
     // responsive, more migration work); a large N relaxes it. Clamped to ≥ 1 (0 → 1, rebalance every scan).
     void set_rebalance_interval(uint64_t n) { rebalance_every_ = n ? n : 1; }
     uint64_t rebalance_interval() const { return rebalance_every_; }
+
+    // BP-3: the build version this instance is running (semver string + packed numeric form for the wire).
+    const char* version() const { return matrixdb_version(); }
+    uint64_t version_u64() const { return matrixdb_version_u64(); }
 
     // Register a uint32 analytical column into the tiered catalog (born resident in HOST).
     // id must be > 0 (0 is reserved for the legacy fixed scan column).
