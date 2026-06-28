@@ -525,6 +525,30 @@ public:
         return out;
     }
 
+    // Gather a column's values at the given row indices (the "project" step — e.g. over a join's matched
+    // rows). Returns one value per index, in index order, as a uint64: a U32 value zero-extended; an
+    // I64/F64 value as its bit pattern (caller reads via static_cast<int64_t> / std::bit_cast<double>,
+    // per column_type(col_id) — same convention as execute_query). Borrows COLD->HOST and returns it.
+    std::vector<uint64_t> gather(uint64_t col_id, const std::vector<uint64_t>& rows) {
+        assert(catalog_has(col_id) && "gather: unknown column id");
+        TieredColumn& col = *catalog_.at(col_id);
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        const bool wide = (column_type(col_id) != MatrixType::U32);   // I64/F64 are 8 bytes, U32 is 4
+        const size_t width = wide ? 8 : 4;
+        const size_t n = col.size_bytes() / width;
+        const unsigned char* base = col.host_ptr();
+        std::vector<uint64_t> out; out.reserve(rows.size());
+        for (uint64_t r : rows) {
+            assert(r < n && "gather: row index out of range");
+            uint64_t v = 0;
+            if (wide) std::memcpy(&v, base + r * 8, 8);
+            else { uint32_t u = 0; std::memcpy(&u, base + r * 4, 4); v = u; }
+            out.push_back(v);
+        }
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+        return out;
+    }
     // GROUP BY key WHERE <predicate> — same double borrow-and-return as grouped_aggregate_where.
     void grouped_aggregate_pred(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
                                 MatrixAggOp op, const MatrixPredicate& pred, std::vector<uint64_t>& out) {

@@ -43,6 +43,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_integration.cpp",
            "test_typed_column_io.cpp",
            "test_kv_index.cpp",
+           "test_gather.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -275,6 +276,11 @@ cells += [
        "O(result) walk, vs kv_range's O(n) scan); maintained on commit, rebuilt on recovery."),
     code("!clang++ -std=c++20 -O2 test_kv_index.cpp -o /tmp/tki 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_kv_index.cpp -o /tmp/tki; /tmp/tki"),
+    md("### Gather / join-then-project\n"
+       "gather(col, rows) projects a column's values at given row indices (typed) — composes with "
+       "hash_join so a join yields joined data, not just index pairs."),
+    code("!clang++ -std=c++20 -O2 test_gather.cpp -o /tmp/tg 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_gather.cpp -o /tmp/tg; /tmp/tg"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
