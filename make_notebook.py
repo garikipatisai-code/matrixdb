@@ -49,6 +49,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_string_columns.cpp",
            "test_nullable.cpp",
            "test_top_groups.cpp",
+           "test_average.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -309,6 +310,12 @@ cells += [
        "aggregate, descending — the \"top 10 regions by revenue\" staple. U32/COUNT grouping."),
     code("!clang++ -std=c++20 -O2 test_top_groups.cpp -o /tmp/ttg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_top_groups.cpp -o /tmp/ttg; /tmp/ttg"),
+    md("### AVG aggregate\n"
+       "average() derives AVG = SUM/COUNT as double(s) from the two existing aggregates, so it inherits "
+       "per-type handling (U32/I64/F64) and scalar NULL-skipping for free. Scalar -> one value; grouped -> "
+       "one per group; zero-count -> NaN."),
+    code("!clang++ -std=c++20 -O2 test_average.cpp -o /tmp/tavg 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_average.cpp -o /tmp/tavg; /tmp/tavg"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
