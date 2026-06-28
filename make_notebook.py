@@ -9,6 +9,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "tiered_column.hpp", "migration_executor.hpp", "column_io.hpp",
            "csv_ingest.hpp",
            "server.hpp",
+           "server_tcp.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
@@ -48,6 +49,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_string_columns.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
+           "test_server_tcp.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -305,6 +307,12 @@ cells += [
        "RAM budget), every result checked against a closed-form oracle — behavior under load."),
     code("!clang++ -std=c++20 -O2 test_stress.cpp -o /tmp/tstr 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_stress.cpp -o /tmp/tstr; /tmp/tstr"),
+    md("### TCP transport adapter\n"
+       "The length-prefixed wire protocol + matrix_serve_conn are verified over a socketpair (a framed "
+       "request served over a real socket == a direct matrix_serve); matrix_serve_tcp is the host-runnable "
+       "accept loop (bind is sandbox-blocked, so its loop is compile-verified here)."),
+    code("!clang++ -std=c++20 -O2 test_server_tcp.cpp -o /tmp/ttcp 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_server_tcp.cpp -o /tmp/ttcp; /tmp/ttcp"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
