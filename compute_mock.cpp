@@ -6,6 +6,7 @@
 #include "column_io.hpp"           // matrix_write_column / matrix_read_column (binary column persistence)
 #include "csv_ingest.hpp"          // matrix_read_csv_column (CSV column ingest, graceful on bad input)
 #include "version.hpp"             // MATRIXDB_VERSION (BP-3)
+#include "logging.hpp"             // Log / LogLevel (OB-1 structured logging)
 #include <unordered_map>
 #include <unordered_set>
 #include <map>
@@ -128,6 +129,11 @@ public:
     // BP-3: the build version this instance is running (semver string + packed numeric form for the wire).
     const char* version() const { return matrixdb_version(); }
     uint64_t version_u64() const { return matrixdb_version_u64(); }
+
+    // OB-1/OB-4: set the diagnostic log threshold at runtime (DEBUG<INFO<WARN<ERROR; default WARN). Global
+    // (the logger is process-wide); exposed here for API discoverability alongside the other tuning knobs.
+    void set_log_level(LogLevel l) { Log::set_level(l); }
+    LogLevel log_level() const { return Log::get_level(); }
 
     // Register a uint32 analytical column into the tiered catalog (born resident in HOST).
     // id must be > 0 (0 is reserved for the legacy fixed scan column).
@@ -1149,9 +1155,9 @@ public:
         // if any write was dropped because the KVStore filled, report it. Inc 3's SSD
         // spill removes the drop entirely; until then this is the visible failure signal.
         if (store_overflows_ > 0) {
-            std::cout << "WARNING: " << store_overflows_
-                      << " point-op writes dropped — KVStore full (Inc 3 adds SSD spill)."
-                      << std::endl;
+            // Dropped writes = data loss → an ERROR-level diagnostic (prints at the default WARN threshold).
+            Log::emit(LogLevel::ERROR, std::to_string(store_overflows_)
+                      + " point-op writes dropped — KVStore full (Inc 3 adds SSD spill).");
         }
         std::cout << "CPUMockEngine shutdown cleanly." << std::endl;
     }
