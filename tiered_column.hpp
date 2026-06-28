@@ -68,6 +68,16 @@ public:
         std::abort();
     }
 
+    // TieredColumn (public): append bytes to a HOST-resident column (grow in place). Caller ensures the
+    // column is HOST (the engine borrows COLD->HOST first). size_ grows so checksum()/host_ptr() span it.
+    void append_bytes(const unsigned char* b, size_t n) {
+        if (tier_ != MemorySpace::HOST) {
+            std::fprintf(stderr, "TieredColumn::append_bytes requires HOST tier\n"); std::abort();
+        }
+        host_.insert(host_.end(), b, b + n);
+        size_ += n;
+    }
+
     // Byte checksum wherever the column lives (DEVICE copies back to host first).
     uint64_t checksum() const {
         const std::vector<unsigned char> b = read_to_host();

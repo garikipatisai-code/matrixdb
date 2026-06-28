@@ -36,6 +36,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_query_latency.cpp",
            "test_backup.cpp",
            "test_schema.cpp",
+           "test_append.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -232,6 +233,11 @@ cells += [
        "column with its id, name, type, row count, and tier — a discoverable schema, not just numeric ids."),
     code("!clang++ -std=c++20 -O2 test_schema.cpp -o /tmp/tsch 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_schema.cpp -o /tmp/tsch; /tmp/tsch"),
+    md("### Append / dynamic column growth\n"
+       "append_to_column[_i64/_f64] add rows to an existing column (growing it, even across the COLD "
+       "tier) — the store is no longer load-once; appended rows are immediately queryable."),
+    code("!clang++ -std=c++20 -O2 test_append.cpp -o /tmp/tap 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_append.cpp -o /tmp/tap; /tmp/tap"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
