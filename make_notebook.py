@@ -40,6 +40,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_kv_range.cpp",
            "test_query_parser.cpp",
            "test_join.cpp",
+           "test_integration.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -257,6 +258,11 @@ cells += [
        "pairs (build-hash + probe) — multi-table correlation; verified against a brute-force oracle."),
     code("!clang++ -std=c++20 -O2 test_join.cpp -o /tmp/tj 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_join.cpp -o /tmp/tj; /tmp/tj"),
+    md("### End-to-end integration\n"
+       "One realistic flow exercising the features composing: typed CSV ingest -> name -> catalog "
+       "introspection -> parse_query -> execute -> append -> equi-join -> backup/restore -> re-query."),
+    code("!clang++ -std=c++20 -O2 test_integration.cpp -o /tmp/tint 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_integration.cpp -o /tmp/tint; /tmp/tint"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

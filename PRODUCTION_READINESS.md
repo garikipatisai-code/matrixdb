@@ -192,7 +192,7 @@ in the current env (CPU, no network) vs needs real infra.
 | ID | Gap | Why | Sev | Effort | Local? |
 |----|-----|-----|-----|--------|--------|
 | QA-1 | No CI/CD pipeline | Every change verified by hand; CUDA only via manual Colab **[local CI gate landed — `run_tests.sh`]** | P1 | M | partial |
-| QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through **[grown to 34 CPU tests this session; `run_tests.sh` runs them all + the oracle]** | P1 | L | yes |
+| QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through **[grown to 37 CPU tests; `test_integration.cpp` covers the full stack end-to-end]** | P1 | L | yes |
 | QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected | P1 | S | yes |
 | QA-4 | No fuzzing / property-based testing | Edge cases unexplored | P2 | M | yes |
 | QA-5 | No stress / chaos / failure-injection testing | Behavior under load & failure unknown | P2 | L | partial |
