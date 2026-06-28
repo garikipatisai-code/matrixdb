@@ -100,12 +100,33 @@ static void test_serve_health() {
     std::cout << "[serve health] ok\n";
 }
 
+static void test_serve_stats() {
+    const size_t N = 100; std::vector<uint32_t> col(N);
+    for (size_t i = 0; i < N; ++i) col[i] = static_cast<uint32_t>(i);
+    CPUMockEngine eng(0, "", SIZE_MAX); eng.load_scan_column(2, col.data(), N);
+    // run a few queries so the metrics are non-zero
+    for (int i = 0; i < 3; ++i) { std::vector<uint64_t> o; eng.execute_query(MatrixQuery{.value_col = 2, .agg = AGG_SUM}, o); }
+    MatrixRequest sq; sq.kind = ReqKind::STATS;
+    MatrixResponse sr; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(sq)), sr));
+    assert(sr.status == 0 && sr.results.size() == 11 && "STATS -> 11-field metrics snapshot");
+    EngineStats s = eng.stats();
+    assert(sr.results[3] == 1 && "catalog_columns over the wire");
+    assert(sr.results[6] == s.query_count && sr.results[6] >= 3 && "query_count over the wire (>=3 ran)");
+    assert(sr.results[10] >= sr.results[9] && "p99 >= p50 (monotone percentiles)");
+    // STATS, like HEALTH, is readable without grants (operational metrics, no row data)
+    AccessPolicy locked;
+    MatrixResponse lr; assert(matrix_deserialize_response(matrix_serve(eng, locked, 42, matrix_serialize_request(sq)), lr));
+    assert(lr.status == 0 && lr.results.size() == 11 && "STATS allowed without grants");
+    std::cout << "[serve stats] ok\n";
+}
+
 int main() {
     test_request_roundtrip();
     test_response_roundtrip();
     test_serve_get_put();
     test_serve_query();
     test_serve_health();
+    test_serve_stats();
     test_bad_request();
     std::cout << "ALL SERVER TESTS PASSED\n";
     return 0;
