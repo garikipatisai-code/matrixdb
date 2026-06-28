@@ -12,6 +12,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "server_tcp.hpp",
            "client.hpp",
            "version.hpp",
+           "logging.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
@@ -65,6 +66,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_server_tcp.cpp",
            "test_client.cpp",
            "test_version.cpp",
+           "test_logging.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -403,6 +405,12 @@ cells += [
        "client can read/compare which build it's talking to."),
     code("!clang++ -std=c++20 -O2 test_version.cpp -o /tmp/tver 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_version.cpp -o /tmp/tver; /tmp/tver"),
+    md("### Structured logging (OB-1)\n"
+       "A tiny leveled logger (DEBUG<INFO<WARN<ERROR) with a runtime-settable threshold, so operators can "
+       "filter/route diagnostics instead of grepping unconditional cout. Default WARN; writes to stderr. The "
+       "engine's data-loss (dropped-write) path now logs at ERROR; set_log_level tunes it."),
+    code("!clang++ -std=c++20 -O2 test_logging.cpp -o /tmp/tlog 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_logging.cpp -o /tmp/tlog; /tmp/tlog"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
