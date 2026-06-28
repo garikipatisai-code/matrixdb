@@ -742,6 +742,14 @@ public:
         return pairs;
     }
 
+    // Parse + run a top-N grouped query string ("SELECT SUM(x) GROUP BY k ORDER BY SUM DESC LIMIT n").
+    // Returns the (group, value) pairs by value desc; empty on parse error or a query without GROUP BY + LIMIT.
+    std::vector<std::pair<uint64_t, uint64_t>> top_query(const std::string& sql) {
+        MatrixQuery q;
+        if (parse_query(sql, q) != MatrixQueryStatus::OK || !q.grouped || q.limit == 0) return {};
+        return top_groups(q, q.limit);
+    }
+
     // Parse a scalar query string into `out` (see DM-4 grammar). Returns OK, ERR_UNKNOWN_COLUMN (bad name),
     // or ERR_PARSE (any malformed form). Untrusted input — never crashes; on ANY non-OK status `out` is
     // reset to a default MatrixQuery (so a caller that ignores the status can't execute partial garbage).
@@ -800,6 +808,21 @@ public:
             if (kid == 0) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
             if (column_type(kid) != MatrixType::U32) return MatrixQueryStatus::ERR_PARSE;  // grouped key must be u32
             out.grouped = true; out.key_col = kid; out.num_groups = derive_num_groups_u32(kid);
+        }
+        // optional ORDER BY <agg|valuecol> DESC LIMIT <n> -> top-N groups. DESC only (top_groups is descending)
+        // and requires GROUP BY (top-N is over groups). Sets out.limit; top_query applies it.
+        if (peek() == "ORDER") {
+            next();                                                            // consume ORDER
+            if (up(next()) != "BY") return MatrixQueryStatus::ERR_PARSE;
+            if (!out.grouped)       return MatrixQueryStatus::ERR_PARSE;       // top-N is meaningless without groups
+            const std::string sortraw = next();                               // sort key: the agg name or the value col
+            if (up(sortraw) != aggs && column_id(sortraw) != vid) return MatrixQueryStatus::ERR_PARSE;
+            if (up(next()) != "DESC")  return MatrixQueryStatus::ERR_PARSE;    // only DESC (top_groups sorts desc)
+            if (up(next()) != "LIMIT") return MatrixQueryStatus::ERR_PARSE;
+            const std::string lim = next();
+            uint64_t n = 0; auto [p, ec] = std::from_chars(lim.data(), lim.data() + lim.size(), n);
+            if (ec != std::errc{} || p != lim.data() + lim.size() || n == 0) return MatrixQueryStatus::ERR_PARSE;
+            out.limit = n;
         }
         if (k != tk.size()) return MatrixQueryStatus::ERR_PARSE;     // trailing junk
         return MatrixQueryStatus::OK;
