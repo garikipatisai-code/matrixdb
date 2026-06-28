@@ -294,11 +294,15 @@ public:
             const MemorySpace home = col.tier();
             if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
             const uint64_t id = kv.first;
-            const uint32_t type = static_cast<uint32_t>(column_type(id));   // 0=U32, 1=I64
+            const uint32_t type = static_cast<uint32_t>(column_type(id));   // 0=U32, 1=I64, 2=F64
             const uint64_t count = column_rows(id);                          // type-aware row count
-            ok = std::fwrite(&id,    sizeof id,    1, f) == 1
-              && std::fwrite(&type,  sizeof type,  1, f) == 1
-              && std::fwrite(&count, sizeof count, 1, f) == 1
+            const std::string nm = column_name(id);                          // optional name ("" if unnamed)
+            const uint32_t namelen = static_cast<uint32_t>(nm.size());
+            ok = std::fwrite(&id,      sizeof id,      1, f) == 1
+              && std::fwrite(&type,    sizeof type,    1, f) == 1
+              && std::fwrite(&count,   sizeof count,   1, f) == 1
+              && std::fwrite(&namelen, sizeof namelen, 1, f) == 1
+              && (namelen == 0 || std::fwrite(nm.data(), 1, namelen, f) == namelen)   // the name
               && (col.size_bytes() == 0
                   || std::fwrite(col.host_ptr(), 1, col.size_bytes(), f) == col.size_bytes());  // raw bytes
             if (home != MemorySpace::HOST) col.migrate_to(home);
@@ -314,10 +318,13 @@ public:
         bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && magic == MATRIX_CATALOG_MAGIC
                && std::fread(&ncols, sizeof ncols, 1, f) == 1;
         for (uint64_t c = 0; ok && c < ncols; ++c) {
-            uint64_t id = 0, count = 0; uint32_t type = 0;
+            uint64_t id = 0, count = 0; uint32_t type = 0, namelen = 0;
             ok = std::fread(&id, sizeof id, 1, f) == 1 && std::fread(&type, sizeof type, 1, f) == 1
-              && std::fread(&count, sizeof count, 1, f) == 1;
+              && std::fread(&count, sizeof count, 1, f) == 1 && std::fread(&namelen, sizeof namelen, 1, f) == 1;
             if (!ok) break;
+            if (namelen > 4096) { ok = false; break; }   // sane bound — corrupt snapshot guard
+            std::string nm(static_cast<size_t>(namelen), '\0');
+            if (namelen > 0) { ok = std::fread(nm.data(), 1, namelen, f) == namelen; if (!ok) break; }
             if (type == static_cast<uint32_t>(MatrixType::I64)) {
                 std::vector<int64_t> d(static_cast<size_t>(count));
                 ok = (count == 0 || std::fread(d.data(), sizeof(int64_t), d.size(), f) == d.size());
@@ -333,6 +340,7 @@ public:
             } else {
                 ok = false;   // unknown element type -> bad/corrupt snapshot, fail loud below
             }
+            if (ok && namelen > 0) name_column(id, nm);   // restore the column's name (DM-2b)
         }
         std::fclose(f);
         if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }
@@ -880,7 +888,7 @@ private:
     uint64_t checkpoints_ = 0;        // DU-4: number of WAL compactions performed
     // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
     static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
-    static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434131u; // 'MCA1' — typed catalog snapshot v1 (DM-3d)
+    static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434132u; // 'MCA2' — typed+named catalog snapshot v2 (DM-2b)
     static constexpr uint32_t MATRIX_CKPT_MAGIC = 0x4D434B50u; // 'MCKP' — point-op checkpoint file
     static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // grouped-query num_groups ceiling (out alloc guard)
     TierManager tier_mgr_;                              // decides migrations (heat-driven)
