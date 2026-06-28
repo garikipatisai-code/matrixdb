@@ -12,6 +12,7 @@
 #include <array>
 #include <bit>
 #include <cassert>
+#include <cctype>
 #include <chrono>
 #include <iostream>
 
@@ -39,6 +40,29 @@ struct EngineStats {
 
 // One catalog column's metadata (DM-2 introspection): id, optional name (""), element type, row count, tier.
 struct ColumnInfo { uint64_t id; std::string name; MatrixType type; size_t rows; MemorySpace tier; };
+
+// Tokenize a query string: identifiers/keywords/numbers, the comparison operators (> >= < <= = !=),
+// and parens. Whitespace-separated; operators and parens need no surrounding spaces. (free helper)
+inline std::vector<std::string> matrixparse_tokenize(const std::string& s) {
+    std::vector<std::string> t;
+    const size_t n = s.size();
+    for (size_t i = 0; i < n; ) {
+        const char c = s[i];
+        if (std::isspace(static_cast<unsigned char>(c))) { ++i; continue; }
+        if (c == '(' || c == ')') { t.emplace_back(1, c); ++i; continue; }
+        if (c == '>' || c == '<' || c == '=' || c == '!') {
+            if (i + 1 < n && s[i + 1] == '=') { t.push_back(s.substr(i, 2)); i += 2; }
+            else { t.emplace_back(1, c); ++i; }
+            continue;
+        }
+        size_t j = i;   // a run up to the next space / paren / operator char (covers names and signed numbers)
+        while (j < n && !std::isspace(static_cast<unsigned char>(s[j])) && s[j] != '(' && s[j] != ')'
+               && s[j] != '>' && s[j] != '<' && s[j] != '=' && s[j] != '!') ++j;
+        t.push_back(s.substr(i, j - i));
+        i = j;
+    }
+    return t;
+}
 
 class CPUMockEngine : public ComputeInterface {
 public:
@@ -480,7 +504,68 @@ public:
         return st;
     }
 
+    // Parse a scalar query string into `out` (see DM-4 grammar). Returns OK, ERR_UNKNOWN_COLUMN (bad name),
+    // or ERR_PARSE (any malformed form). Untrusted input — never crashes; `out` is reset first.
+    MatrixQueryStatus parse_query(const std::string& sql, MatrixQuery& out) {
+        out = MatrixQuery{};
+        const std::vector<std::string> tk = matrixparse_tokenize(sql);
+        size_t k = 0;
+        auto up   = [](std::string s){ for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return s; };
+        auto next = [&]{ return k < tk.size() ? tk[k++] : std::string{}; };
+        if (up(next()) != "SELECT") return MatrixQueryStatus::ERR_PARSE;
+        const std::string aggs = up(next());
+        MatrixAggOp agg;
+        if (aggs == "COUNT") agg = AGG_COUNT; else if (aggs == "SUM") agg = AGG_SUM;
+        else if (aggs == "MIN") agg = AGG_MIN; else if (aggs == "MAX") agg = AGG_MAX;
+        else return MatrixQueryStatus::ERR_PARSE;
+        if (next() != "(") return MatrixQueryStatus::ERR_PARSE;
+        const std::string col = next();
+        if (next() != ")") return MatrixQueryStatus::ERR_PARSE;
+        const uint64_t vid = column_id(col);
+        if (vid == 0) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
+        out.value_col = vid; out.agg = agg;
+        if (k == tk.size()) return MatrixQueryStatus::OK;            // no WHERE
+        if (up(next()) != "WHERE") return MatrixQueryStatus::ERR_PARSE;
+        if (column_id(next()) != vid) return MatrixQueryStatus::ERR_PARSE;   // filter col must == select col
+        const std::string ops = up(next());
+        const MatrixType ty = column_type(vid);
+        out.has_filter = true;
+        if (ops == "BETWEEN") {
+            out.cmp = MatrixCmp::BETWEEN;
+            if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
+            if (up(next()) != "AND")               return MatrixQueryStatus::ERR_PARSE;
+            if (!set_bound(ty, out, false, next())) return MatrixQueryStatus::ERR_PARSE;
+        } else {
+            if      (ops == ">")  out.cmp = MatrixCmp::GT;  else if (ops == ">=") out.cmp = MatrixCmp::GE;
+            else if (ops == "<")  out.cmp = MatrixCmp::LT;  else if (ops == "<=") out.cmp = MatrixCmp::LE;
+            else if (ops == "=")  out.cmp = MatrixCmp::EQ;  else if (ops == "!=") out.cmp = MatrixCmp::NE;
+            else return MatrixQueryStatus::ERR_PARSE;
+            if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
+        }
+        if (k != tk.size()) return MatrixQueryStatus::ERR_PARSE;     // trailing junk
+        return MatrixQueryStatus::OK;
+    }
+
 private:
+    // Parse the numeric literal `v` into the bound field matching the column type (lo=true -> primary/lower).
+    // Returns false on junk / overflow / empty. int64 via from_chars; double via strtod; u32 via from_chars.
+    bool set_bound(MatrixType ty, MatrixQuery& q, bool lo, const std::string& v) {
+        if (v.empty()) return false;
+        if (ty == MatrixType::F64) {
+            errno = 0; char* e = nullptr; const double d = std::strtod(v.c_str(), &e);
+            if (e != v.c_str() + v.size() || errno == ERANGE) return false;
+            (lo ? q.lo_f64 : q.hi_f64) = d; return true;
+        }
+        if (ty == MatrixType::I64) {
+            int64_t x = 0; auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), x);
+            if (ec != std::errc{} || p != v.data() + v.size()) return false;
+            (lo ? q.lo_i64 : q.hi_i64) = x; return true;
+        }
+        uint32_t x = 0; auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), x);
+        if (ec != std::errc{} || p != v.data() + v.size()) return false;
+        (lo ? q.threshold : q.upper) = x; return true;
+    }
+
     MatrixQueryStatus execute_query_impl(const MatrixQuery& q, std::vector<uint64_t>& out) {
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
