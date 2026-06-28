@@ -913,6 +913,37 @@ public:
         return top_groups(q, q.limit);
     }
 
+    // Parse + run a HAVING query string ("SELECT SUM(x) GROUP BY k HAVING SUM <cmp> v") -> the (group,value)
+    // pairs whose aggregate satisfies the comparison. Splits the HAVING tail off, parses the head (the
+    // grouped query) via the full parser — the tokenizer round-trips, so the space-joined head re-parses
+    // identically — then runs having(). Empty on parse error or a query without GROUP BY + HAVING.
+    // ponytail: the string form takes a single comparison (GT/GE/LT/LE/EQ/NE); BETWEEN-in-HAVING is
+    // reachable only via the having() method (rare in practice).
+    std::vector<std::pair<uint64_t, uint64_t>> having_query(const std::string& sql) {
+        std::vector<std::string> tk = matrixparse_tokenize(sql);
+        auto up = [](std::string s){ for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return s; };
+        size_t hi = tk.size();
+        for (size_t i = 0; i < tk.size(); ++i) if (up(tk[i]) == "HAVING") { hi = i; break; }
+        if (hi == tk.size() || hi + 4 != tk.size()) return {};            // need exactly: HAVING <key> <cmp> <value>
+        std::string head;
+        for (size_t i = 0; i < hi; ++i) { if (i) head += ' '; head += tk[i]; }
+        MatrixQuery q;
+        if (parse_query(head, q) != MatrixQueryStatus::OK || !q.grouped) return {};
+        // sort key must name the SELECT aggregate or the value column (same rule as ORDER BY)
+        static const char* AGGN[] = { "COUNT", "SUM", "MIN", "MAX" };
+        if (up(tk[hi + 1]) != AGGN[q.agg] && column_id(tk[hi + 1]) != q.value_col) return {};
+        MatrixCmp cmp;
+        const std::string op = tk[hi + 2];
+        if      (op == ">")  cmp = MatrixCmp::GT;  else if (op == ">=") cmp = MatrixCmp::GE;
+        else if (op == "<")  cmp = MatrixCmp::LT;  else if (op == "<=") cmp = MatrixCmp::LE;
+        else if (op == "=")  cmp = MatrixCmp::EQ;  else if (op == "!=") cmp = MatrixCmp::NE;
+        else return {};
+        const std::string& v = tk[hi + 3];
+        uint64_t threshold = 0; auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), threshold);
+        if (ec != std::errc{} || p != v.data() + v.size()) return {};
+        return having(q, cmp, threshold);
+    }
+
     // Parse a scalar query string into `out` (see DM-4 grammar). Returns OK, ERR_UNKNOWN_COLUMN (bad name),
     // or ERR_PARSE (any malformed form). Untrusted input — never crashes; on ANY non-OK status `out` is
     // reset to a default MatrixQuery (so a caller that ignores the status can't execute partial garbage).
