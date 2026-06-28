@@ -50,6 +50,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_nullable.cpp",
            "test_top_groups.cpp",
            "test_average.cpp",
+           "test_count_distinct.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -316,6 +317,11 @@ cells += [
        "one per group; zero-count -> NaN."),
     code("!clang++ -std=c++20 -O2 test_average.cpp -o /tmp/tavg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_average.cpp -o /tmp/tavg; /tmp/tavg"),
+    md("### COUNT(DISTINCT)\n"
+       "count_distinct returns the number of distinct non-NULL values in a column — exact (hash set), "
+       "typed (U32/I64/F64), null-aware. A HyperLogLog sketch is the upgrade path for huge columns."),
+    code("!clang++ -std=c++20 -O2 test_count_distinct.cpp -o /tmp/tcd 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_count_distinct.cpp -o /tmp/tcd; /tmp/tcd"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
