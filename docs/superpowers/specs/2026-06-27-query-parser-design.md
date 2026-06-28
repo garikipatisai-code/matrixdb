@@ -181,3 +181,11 @@ confirm no `-Werror=switch`-style breakage). Notebook regenerated.
 GROUP BY parsing (`num_groups` derivation); projections / column lists; multi-predicate AND/OR; filter
 by a different column; quoted identifiers; a full SQL grammar; a `query(sql, results)` parse+execute
 convenience.
+
+**Known literal-parsing behavior (reviewer-noted, fails safe — not a bug):** integer bounds use
+`from_chars` (rejects a leading `+`, hex, overflow); double bounds use `strtod` (accepts `+`, `inf`,
+`nan`, C99 hex floats; rejects overflow→`inf` via `ERANGE`; also rejects subnormal underflow via
+`ERANGE`). So `+5` parses for a double column but not an integer one, and exotic double literals are
+accepted. None of these crash or yield a wrong aggregate (they reject-or-accept exotic forms, erring
+safe). Normalizing this (strip leading `+` for integers; gate the double rejection on `isinf`) is a
+deferred polish, not a correctness fix.

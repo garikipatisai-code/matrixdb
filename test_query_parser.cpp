@@ -53,6 +53,10 @@ static void test_errors() {
     assert(eng.parse_query("SELECT SUM(qty) WHERE qty BETWEEN 1 5", m) == MatrixQueryStatus::ERR_PARSE); // missing AND
     assert(eng.parse_query("SELECT SUM(qty) GROUP BY qty", m) == MatrixQueryStatus::ERR_PARSE);  // unsupported tail
     assert(eng.parse_query("SELECT SUM(qty) extra", m) == MatrixQueryStatus::ERR_PARSE);    // trailing junk
+    // out is reset on a MID-parse failure (no partial state leaks to a caller that ignores the status).
+    MatrixQuery dirty;
+    assert(eng.parse_query("SELECT SUM(qty) WHERE qty BETWEEN 1 AND x", dirty) == MatrixQueryStatus::ERR_PARSE);
+    assert(dirty.value_col == 0 && !dirty.has_filter && dirty.cmp == MatrixCmp::GT && "out reset on mid-parse error");
     std::cout << "[parser errors] ok\n";
 }
 

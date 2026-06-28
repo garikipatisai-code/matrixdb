@@ -505,8 +505,17 @@ public:
     }
 
     // Parse a scalar query string into `out` (see DM-4 grammar). Returns OK, ERR_UNKNOWN_COLUMN (bad name),
-    // or ERR_PARSE (any malformed form). Untrusted input — never crashes; `out` is reset first.
+    // or ERR_PARSE (any malformed form). Untrusted input — never crashes; on ANY non-OK status `out` is
+    // reset to a default MatrixQuery (so a caller that ignores the status can't execute partial garbage).
     MatrixQueryStatus parse_query(const std::string& sql, MatrixQuery& out) {
+        const MatrixQueryStatus st = parse_query_impl(sql, out);
+        if (st != MatrixQueryStatus::OK) out = MatrixQuery{};   // no partial state survives a parse error
+        return st;
+    }
+
+    // The parse pipeline (see grammar). `out` is reset at entry; the public parse_query wrapper above also
+    // clears it on any error exit, so partial fields set before a mid-parse failure never leak to a caller.
+    MatrixQueryStatus parse_query_impl(const std::string& sql, MatrixQuery& out) {
         out = MatrixQuery{};
         const std::vector<std::string> tk = matrixparse_tokenize(sql);
         size_t k = 0;
