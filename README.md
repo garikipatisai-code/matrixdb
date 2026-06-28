@@ -72,6 +72,8 @@ only the discrete-memory path is implemented today.
 clang++ -std=c++20 -O3 -mcpu=apple-m1 main.cpp -o matrixdb_proto   # Apple Silicon
 # g++ -std=c++20 -O3 -march=native main.cpp -o matrixdb_proto      # Linux x86_64
 ./matrixdb_proto
+
+./run_tests.sh   # CI gate: compile + run every CPU test + the pipeline oracle (exit non-zero on any failure)
 ```
 
 ## Test on Google Colab (GPU)
