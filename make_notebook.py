@@ -42,6 +42,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_join.cpp",
            "test_integration.cpp",
            "test_typed_column_io.cpp",
+           "test_kv_index.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -269,6 +270,11 @@ cells += [
        "typed single-file format — the int64-abort guard is gone; the element type is carried in the file."),
     code("!clang++ -std=c++20 -O2 test_typed_column_io.cpp -o /tmp/ttci 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_column_io.cpp -o /tmp/ttci; /tmp/ttci"),
+    md("### Sorted secondary index\n"
+       "kv_range_sorted returns a key range in ascending order via an ordered index (O(log n) locate + "
+       "O(result) walk, vs kv_range's O(n) scan); maintained on commit, rebuilt on recovery."),
+    code("!clang++ -std=c++20 -O2 test_kv_index.cpp -o /tmp/tki 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_kv_index.cpp -o /tmp/tki; /tmp/tki"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
