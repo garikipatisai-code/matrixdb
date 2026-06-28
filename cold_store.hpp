@@ -128,6 +128,7 @@ public:
     }
 
     uint64_t records_written() const { return records_written_; }
+    SyncPolicy policy() const { return policy_; }   // the durability level in force (DU-5)
 
 private:
     // Write one length-20 [key8][value8][opcode4] record durably (the put/txn-put wire form).

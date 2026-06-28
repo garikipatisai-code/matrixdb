@@ -88,18 +88,20 @@ public:
     // emit HOST->DEVICE promotions the CPU executor's migrate_to(DEVICE) aborts on; a 1-byte
     // cap means no real column ever fits, so no DEVICE decision is emitted (cap==0 == unbounded).
     explicit CPUMockEngine(size_t /*worker_count*/ = 0, std::string wal_path = "",
-                           size_t host_cap = SIZE_MAX)
+                           size_t host_cap = SIZE_MAX, SyncPolicy sync = SyncPolicy::SYNC_EACH)
         : tier_mgr_(CostModel(MemoryModel::detect(false), false), /*device_cap=*/1, host_cap)
         , binned_(MATRIX_BATCH_MAX)
         , scan_column_(MATRIX_SCAN_COLUMN_SIZE) {
         for (size_t i = 0; i < MATRIX_SCAN_COLUMN_SIZE; ++i)
             scan_column_[i] = static_cast<uint32_t>(i); // resident analytical column
         // Durability is opt-in: with a WAL path, recover the point-op store by replaying
-        // the log into kv_ (a write committed before a crash is restored here).
+        // the log into kv_ (a write committed before a crash is restored here). DU-5: `sync` picks the
+        // durability level — SYNC_EACH (default) fsyncs each append so a committed write survives power
+        // loss; SYNC_OFF trades that for throughput (a crash may lose the unflushed tail).
         if (!wal_path.empty()) {
             checkpoint_path_ = wal_path + ".ckpt";
             load_checkpoint(checkpoint_path_);                                    // restore the last compaction (no-op if none)
-            cold_store_ = std::make_unique<ColdStore>(wal_path);
+            cold_store_ = std::make_unique<ColdStore>(wal_path, sync);
             cold_store_->replay([this](uint64_t k, uint64_t v){ kv_.put(k, v); }); // post-checkpoint records on top
             kv_.for_each([this](uint64_t k, uint64_t v){ key_index_[k] = v; });     // rebuild the ordered index from recovered state
         }
@@ -333,6 +335,9 @@ public:
 
     uint64_t checkpoints() const { return checkpoints_; }
     uint64_t wal_records() const { return cold_store_ ? cold_store_->records_written() : 0; }
+    // DU-5: the durability level in force. SYNC_EACH = a committed write is fsync'd (survives power loss);
+    // SYNC_OFF = buffered (faster, a crash may lose the tail). SYNC_OFF when no WAL is attached (nothing to sync).
+    SyncPolicy durability_level() const { return cold_store_ ? cold_store_->policy() : SyncPolicy::SYNC_OFF; }
 
     // RM-4 graceful shutdown: stop cleanly and bound restart-recovery time. Rolls back any open
     // (uncommitted) transaction — its writes are correctly discarded on a clean stop — then, if a WAL is
