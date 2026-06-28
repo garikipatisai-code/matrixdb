@@ -45,6 +45,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_kv_index.cpp",
            "test_gather.cpp",
            "test_tables.cpp",
+           "test_string_columns.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -287,6 +288,11 @@ cells += [
        "(table_columns / tables) — organizational schema over the named columns."),
     code("!clang++ -std=c++20 -O2 test_tables.cpp -o /tmp/tt 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_tables.cpp -o /tmp/tt; /tmp/tt"),
+    md("### String columns\n"
+       "load_string_column + string_count_where_eq give the engine variable-length string data it had "
+       "no support for — a minimal self-contained store (load, row count, equality-filter count)."),
+    code("!clang++ -std=c++20 -O2 test_string_columns.cpp -o /tmp/tsc 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_string_columns.cpp -o /tmp/tsc; /tmp/tsc"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
