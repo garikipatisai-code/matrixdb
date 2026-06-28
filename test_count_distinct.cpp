@@ -34,4 +34,20 @@ static void test_count_distinct() {
     std::cout << "[count distinct] ok\n";
 }
 
-int main() { test_count_distinct(); std::cout << "ALL COUNT-DISTINCT TESTS PASSED\n"; return 0; }
+// distinct_query: the string entry point — "SELECT COUNT(DISTINCT col)" -> count_distinct.
+static void test_distinct_query() {
+    std::vector<uint32_t> u = {1, 2, 2, 3, 3, 3};                   // distinct = 3
+    CPUMockEngine eng;
+    eng.load_scan_column(2, u.data(), u.size());
+    eng.name_column(2, "amount");
+    uint64_t n = 0;
+    assert(eng.distinct_query("SELECT COUNT(DISTINCT amount)", n) && n == 3 && "COUNT(DISTINCT) from string");
+    // malformed / non-distinct / unknown -> false, n untouched
+    n = 999;
+    assert(!eng.distinct_query("SELECT COUNT(amount)", n) && n == 999 && "plain COUNT is not a distinct query");
+    assert(!eng.distinct_query("SELECT COUNT(DISTINCT nope)", n) && "unknown column -> false");
+    assert(!eng.distinct_query("garbage", n) && "junk -> false");
+    std::cout << "[distinct query] ok\n";
+}
+
+int main() { test_count_distinct(); test_distinct_query(); std::cout << "ALL COUNT-DISTINCT TESTS PASSED\n"; return 0; }
