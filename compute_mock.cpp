@@ -116,6 +116,12 @@ public:
     void set_max_query_groups(uint32_t n) { max_query_groups_ = n; }
     uint32_t max_query_groups() const { return max_query_groups_; }
 
+    // OB-4 runtime config: tune the heat-rebalance cadence (run the brain + executor every N tiered scans)
+    // without recompiling. Default REBALANCE_EVERY (4). A smaller N re-tiers more aggressively (more
+    // responsive, more migration work); a large N relaxes it. Clamped to ≥ 1 (0 → 1, rebalance every scan).
+    void set_rebalance_interval(uint64_t n) { rebalance_every_ = n ? n : 1; }
+    uint64_t rebalance_interval() const { return rebalance_every_; }
+
     // Register a uint32 analytical column into the tiered catalog (born resident in HOST).
     // id must be > 0 (0 is reserved for the legacy fixed scan column).
     void load_scan_column(uint64_t id, const uint32_t* data, size_t n) {
@@ -1285,7 +1291,7 @@ private:
     // Every REBALANCE_EVERY scans, run the brain + executor: promote hot (DEVICE inert here), demote the
     // coldest HOST columns to SSD under the budget. Shared by the u32 and int64 scan paths.
     void maybe_rebalance() {
-        if (++scans_since_rebalance_ >= REBALANCE_EVERY) {
+        if (++scans_since_rebalance_ >= rebalance_every_) {
             std::unordered_map<uint64_t, TieredColumn*> ptrs;
             for (auto& kv : catalog_) ptrs[kv.first] = kv.second.get();
             migrations_ += executor_.apply(tier_mgr_.rebalance(), ptrs);
@@ -1343,7 +1349,8 @@ private:
     std::string checkpoint_path_;     // <wal_path>.ckpt — last point-op compaction snapshot
     uint64_t checkpoints_ = 0;        // DU-4: number of WAL compactions performed
     // --- live tiering (INT-1): a catalog of analytical columns the brain auto-tiers ---
-    static constexpr uint64_t REBALANCE_EVERY = 4;     // rebalance every N tiered scans
+    static constexpr uint64_t REBALANCE_EVERY = 4;     // default: rebalance every N tiered scans
+    uint64_t rebalance_every_ = REBALANCE_EVERY;       // OB-4: runtime-tunable rebalance cadence (default = the constant)
     static constexpr uint32_t MATRIX_CATALOG_MAGIC = 0x4D434132u; // 'MCA2' — typed+named catalog snapshot v2 (DM-2b)
     static constexpr uint32_t MATRIX_CKPT_MAGIC = 0x4D434B50u; // 'MCKP' — point-op checkpoint file
     static constexpr uint32_t MAX_QUERY_GROUPS = 1u << 28; // default grouped-query num_groups ceiling (out alloc guard)

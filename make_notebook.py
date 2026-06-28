@@ -53,6 +53,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_average.cpp",
            "test_count_distinct.cpp",
            "test_admission_control.cpp",
+           "test_rebalance_config.cpp",
            "test_shutdown.cpp",
            "test_health.cpp",
            "test_fuzz.cpp",
@@ -337,6 +338,12 @@ cells += [
        "no allocation. Runtime-settable (toward OB-4)."),
     code("!clang++ -std=c++20 -O2 test_admission_control.cpp -o /tmp/tac 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_admission_control.cpp -o /tmp/tac; /tmp/tac"),
+    md("### Runtime config (OB-4)\n"
+       "set_rebalance_interval tunes the heat-rebalance cadence (run the brain every N tiered scans) at "
+       "runtime — no recompile. Smaller N re-tiers more aggressively; larger N relaxes it. With the query "
+       "group cap, the compile-time tiering knobs are becoming operator-tunable."),
+    code("!clang++ -std=c++20 -O2 test_rebalance_config.cpp -o /tmp/trc 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_rebalance_config.cpp -o /tmp/trc; /tmp/trc"),
     md("### Graceful shutdown (RM-4)\n"
        "shutdown() rolls back any open transaction, then checkpoints the WAL (snapshot + truncate) so a "
        "restart replays an ~empty log — bounded recovery. Committed writes survive; uncommitted are discarded. "
