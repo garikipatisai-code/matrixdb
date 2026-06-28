@@ -35,6 +35,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_csv.cpp",
            "test_query_latency.cpp",
            "test_backup.cpp",
+           "test_schema.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -226,6 +227,11 @@ cells += [
        "path prefix; restore(prefix) brings it all back into a fresh engine — a basic ops capability."),
     code("!clang++ -std=c++20 -O2 test_backup.cpp -o /tmp/tbk 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_backup.cpp -o /tmp/tbk; /tmp/tbk"),
+    md("### Named columns + catalog introspection\n"
+       "name_column / column_id / column_name attach names to columns, and catalog_columns() lists every "
+       "column with its id, name, type, row count, and tier — a discoverable schema, not just numeric ids."),
+    code("!clang++ -std=c++20 -O2 test_schema.cpp -o /tmp/tsch 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_schema.cpp -o /tmp/tsch; /tmp/tsch"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

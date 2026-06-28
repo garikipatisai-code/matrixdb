@@ -37,6 +37,9 @@ struct EngineStats {
     uint64_t max_query_ns;        // slowest single execute_query (ns)
 };
 
+// One catalog column's metadata (DM-2 introspection): id, optional name (""), element type, row count, tier.
+struct ColumnInfo { uint64_t id; std::string name; MatrixType type; size_t rows; MemorySpace tier; };
+
 class CPUMockEngine : public ComputeInterface {
 public:
     // host_cap is the RAM budget (bytes) for the tiered catalog; default unbounded so the
@@ -111,6 +114,32 @@ public:
     size_t column_rows(uint64_t id) const {
         const size_t w = (column_type(id) == MatrixType::I64 || column_type(id) == MatrixType::F64) ? 8 : sizeof(uint32_t);
         return catalog_.at(id)->size_bytes() / w;
+    }
+
+    // Attach (or overwrite) a name for an existing catalog column. Duplicate names: last wins for column_id.
+    void name_column(uint64_t id, const std::string& name) {
+        assert(catalog_has(id) && "name_column: unknown column id");
+        column_names_[id] = name;
+        name_to_id_[name] = id;
+    }
+    // Resolve a column name to its id; 0 (the reserved legacy id) if no such name.
+    uint64_t column_id(const std::string& name) const {
+        auto it = name_to_id_.find(name);
+        return it == name_to_id_.end() ? 0 : it->second;
+    }
+    // A column's name, or "" if unnamed.
+    std::string column_name(uint64_t id) const {
+        auto it = column_names_.find(id);
+        return it == column_names_.end() ? std::string{} : it->second;
+    }
+    // List every catalog column with its metadata (id, name, type, row count, tier). Order unspecified.
+    std::vector<ColumnInfo> catalog_columns() const {
+        std::vector<ColumnInfo> out;
+        out.reserve(catalog_.size());
+        for (const auto& kv : catalog_)
+            out.push_back(ColumnInfo{ kv.first, column_name(kv.first), column_type(kv.first),
+                                      column_rows(kv.first), kv.second->tier() });
+        return out;
     }
 
     // Point-op read accessor (tests): true + sets out if present. Mirrors execute_batch's OP_READ.
@@ -696,6 +725,8 @@ private:
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
     std::unordered_map<uint64_t, MatrixType> col_types_; // id -> element type (absent ⇒ U32); DM-3a
+    std::unordered_map<uint64_t, std::string> column_names_;   // id -> optional name
+    std::unordered_map<std::string, uint64_t> name_to_id_;     // name -> id (resolve)
     uint64_t scans_since_rebalance_ = 0;
     uint64_t cold_borrows_ = 0;    // observability: COLD->HOST borrows
     uint64_t rebalances_ = 0;      // observability: rebalance passes
