@@ -944,6 +944,21 @@ public:
         return having(q, cmp, threshold);
     }
 
+    // Parse + run a COUNT(DISTINCT col) query string -> the distinct non-NULL value count. Completes the
+    // aggregate-string surface (every supported aggregate is now expressible as SQL). Returns false on a
+    // malformed / non-distinct query or an unknown column (out untouched), true with the count otherwise.
+    bool distinct_query(const std::string& sql, uint64_t& out) {
+        std::vector<std::string> tk = matrixparse_tokenize(sql);
+        auto up = [](std::string s){ for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return s; };
+        if (tk.size() != 6) return false;                                 // SELECT COUNT ( DISTINCT col )
+        if (up(tk[0]) != "SELECT" || up(tk[1]) != "COUNT" || tk[2] != "(" || up(tk[3]) != "DISTINCT" || tk[5] != ")")
+            return false;
+        const uint64_t cid = column_id(tk[4]);
+        if (cid == 0) return false;                                       // unknown column
+        out = count_distinct(cid);
+        return true;
+    }
+
     // Parse a scalar query string into `out` (see DM-4 grammar). Returns OK, ERR_UNKNOWN_COLUMN (bad name),
     // or ERR_PARSE (any malformed form). Untrusted input — never crashes; on ANY non-OK status `out` is
     // reset to a default MatrixQuery (so a caller that ignores the status can't execute partial garbage).
