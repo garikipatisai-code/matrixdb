@@ -325,10 +325,12 @@ enum class MatrixQueryStatus { OK, ERR_UNKNOWN_COLUMN, ERR_INVALID_GROUP, ERR_TO
 // not branch-bound.
 template <bool Filtered>
 inline void matrix_group_reduce_impl(const uint32_t* keys, const uint32_t* values, size_t n,
-                                     uint32_t num_groups, MatrixAggOp op, const MatrixPredicate& pred, uint64_t* out) {
+                                     uint32_t num_groups, MatrixAggOp op, const MatrixPredicate& pred, uint64_t* out,
+                                     const uint8_t* nulls = nullptr) {
     const uint64_t init = (op == AGG_MIN) ? UINT64_MAX : 0;
     for (uint32_t g = 0; g < num_groups; ++g) out[g] = init;
     for (size_t i = 0; i < n; ++i) {
+        if (nulls && nulls[i]) continue;                     // NULL row: excluded from every group aggregate
         const uint32_t k = keys[i];
         if (k >= num_groups) continue;                       // out-of-range key: ignored
         const uint32_t v = values[i];
@@ -342,10 +344,10 @@ inline void matrix_group_reduce_impl(const uint32_t* keys, const uint32_t* value
         }
     }
 }
-// GROUP BY key (all rows). Unchanged signature from GBY-1 — now a thin wrapper.
+// GROUP BY key (all rows). Unchanged signature from GBY-1 — now a thin wrapper. `nulls` (default none) skips NULL rows.
 inline void matrix_cpu_group_reduce(const uint32_t* keys, const uint32_t* values, size_t n,
-                                    uint32_t num_groups, MatrixAggOp op, uint64_t* out) {
-    matrix_group_reduce_impl<false>(keys, values, n, num_groups, op, MatrixPredicate{}, out);
+                                    uint32_t num_groups, MatrixAggOp op, uint64_t* out, const uint8_t* nulls = nullptr) {
+    matrix_group_reduce_impl<false>(keys, values, n, num_groups, op, MatrixPredicate{}, out, nulls);
 }
 // GROUP BY key WHERE value > threshold.
 inline void matrix_cpu_group_reduce_where(const uint32_t* keys, const uint32_t* values, size_t n,
@@ -353,8 +355,9 @@ inline void matrix_cpu_group_reduce_where(const uint32_t* keys, const uint32_t* 
     matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, MatrixPredicate{MatrixCmp::GT, threshold, 0}, out);
 }
 inline void matrix_cpu_group_reduce_pred(const uint32_t* keys, const uint32_t* values, size_t n,
-                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicate& pred, uint64_t* out) {
-    matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, pred, out);
+                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicate& pred, uint64_t* out,
+                                         const uint8_t* nulls = nullptr) {
+    matrix_group_reduce_impl<true>(keys, values, n, num_groups, op, pred, out, nulls);
 }
 
 // Grouped reduction over an int64 value column keyed by a uint32 key column (dense group ids). Same
@@ -363,10 +366,12 @@ inline void matrix_cpu_group_reduce_pred(const uint32_t* keys, const uint32_t* v
 // int64 values may be negative. Filtered applies the int64 predicate.
 template <bool Filtered>
 inline void matrix_group_reduce_i64_impl(const uint32_t* keys, const int64_t* values, size_t n,
-                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicateI64& pred, int64_t* out) {
+                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicateI64& pred, int64_t* out,
+                                         const uint8_t* nulls = nullptr) {
     for (uint32_t g = 0; g < num_groups; ++g)
         out[g] = (op == AGG_MIN) ? INT64_MAX : (op == AGG_MAX ? INT64_MIN : 0);
     for (size_t i = 0; i < n; ++i) {
+        if (nulls && nulls[i]) continue;                     // NULL row: excluded
         const uint32_t k = keys[i];
         if (k >= num_groups) continue;
         const int64_t v = values[i];
@@ -381,12 +386,13 @@ inline void matrix_group_reduce_i64_impl(const uint32_t* keys, const int64_t* va
     }
 }
 inline void matrix_cpu_group_reduce_i64(const uint32_t* keys, const int64_t* values, size_t n,
-                                        uint32_t num_groups, MatrixAggOp op, int64_t* out) {
-    matrix_group_reduce_i64_impl<false>(keys, values, n, num_groups, op, MatrixPredicateI64{}, out);
+                                        uint32_t num_groups, MatrixAggOp op, int64_t* out, const uint8_t* nulls = nullptr) {
+    matrix_group_reduce_i64_impl<false>(keys, values, n, num_groups, op, MatrixPredicateI64{}, out, nulls);
 }
 inline void matrix_cpu_group_reduce_i64_pred(const uint32_t* keys, const int64_t* values, size_t n,
-                                             uint32_t num_groups, MatrixAggOp op, const MatrixPredicateI64& pred, int64_t* out) {
-    matrix_group_reduce_i64_impl<true>(keys, values, n, num_groups, op, pred, out);
+                                             uint32_t num_groups, MatrixAggOp op, const MatrixPredicateI64& pred, int64_t* out,
+                                             const uint8_t* nulls = nullptr) {
+    matrix_group_reduce_i64_impl<true>(keys, values, n, num_groups, op, pred, out, nulls);
 }
 
 // Grouped reduction over a double value column keyed by a uint32 key column (dense group ids). Double
@@ -394,11 +400,13 @@ inline void matrix_cpu_group_reduce_i64_pred(const uint32_t* keys, const int64_t
 // group yields the right max). Filtered applies the double predicate.
 template <bool Filtered>
 inline void matrix_group_reduce_f64_impl(const uint32_t* keys, const double* values, size_t n,
-                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out) {
+                                         uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out,
+                                         const uint8_t* nulls = nullptr) {
     for (uint32_t g = 0; g < num_groups; ++g)
         out[g] = (op == AGG_MIN) ? std::numeric_limits<double>::infinity()
                : (op == AGG_MAX ? -std::numeric_limits<double>::infinity() : 0.0);
     for (size_t i = 0; i < n; ++i) {
+        if (nulls && nulls[i]) continue;                     // NULL row: excluded
         const uint32_t k = keys[i];
         if (k >= num_groups) continue;
         const double v = values[i];
@@ -413,12 +421,13 @@ inline void matrix_group_reduce_f64_impl(const uint32_t* keys, const double* val
     }
 }
 inline void matrix_cpu_group_reduce_f64(const uint32_t* keys, const double* values, size_t n,
-                                        uint32_t num_groups, MatrixAggOp op, double* out) {
-    matrix_group_reduce_f64_impl<false>(keys, values, n, num_groups, op, MatrixPredicateF64{}, out);
+                                        uint32_t num_groups, MatrixAggOp op, double* out, const uint8_t* nulls = nullptr) {
+    matrix_group_reduce_f64_impl<false>(keys, values, n, num_groups, op, MatrixPredicateF64{}, out, nulls);
 }
 inline void matrix_cpu_group_reduce_f64_pred(const uint32_t* keys, const double* values, size_t n,
-                                             uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out) {
-    matrix_group_reduce_f64_impl<true>(keys, values, n, num_groups, op, pred, out);
+                                             uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out,
+                                             const uint8_t* nulls = nullptr) {
+    matrix_group_reduce_f64_impl<true>(keys, values, n, num_groups, op, pred, out, nulls);
 }
 
 /**

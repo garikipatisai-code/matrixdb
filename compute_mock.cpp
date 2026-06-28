@@ -502,6 +502,14 @@ public:
         return true;
     }
 
+    // Null-mask pointer for a value column, but only if it has one AND it covers all n rows; else nullptr
+    // (no masking). ponytail: a mask whose length != n is treated as absent (fail-safe to "no nulls")
+    // rather than risk an out-of-bounds read in the reducer.
+    const uint8_t* value_nulls(uint64_t value_id, size_t n) const {
+        auto it = null_masks_.find(value_id);
+        return (it != null_masks_.end() && it->second.size() == n) ? it->second.data() : nullptr;
+    }
+
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
     // g in [0, num_groups). key_id and value_id are distinct catalog columns of equal length
     // (uint32). Borrows both to HOST for the reduction, then returns each to its home tier (so
@@ -522,7 +530,7 @@ public:
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
         const size_t n = kc.size_bytes() / sizeof(uint32_t);
         out.resize(num_groups);   // matrix_cpu_group_reduce initializes every slot per op (MIN sentinel ≠ 0)
-        matrix_cpu_group_reduce(keys, vals, n, num_groups, op, out.data());
+        matrix_cpu_group_reduce(keys, vals, n, num_groups, op, out.data(), value_nulls(value_id, n));
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);       // return borrows
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
@@ -652,7 +660,7 @@ public:
         const uint32_t* vals = reinterpret_cast<const uint32_t*>(vc.host_ptr());
         const size_t n = kc.size_bytes() / sizeof(uint32_t);
         out.resize(num_groups);
-        matrix_cpu_group_reduce_pred(keys, vals, n, num_groups, op, pred, out.data());
+        matrix_cpu_group_reduce_pred(keys, vals, n, num_groups, op, pred, out.data(), value_nulls(value_id, n));
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
@@ -679,8 +687,9 @@ public:
         const int64_t*  vals = reinterpret_cast<const int64_t*>(vc.host_ptr());
         const size_t n = vc.size_bytes() / sizeof(int64_t);
         std::vector<int64_t> tmp(num_groups);
-        if (has_filter) matrix_cpu_group_reduce_i64_pred(keys, vals, n, num_groups, op, pred, tmp.data());
-        else            matrix_cpu_group_reduce_i64(keys, vals, n, num_groups, op, tmp.data());
+        const uint8_t* nulls = value_nulls(value_id, n);
+        if (has_filter) matrix_cpu_group_reduce_i64_pred(keys, vals, n, num_groups, op, pred, tmp.data(), nulls);
+        else            matrix_cpu_group_reduce_i64(keys, vals, n, num_groups, op, tmp.data(), nulls);
         out.resize(num_groups);
         for (uint32_t g = 0; g < num_groups; ++g) out[g] = static_cast<uint64_t>(tmp[g]);
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);
@@ -702,8 +711,9 @@ public:
         const double*   vals = reinterpret_cast<const double*>(vc.host_ptr());
         const size_t n = vc.size_bytes() / sizeof(double);
         std::vector<double> tmp(num_groups);
-        if (has_filter) matrix_cpu_group_reduce_f64_pred(keys, vals, n, num_groups, op, pred, tmp.data());
-        else            matrix_cpu_group_reduce_f64(keys, vals, n, num_groups, op, tmp.data());
+        const uint8_t* nulls = value_nulls(value_id, n);
+        if (has_filter) matrix_cpu_group_reduce_f64_pred(keys, vals, n, num_groups, op, pred, tmp.data(), nulls);
+        else            matrix_cpu_group_reduce_f64(keys, vals, n, num_groups, op, tmp.data(), nulls);
         out.resize(num_groups);
         for (uint32_t g = 0; g < num_groups; ++g) out[g] = std::bit_cast<uint64_t>(tmp[g]);
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);
