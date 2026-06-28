@@ -55,6 +55,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_admission_control.cpp",
            "test_rebalance_config.cpp",
            "test_shutdown.cpp",
+           "test_durability_levels.cpp",
            "test_health.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
@@ -350,6 +351,12 @@ cells += [
        "Idempotent; no-op without a WAL."),
     code("!clang++ -std=c++20 -O2 test_shutdown.cpp -o /tmp/tsd 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_shutdown.cpp -o /tmp/tsd; /tmp/tsd"),
+    md("### Durability levels (DU-5)\n"
+       "The engine constructor selects the WAL fsync policy: SYNC_EACH (default) fsyncs each commit so a "
+       "committed write survives power loss; SYNC_OFF buffers for throughput (a crash may lose the tail). "
+       "durability_level() reports it. Both recover committed writes on a clean restart."),
+    code("!clang++ -std=c++20 -O2 test_durability_levels.cpp -o /tmp/tdl 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_durability_levels.cpp -o /tmp/tdl; /tmp/tdl"),
     md("### Health / readiness probe (OB-3)\n"
        "health() returns a ready verdict + the gauges behind it (catalog size, durable flag, pending-WAL "
        "records, resident bytes, dropped writes). ready is false when point-op writes have been dropped "
