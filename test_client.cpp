@@ -44,10 +44,11 @@ static void test_client_roundtrip() {
     assert(cli.health(h) && h.ready && h.catalog_columns == 1 && "HEALTH over the wire");
     assert(h.host_resident_bytes == eng.health().host_resident_bytes && "health gauges match the engine");
 
-    // STATS over the wire: 11 fields, query_count reflects the queries served
+    // STATS over the wire: 12 fields, query_count reflects the queries served
     std::vector<uint64_t> s;
-    assert(cli.stats(s) && s.size() == 11 && "STATS over the wire");
+    assert(cli.stats(s) && s.size() == 12 && "STATS over the wire");
     assert(s[6] == eng.stats().query_count && "client-observed query_count == engine's");
+    assert(cli.server_version() == eng.version_u64() && cli.server_version() != 0 && "server version over the wire");
 
     ::close(fd[0]);                                            // signals the server loop to end
     srv.join();

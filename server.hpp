@@ -199,12 +199,13 @@ inline std::vector<uint8_t> serve_core(CPUMockEngine& eng, const AccessPolicy& p
         case ReqKind::STATS: {
             // Operational metrics over the wire (OB-5/OB-2). Fixed order — the client reads by index:
             // [cold_borrows, rebalances, migrations, catalog_columns, host_resident_bytes,
-            //  cold_resident_bytes, query_count, total_query_ns, max_query_ns, p50_ns, p99_ns].
+            //  cold_resident_bytes, query_count, total_query_ns, max_query_ns, p50_ns, p99_ns, version_u64].
             const EngineStats s = eng.stats();
             resp.results = { s.cold_borrows, s.rebalances, s.migrations,
                              static_cast<uint64_t>(s.catalog_columns), static_cast<uint64_t>(s.host_resident_bytes),
                              static_cast<uint64_t>(s.cold_resident_bytes), s.query_count, s.total_query_ns,
-                             s.max_query_ns, eng.query_latency_percentile_ns(0.50), eng.query_latency_percentile_ns(0.99) };
+                             s.max_query_ns, eng.query_latency_percentile_ns(0.50), eng.query_latency_percentile_ns(0.99),
+                             eng.version_u64() };
             resp.status = static_cast<uint32_t>(ServerStatus::OK);
             break;
         }
