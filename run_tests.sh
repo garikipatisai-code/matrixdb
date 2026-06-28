@@ -14,8 +14,8 @@ cd "$(dirname "$0")"
 if [ -n "${CXX:-}" ]; then :; elif command -v clang++ >/dev/null 2>&1; then CXX=clang++; else CXX=g++; fi
 TMP="${TMPDIR:-/tmp}"
 # SAN=1 builds every test under ASan+UBSan (QA-3) to catch UB/OOB — slower; use for a thorough pass.
-if [ "${SAN:-0}" = "1" ]; then FLAGS="-std=c++20 -O1 -g -fsanitize=address,undefined"; MODE=" [ASan+UBSan]";
-else FLAGS="-std=c++20 -O2 -Wall -Wextra"; MODE=""; fi
+if [ "${SAN:-0}" = "1" ]; then FLAGS="-std=c++20 -O1 -g -pthread -fsanitize=address,undefined"; MODE=" [ASan+UBSan]";
+else FLAGS="-std=c++20 -O2 -Wall -Wextra -pthread"; MODE=""; fi
 pass=0; fail=0; failed=""
 
 echo "== MatrixDB CI (CXX=$CXX)$MODE =="

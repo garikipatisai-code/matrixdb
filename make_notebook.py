@@ -10,6 +10,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "csv_ingest.hpp",
            "server.hpp",
            "server_tcp.hpp",
+           "client.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
@@ -60,6 +61,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
+           "test_client.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -379,6 +381,13 @@ cells += [
        "accept loop (bind is sandbox-blocked, so its loop is compile-verified here)."),
     code("!clang++ -std=c++20 -O2 test_server_tcp.cpp -o /tmp/ttcp 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_server_tcp.cpp -o /tmp/ttcp; /tmp/ttcp"),
+    md("### Client driver (NW-4)\n"
+       "MatrixClient is the app-side of the wire protocol — wraps a connected socket with typed "
+       "get/put/query/health/stats calls (frame -> send -> recv -> deframe), the inverse of "
+       "matrix_serve_conn. Driven end-to-end over a socketpair (server in a thread); client results == "
+       "direct engine calls. (-pthread)"),
+    code("!clang++ -std=c++20 -O2 -pthread test_client.cpp -o /tmp/tcl 2>/dev/null "
+         "|| g++ -std=c++20 -O2 -pthread test_client.cpp -o /tmp/tcl; /tmp/tcl"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
