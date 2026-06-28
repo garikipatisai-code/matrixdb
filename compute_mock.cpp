@@ -612,23 +612,35 @@ public:
         const uint64_t vid = column_id(col);
         if (vid == 0) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
         out.value_col = vid; out.agg = agg;
-        if (k == tk.size()) return MatrixQueryStatus::OK;            // no WHERE
-        if (up(next()) != "WHERE") return MatrixQueryStatus::ERR_PARSE;
-        if (column_id(next()) != vid) return MatrixQueryStatus::ERR_PARSE;   // filter col must == select col
-        const std::string ops = up(next());
-        const MatrixType ty = column_type(vid);
-        out.has_filter = true;
-        if (ops == "BETWEEN") {
-            out.cmp = MatrixCmp::BETWEEN;
-            if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
-            if (up(next()) != "AND")               return MatrixQueryStatus::ERR_PARSE;
-            if (!set_bound(ty, out, false, next())) return MatrixQueryStatus::ERR_PARSE;
-        } else {
-            if      (ops == ">")  out.cmp = MatrixCmp::GT;  else if (ops == ">=") out.cmp = MatrixCmp::GE;
-            else if (ops == "<")  out.cmp = MatrixCmp::LT;  else if (ops == "<=") out.cmp = MatrixCmp::LE;
-            else if (ops == "=")  out.cmp = MatrixCmp::EQ;  else if (ops == "!=") out.cmp = MatrixCmp::NE;
-            else return MatrixQueryStatus::ERR_PARSE;
-            if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
+        auto peek = [&]{ return k < tk.size() ? up(tk[k]) : std::string{}; };   // uppercased lookahead, no consume
+        // optional WHERE <valuecol> <op> <val> [AND <val>]
+        if (peek() == "WHERE") {
+            next();                                                            // consume WHERE
+            if (column_id(next()) != vid) return MatrixQueryStatus::ERR_PARSE; // filter col must == select col
+            const std::string ops = up(next());
+            const MatrixType ty = column_type(vid);
+            out.has_filter = true;
+            if (ops == "BETWEEN") {
+                out.cmp = MatrixCmp::BETWEEN;
+                if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
+                if (up(next()) != "AND")               return MatrixQueryStatus::ERR_PARSE;
+                if (!set_bound(ty, out, false, next())) return MatrixQueryStatus::ERR_PARSE;
+            } else {
+                if      (ops == ">")  out.cmp = MatrixCmp::GT;  else if (ops == ">=") out.cmp = MatrixCmp::GE;
+                else if (ops == "<")  out.cmp = MatrixCmp::LT;  else if (ops == "<=") out.cmp = MatrixCmp::LE;
+                else if (ops == "=")  out.cmp = MatrixCmp::EQ;  else if (ops == "!=") out.cmp = MatrixCmp::NE;
+                else return MatrixQueryStatus::ERR_PARSE;
+                if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
+            }
+        }
+        // optional GROUP BY <keycol> (uint32 key). num_groups is derived from the key column (max+1).
+        if (peek() == "GROUP") {
+            next();                                                            // consume GROUP
+            if (up(next()) != "BY") return MatrixQueryStatus::ERR_PARSE;
+            const uint64_t kid = column_id(next());
+            if (kid == 0) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
+            if (column_type(kid) != MatrixType::U32) return MatrixQueryStatus::ERR_PARSE;  // grouped key must be u32
+            out.grouped = true; out.key_col = kid; out.num_groups = derive_num_groups_u32(kid);
         }
         if (k != tk.size()) return MatrixQueryStatus::ERR_PARSE;     // trailing junk
         return MatrixQueryStatus::OK;
@@ -652,6 +664,21 @@ private:
         uint32_t x = 0; auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), x);
         if (ec != std::errc{} || p != v.data() + v.size()) return false;
         (lo ? q.threshold : q.upper) = x; return true;
+    }
+
+    // num_groups for a parsed GROUP BY = (max key in the u32 key column) + 1 — the dense-group count.
+    // ponytail: this reads/borrows the key column's DATA at PARSE time (a max-scan), unlike pure-metadata
+    // parsing — an explicit `INTO n` or a planner stats-lookup would avoid it. A sparse/huge key makes
+    // num_groups large and execute_query then rejects it (ERR_TOO_MANY_GROUPS); empty -> 0 (ERR_INVALID_GROUP).
+    uint32_t derive_num_groups_u32(uint64_t kid) {
+        TieredColumn& col = *catalog_.at(kid);
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(col.host_ptr());
+        const size_t n = col.size_bytes() / sizeof(uint32_t);
+        const uint64_t mx = matrix_cpu_reduce_all(keys, n, AGG_MAX);   // max key (0 if n==0)
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+        return (n == 0) ? 0u : static_cast<uint32_t>(mx + 1);
     }
 
     MatrixQueryStatus execute_query_impl(const MatrixQuery& q, std::vector<uint64_t>& out) {
