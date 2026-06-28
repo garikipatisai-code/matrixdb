@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <map>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -740,6 +741,33 @@ public:
                           [](const auto& a, const auto& b) { return a.second > b.second; });   // value desc
         pairs.resize(kk);
         return pairs;
+    }
+
+    // AVG(value_col) = SUM/COUNT as double(s), derived from the two existing aggregates — so it inherits
+    // their per-type handling (U32/I64/F64) and (scalar) NULL-skipping for free, with no new reducer op
+    // threaded through every typed/grouped/filtered/nullable path. A scalar query yields one element; a
+    // grouped query yields one per group. A zero-count set/group yields NaN (the average of nothing).
+    // ponytail: grouped AVG reuses the grouped SUM/COUNT, which don't yet skip NULLs (the documented
+    // grouped null-awareness follow-up) — scalar AVG is null-aware today; grouped AVG counts null rows.
+    std::vector<double> average(const MatrixQuery& q) {
+        MatrixQuery sq = q; sq.agg = AGG_SUM;   std::vector<uint64_t> sv;
+        MatrixQuery cq = q; cq.agg = AGG_COUNT; std::vector<uint64_t> cv;
+        if (execute_query(sq, sv) != MatrixQueryStatus::OK || execute_query(cq, cv) != MatrixQueryStatus::OK
+            || sv.size() != cv.size())
+            return {};
+        const MatrixType ty = column_type(q.value_col);
+        std::vector<double> out(sv.size());
+        for (size_t i = 0; i < sv.size(); ++i) {
+            const double sum = (ty == MatrixType::F64) ? std::bit_cast<double>(sv[i])
+                             : (ty == MatrixType::I64) ? static_cast<double>(static_cast<int64_t>(sv[i]))
+                                                       : static_cast<double>(sv[i]);            // U32
+            // COUNT is encoded like the column: F64 columns return it as double-bits (execute_query bit_casts
+            // the whole F64 result), U32/I64 return a plain integer count.
+            const double count = (ty == MatrixType::F64) ? std::bit_cast<double>(cv[i])
+                                                         : static_cast<double>(cv[i]);
+            out[i] = (count != 0.0) ? sum / count : std::numeric_limits<double>::quiet_NaN();
+        }
+        return out;
     }
 
     // Parse + run a top-N grouped query string ("SELECT SUM(x) GROUP BY k ORDER BY SUM DESC LIMIT n").
