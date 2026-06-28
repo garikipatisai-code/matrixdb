@@ -6,6 +6,7 @@
 #include "column_io.hpp"           // matrix_write_column / matrix_read_column (binary column persistence)
 #include "csv_ingest.hpp"          // matrix_read_csv_column (CSV column ingest, graceful on bad input)
 #include <unordered_map>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -85,6 +86,7 @@ public:
             load_checkpoint(checkpoint_path_);                                    // restore the last compaction (no-op if none)
             cold_store_ = std::make_unique<ColdStore>(wal_path);
             cold_store_->replay([this](uint64_t k, uint64_t v){ kv_.put(k, v); }); // post-checkpoint records on top
+            kv_.for_each([this](uint64_t k, uint64_t v){ key_index_[k] = v; });     // rebuild the ordered index from recovered state
         }
         std::cout << "CPUMockEngine initialized (page-ownership, "
                   << MATRIX_PAGE_COUNT << " pages, "
@@ -192,6 +194,16 @@ public:
     std::vector<std::pair<uint64_t, uint64_t>> kv_range(uint64_t lo, uint64_t hi) const {
         std::vector<std::pair<uint64_t, uint64_t>> out;
         kv_.for_each([&](uint64_t k, uint64_t v) { if (k >= lo && k <= hi) out.emplace_back(k, v); });
+        return out;
+    }
+
+    // Sorted secondary index range scan (DM-7): every (key, value) with lo <= key <= hi, in ASCENDING
+    // key order, via the ordered index — O(log n) to locate `lo` + O(result) to walk the range (not the
+    // O(n) full scan of kv_range). The result is sorted by key (kv_range's is unordered).
+    std::vector<std::pair<uint64_t, uint64_t>> kv_range_sorted(uint64_t lo, uint64_t hi) const {
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        for (auto it = key_index_.lower_bound(lo); it != key_index_.end() && it->first <= hi; ++it)
+            out.emplace_back(it->first, it->second);
         return out;
     }
 
@@ -911,6 +923,11 @@ private:
     // table is an explicit error, not silent loss. Sized with headroom over the demo's
     // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
     KVStore kv_{1u << 16}; // 65536 slots
+    // Ordered secondary index (DM-7): key -> value, mirrors kv_ (maintained on commit, rebuilt on recovery).
+    // Enables log-time range scans (kv_range_sorted) vs kv_range's O(n) full scan.
+    // ponytail: a std::map mirror — doubles point-op key memory + a map insert per commit; a packed
+    // B-tree/ART would be denser, and the index is rebuilt from kv_ on restart (not separately persisted).
+    std::map<uint64_t, uint64_t> key_index_;
     std::unique_ptr<ColdStore> cold_store_; // null = durability off (default); set via WAL path
     std::string checkpoint_path_;     // <wal_path>.ckpt — last point-op compaction snapshot
     uint64_t checkpoints_ = 0;        // DU-4: number of WAL compactions performed
@@ -949,7 +966,7 @@ private:
     // replaces this with SSD spill; the assert makes it fail loud in debug builds too.
     void apply_committed_write(uint64_t key, uint64_t value) {
         ++writes_;
-        if (kv_.put(key, value)) ++commits_;
+        if (kv_.put(key, value)) { ++commits_; key_index_[key] = value; }   // mirror into the ordered secondary index
         else { ++store_overflows_; assert(false && "KVStore full — point-op store capacity exceeded (Inc 3 adds spill)"); }
     }
 
