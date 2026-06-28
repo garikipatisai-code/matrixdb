@@ -7,6 +7,7 @@
 #include "csv_ingest.hpp"          // matrix_read_csv_column (CSV column ingest, graceful on bad input)
 #include <unordered_map>
 #include <map>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -722,6 +723,23 @@ public:
         // OB-2b: bucket by floor(log2(ns+1)) (log-scale latency histogram) for percentile estimation.
         { uint64_t x = ns + 1, b = 0; while (x > 1 && b < LAT_BUCKETS - 1) { x >>= 1; ++b; } ++latency_hist_[b]; }
         return st;
+    }
+
+    // Top-N groups by aggregate value (ORDER BY agg DESC LIMIT k): run a grouped query, then return the k
+    // (group_id, value) pairs with the largest aggregate. The staple "top 10 X by Y" analytical query.
+    // ponytail: sorts by the RAW uint64 aggregate — exact for U32-valued groups and COUNT (non-negative);
+    // for int64/double SUM/MIN/MAX the result bits aren't value-order, so use this for U32/COUNT grouping.
+    std::vector<std::pair<uint64_t, uint64_t>> top_groups(const MatrixQuery& q, size_t k) {
+        std::vector<uint64_t> out;
+        if (!q.grouped || execute_query(q, out) != MatrixQueryStatus::OK) return {};
+        std::vector<std::pair<uint64_t, uint64_t>> pairs;
+        pairs.reserve(out.size());
+        for (uint64_t g = 0; g < out.size(); ++g) pairs.emplace_back(g, out[g]);
+        const size_t kk = std::min(k, pairs.size());
+        std::partial_sort(pairs.begin(), pairs.begin() + static_cast<std::ptrdiff_t>(kk), pairs.end(),
+                          [](const auto& a, const auto& b) { return a.second > b.second; });   // value desc
+        pairs.resize(kk);
+        return pairs;
     }
 
     // Parse a scalar query string into `out` (see DM-4 grammar). Returns OK, ERR_UNKNOWN_COLUMN (bad name),

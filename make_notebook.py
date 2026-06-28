@@ -48,6 +48,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_tables.cpp",
            "test_string_columns.cpp",
            "test_nullable.cpp",
+           "test_top_groups.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -303,6 +304,11 @@ cells += [
        "COUNT counts non-null, SUM/MIN/MAX ignore nulls. A maskless column is unchanged."),
     code("!clang++ -std=c++20 -O2 test_nullable.cpp -o /tmp/tn 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_nullable.cpp -o /tmp/tn; /tmp/tn"),
+    md("### Top-N groups (ORDER BY agg DESC LIMIT k)\n"
+       "top_groups runs a grouped query, then returns the k (group, value) pairs with the largest "
+       "aggregate, descending — the \"top 10 regions by revenue\" staple. U32/COUNT grouping."),
+    code("!clang++ -std=c++20 -O2 test_top_groups.cpp -o /tmp/ttg 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_top_groups.cpp -o /tmp/ttg; /tmp/ttg"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
