@@ -1,0 +1,61 @@
+#pragma once
+// TCP transport adapter for the serve LOGIC (NW-1). Length-prefixed wire framing:
+//   request  on the wire: [u32 len][len request bytes]   (the matrix_serialize_request blob)
+//   response on the wire: [u32 len][len response bytes]   (the matrix_serialize_response blob)
+// matrix_serve_conn() (serve one framed request on a connected fd) is the wire protocol — runtime-tested
+// over a socketpair (no bind needed). matrix_serve_tcp() is the bind/listen/accept loop — HOST-ONLY:
+// loopback bind() is blocked in the build sandbox (proven), so its accept loop is compile-verified here
+// and runtime-verified only on a non-sandboxed host. One connection served at a time (single-owner per
+// the page-ownership model; concurrent serving is NW-2, which is contra the lock-free thesis).
+#include "server.hpp"          // matrix_serve, AccessPolicy, CPUMockEngine
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <cstdint>
+#include <vector>
+
+namespace matrixsrv_detail {
+// Read/write EXACTLY n bytes over a stream socket, looping over partial transfers; false on EOF/error.
+inline bool recv_all(int fd, void* buf, size_t n) {
+    auto* p = static_cast<unsigned char*>(buf); size_t got = 0;
+    while (got < n) { const ssize_t r = ::recv(fd, p + got, n - got, 0); if (r <= 0) return false; got += static_cast<size_t>(r); }
+    return true;
+}
+inline bool send_all(int fd, const void* buf, size_t n) {
+    const auto* p = static_cast<const unsigned char*>(buf); size_t sent = 0;
+    while (sent < n) { const ssize_t w = ::send(fd, p + sent, n - sent, 0); if (w <= 0) return false; sent += static_cast<size_t>(w); }
+    return true;
+}
+} // namespace matrixsrv_detail
+
+// Serve ONE framed request on a connected socket `fd`: read [u32 len][req], dispatch via matrix_serve
+// (authorizing), write [u32 len][resp]. Returns false if the peer closed or the framing was short.
+inline bool matrix_serve_conn(CPUMockEngine& eng, const AccessPolicy& policy, uint64_t principal, int fd) {
+    uint32_t len = 0;
+    if (!matrixsrv_detail::recv_all(fd, &len, sizeof len)) return false;
+    if (len > (1u << 28)) return false;                       // sane cap — never alloc on a bogus length
+    std::vector<uint8_t> req(len);
+    if (len != 0 && !matrixsrv_detail::recv_all(fd, req.data(), len)) return false;
+    const std::vector<uint8_t> resp = matrix_serve(eng, policy, principal, req);
+    const uint32_t rlen = static_cast<uint32_t>(resp.size());
+    return matrixsrv_detail::send_all(fd, &rlen, sizeof rlen)
+        && (rlen == 0 || matrixsrv_detail::send_all(fd, resp.data(), rlen));
+}
+
+// TCP accept-loop on `port`: serve each connection's requests (one at a time) until the peer closes.
+// HOST-ONLY (see file header — bind is blocked in the build sandbox). Returns -1 on a setup error.
+// principal=0 here; a real deployment derives the principal from the authenticated connection (SE-1/3).
+inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint16_t port) {
+    const int srv = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) return -1;
+    int yes = 1; ::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
+    if (::bind(srv, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) { ::close(srv); return -1; }
+    if (::listen(srv, 16) != 0) { ::close(srv); return -1; }
+    for (;;) {
+        const int c = ::accept(srv, nullptr, nullptr);
+        if (c < 0) continue;
+        while (matrix_serve_conn(eng, policy, /*principal=*/0, c)) { /* serve until the peer closes */ }
+        ::close(c);
+    }
+}
