@@ -41,6 +41,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_query_parser.cpp",
            "test_join.cpp",
            "test_integration.cpp",
+           "test_typed_column_io.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -263,6 +264,11 @@ cells += [
        "introspection -> parse_query -> execute -> append -> equi-join -> backup/restore -> re-query."),
     code("!clang++ -std=c++20 -O2 test_integration.cpp -o /tmp/tint 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_integration.cpp -o /tmp/tint; /tmp/tint"),
+    md("### Typed single-column files\n"
+       "save_column / load_column_from_file round-trip int64 and double columns (not just uint32) via a "
+       "typed single-file format — the int64-abort guard is gone; the element type is carried in the file."),
+    code("!clang++ -std=c++20 -O2 test_typed_column_io.cpp -o /tmp/ttci 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_column_io.cpp -o /tmp/ttci; /tmp/ttci"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
