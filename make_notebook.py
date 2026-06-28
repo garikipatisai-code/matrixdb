@@ -39,6 +39,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_append.cpp",
            "test_kv_range.cpp",
            "test_query_parser.cpp",
+           "test_join.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -251,6 +252,11 @@ cells += [
        "graceful ERR_PARSE, never a crash."),
     code("!clang++ -std=c++20 -O2 test_query_parser.cpp -o /tmp/tqparse 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_query_parser.cpp -o /tmp/tqparse; /tmp/tqparse"),
+    md("### Equi-join primitive\n"
+       "hash_join(left, right) inner-joins two uint32 key columns into matching (left_row, right_row) "
+       "pairs (build-hash + probe) — multi-table correlation; verified against a brute-force oracle."),
+    code("!clang++ -std=c++20 -O2 test_join.cpp -o /tmp/tj 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_join.cpp -o /tmp/tj; /tmp/tj"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
