@@ -6,6 +6,7 @@
 #include "column_io.hpp"           // matrix_write_column / matrix_read_column (binary column persistence)
 #include "csv_ingest.hpp"          // matrix_read_csv_column (CSV column ingest, graceful on bad input)
 #include <unordered_map>
+#include <unordered_set>
 #include <map>
 #include <algorithm>
 #include <limits>
@@ -510,6 +511,14 @@ public:
         return (it != null_masks_.end() && it->second.size() == n) ? it->second.data() : nullptr;
     }
 
+    // Distinct non-NULL value count over a typed array (helper for count_distinct). Exact hash set.
+    template <typename T>
+    static uint64_t distinct_count(const T* v, size_t n, const uint8_t* nulls) {
+        std::unordered_set<T> seen;
+        for (size_t i = 0; i < n; ++i) if (!nulls || !nulls[i]) seen.insert(v[i]);
+        return seen.size();
+    }
+
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
     // g in [0, num_groups). key_id and value_id are distinct catalog columns of equal length
     // (uint32). Borrows both to HOST for the reduction, then returns each to its home tier (so
@@ -777,6 +786,32 @@ public:
             out[i] = (count != 0.0) ? sum / count : std::numeric_limits<double>::quiet_NaN();
         }
         return out;
+    }
+
+    // COUNT(DISTINCT col): number of distinct non-NULL values in a column. Borrow-and-return like the
+    // scalar aggregates; null-aware (skips masked rows, via value_nulls). Typed over U32/I64/F64.
+    // ponytail: an exact hash set over every value — O(distinct) memory. A HyperLogLog sketch is the
+    // upgrade path when the column is huge and an estimate is acceptable. F64 NaN edge: each NaN counts as
+    // distinct (NaN != NaN), since the set is over double values — documented, not special-cased.
+    uint64_t count_distinct(uint64_t col_id) {
+        TieredColumn& col = *catalog_.at(col_id);
+        tier_mgr_.record_access(col_id, col.size_bytes());
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        const MatrixType ty = column_type(col_id);
+        const size_t elem = (ty == MatrixType::U32) ? sizeof(uint32_t) : sizeof(uint64_t);
+        const size_t n = col.size_bytes() / elem;
+        const uint8_t* nulls = value_nulls(col_id, n);
+        uint64_t result;
+        if (ty == MatrixType::I64)
+            result = distinct_count(reinterpret_cast<const int64_t*>(col.host_ptr()), n, nulls);
+        else if (ty == MatrixType::F64)
+            result = distinct_count(reinterpret_cast<const double*>(col.host_ptr()), n, nulls);
+        else
+            result = distinct_count(reinterpret_cast<const uint32_t*>(col.host_ptr()), n, nulls);
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+        maybe_rebalance();
+        return result;
     }
 
     // Parse + run an AVG query string ("SELECT AVG(col) [WHERE ...] [GROUP BY k]") -> the average(s) as
