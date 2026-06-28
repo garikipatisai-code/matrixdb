@@ -58,6 +58,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_rebalance_config.cpp",
            "test_shutdown.cpp",
            "test_durability_levels.cpp",
+           "test_fault_injection.cpp",
            "test_health.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
@@ -361,6 +362,12 @@ cells += [
        "durability_level() reports it. Both recover committed writes on a clean restart."),
     code("!clang++ -std=c++20 -O2 test_durability_levels.cpp -o /tmp/tdl 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_durability_levels.cpp -o /tmp/tdl; /tmp/tdl"),
+    md("### Fault injection — corrupt-WAL recovery (QA-5)\n"
+       "A fresh engine built on a CORRUPT WAL must recover the intact prefix, discard the corrupt tail, and "
+       "stay usable — never crash, never apply garbage. A torn tail -> all committed writes recover; an "
+       "early flipped byte -> replay stops there (CRC), recovering nothing, engine still usable."),
+    code("!clang++ -std=c++20 -O2 test_fault_injection.cpp -o /tmp/tfi 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_fault_injection.cpp -o /tmp/tfi; /tmp/tfi"),
     md("### Health / readiness probe (OB-3)\n"
        "health() returns a ready verdict + the gauges behind it (catalog size, durable flag, pending-WAL "
        "records, resident bytes, dropped writes). ready is false when point-op writes have been dropped "
