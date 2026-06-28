@@ -64,13 +64,13 @@ int main() {
         CPUMockEngine fresh;
         fresh.restore(bk);
         assert(fresh.column_type(7) == MatrixType::I64 && fresh.column_rows(7) == 5 && "revenue restored incl. appended row");
-        MatrixQuery qa{}; qa.value_col = 7; qa.agg = AGG_SUM;   // query BY ID — names are RAM-only (see finding)
+        // Names now survive backup/restore (DM-2b: the catalog snapshot carries them) — query BY NAME.
+        assert(fresh.column_id("revenue") == 7 && fresh.column_id("region") == 2 && "names restored");
+        MatrixQuery qa{}; qa.value_col = fresh.column_id("revenue"); qa.agg = AGG_SUM;   // resolve name in the RESTORED engine
         std::vector<uint64_t> oa;
         assert(fresh.execute_query(qa, oa) == MatrixQueryStatus::OK);
         assert(static_cast<int64_t>(oa[0]) == 500000000LL + 2000000000LL + 1500000000LL + 3000000000LL + 4000000000LL
-               && "full revenue (incl. appended) survived backup/restore");
-        // FINDING: names are not persisted by the catalog snapshot — column_id is 0 in the restored engine.
-        assert(fresh.column_id("revenue") == 0 && "names are RAM-only (persisting them is a deferred enhancement)");
+               && "full revenue (incl. appended) survived backup/restore, queried by restored name");
     }
 
     std::remove(csv.c_str()); std::remove((bk + ".catalog").c_str()); std::remove((bk + ".kv").c_str());
