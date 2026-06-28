@@ -519,6 +519,21 @@ public:
         return seen.size();
     }
 
+    // uint64 comparison for HAVING (a grouped aggregate can exceed u32, so this is the wide sibling of
+    // matrix_pred_match). BETWEEN is inclusive [a, b].
+    static bool cmp_u64(MatrixCmp c, uint64_t v, uint64_t a, uint64_t b) {
+        switch (c) {
+            case MatrixCmp::GE:      return v >= a;
+            case MatrixCmp::LT:      return v <  a;
+            case MatrixCmp::LE:      return v <= a;
+            case MatrixCmp::EQ:      return v == a;
+            case MatrixCmp::NE:      return v != a;
+            case MatrixCmp::BETWEEN: return v >= a && v <= b;
+            case MatrixCmp::GT:
+            default:                 return v >  a;
+        }
+    }
+
     // GROUP BY: out[g] = aggregate (by op) of value-column rows whose key-column value == g, for
     // g in [0, num_groups). key_id and value_id are distinct catalog columns of equal length
     // (uint32). Borrows both to HOST for the reduction, then returns each to its home tier (so
@@ -759,6 +774,21 @@ public:
         std::partial_sort(pairs.begin(), pairs.begin() + static_cast<std::ptrdiff_t>(kk), pairs.end(),
                           [](const auto& a, const auto& b) { return a.second > b.second; });   // value desc
         pairs.resize(kk);
+        return pairs;
+    }
+
+    // HAVING: the groups whose aggregate satisfies `cmp` against threshold (BETWEEN uses [threshold, upper]) —
+    // e.g. "regions where SUM(amount) > 1000". Runs the grouped query, then filters the (group, value) pairs.
+    // ponytail: compares the RAW uint64 aggregate (a uint64 comparator, since a grouped SUM can exceed u32),
+    // so it's exact for U32-valued groups and COUNT; I64/F64 bit-patterns aren't value-order (use for U32/COUNT),
+    // matching top_groups.
+    std::vector<std::pair<uint64_t, uint64_t>> having(const MatrixQuery& q, MatrixCmp cmp,
+                                                      uint64_t threshold, uint64_t upper = 0) {
+        std::vector<uint64_t> out;
+        if (!q.grouped || execute_query(q, out) != MatrixQueryStatus::OK) return {};
+        std::vector<std::pair<uint64_t, uint64_t>> pairs;
+        for (uint64_t g = 0; g < out.size(); ++g)
+            if (cmp_u64(cmp, out[g], threshold, upper)) pairs.emplace_back(g, out[g]);
         return pairs;
     }
 

@@ -49,6 +49,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_string_columns.cpp",
            "test_nullable.cpp",
            "test_top_groups.cpp",
+           "test_having.cpp",
            "test_average.cpp",
            "test_count_distinct.cpp",
            "test_fuzz.cpp",
@@ -311,6 +312,11 @@ cells += [
        "aggregate, descending — the \"top 10 regions by revenue\" staple. U32/COUNT grouping."),
     code("!clang++ -std=c++20 -O2 test_top_groups.cpp -o /tmp/ttg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_top_groups.cpp -o /tmp/ttg; /tmp/ttg"),
+    md("### HAVING (filter groups by aggregate)\n"
+       "having() runs a grouped query and returns the (group, value) pairs whose aggregate satisfies a "
+       "comparison (GT/GE/LT/LE/EQ/NE/BETWEEN) — the SQL HAVING clause. Group-id order preserved. U32/COUNT."),
+    code("!clang++ -std=c++20 -O2 test_having.cpp -o /tmp/th 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_having.cpp -o /tmp/th; /tmp/th"),
     md("### AVG aggregate\n"
        "average() derives AVG = SUM/COUNT as double(s) from the two existing aggregates, so it inherits "
        "per-type handling (U32/I64/F64) and scalar NULL-skipping for free. Scalar -> one value; grouped -> "
