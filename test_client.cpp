@@ -4,6 +4,7 @@
 #include "client.hpp"
 #include <sys/socket.h>
 #include <unistd.h>
+#include <csignal>
 #include <cassert>
 #include <cstdint>
 #include <thread>
@@ -54,4 +55,43 @@ static void test_client_roundtrip() {
     std::cout << "[client round-trip] ok\n";
 }
 
-int main() { test_client_roundtrip(); std::cout << "ALL CLIENT TESTS PASSED\n"; return 0; }
+// SE-1 over the transport: the connection authenticates once (token frame), then serves as that principal.
+static void test_client_authenticated() {
+    std::vector<uint32_t> v(20, 1);
+    CPUMockEngine eng; eng.load_scan_column(2, v.data(), v.size());
+    Authenticator auth; auth.add_credential("alice-token", 1);
+    AccessPolicy pol; pol.allow_column(1, 2);                  // principal 1 may query col 2
+
+    // valid token: handshake succeeds, then the authenticated principal can query
+    {
+        int fd[2]; assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+        // server owns fd[1] and closes it when done (as matrix_serve_tcp's accept loop closes each conn)
+        std::thread srv([&] { matrix_serve_conn_auth(eng, pol, auth, fd[1]); ::close(fd[1]); });
+        MatrixClient cli(fd[0]);
+        assert(cli.authenticate("alice-token") && "send the token frame");
+        MatrixQuery q{}; q.value_col = 2; q.agg = AGG_COUNT;
+        MatrixQueryStatus st; std::vector<uint64_t> out;
+        assert(cli.query(q, st, out) && st == MatrixQueryStatus::OK && out[0] == 20 && "authenticated query OK");
+        ::close(fd[0]); srv.join();
+    }
+    // bad token: server rejects the handshake and closes -> the client's query gets EOF (no response)
+    {
+        int fd[2]; assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+        std::thread srv([&] { matrix_serve_conn_auth(eng, pol, auth, fd[1]); ::close(fd[1]); });
+        MatrixClient cli(fd[0]);
+        assert(cli.authenticate("bad-token") && "token frame sent (server will reject it)");
+        MatrixQuery q{}; q.value_col = 2; q.agg = AGG_COUNT;
+        MatrixQueryStatus st; std::vector<uint64_t> out;
+        assert(!cli.query(q, st, out) && "unauthenticated connection -> no response (server closed)");
+        ::close(fd[0]); srv.join();
+    }
+    std::cout << "[client authenticated] ok\n";
+}
+
+int main() {
+    std::signal(SIGPIPE, SIG_IGN);   // a write to a closed peer must yield EPIPE (false), not kill the process
+    test_client_roundtrip();
+    test_client_authenticated();
+    std::cout << "ALL CLIENT TESTS PASSED\n";
+    return 0;
+}

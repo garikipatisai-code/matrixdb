@@ -22,8 +22,16 @@ inline bool recv_all(int fd, void* buf, size_t n) {
     return true;
 }
 inline bool send_all(int fd, const void* buf, size_t n) {
+    // MSG_NOSIGNAL (Linux): writing to a peer that closed returns EPIPE instead of raising SIGPIPE (which
+    // would kill the process). macOS/BSD lacks the flag — there the caller ignores SIGPIPE / sets
+    // SO_NOSIGPIPE (matrix_serve_tcp/clients should `signal(SIGPIPE, SIG_IGN)`); EPIPE then surfaces as w<0.
+#ifdef MSG_NOSIGNAL
+    const int flags = MSG_NOSIGNAL;
+#else
+    const int flags = 0;
+#endif
     const auto* p = static_cast<const unsigned char*>(buf); size_t sent = 0;
-    while (sent < n) { const ssize_t w = ::send(fd, p + sent, n - sent, 0); if (w <= 0) return false; sent += static_cast<size_t>(w); }
+    while (sent < n) { const ssize_t w = ::send(fd, p + sent, n - sent, flags); if (w <= 0) return false; sent += static_cast<size_t>(w); }
     return true;
 }
 } // namespace matrixsrv_detail
@@ -40,6 +48,24 @@ inline bool matrix_serve_conn(CPUMockEngine& eng, const AccessPolicy& policy, ui
     const uint32_t rlen = static_cast<uint32_t>(resp.size());
     return matrixsrv_detail::send_all(fd, &rlen, sizeof rlen)
         && (rlen == 0 || matrixsrv_detail::send_all(fd, resp.data(), rlen));
+}
+
+// SE-1 over the transport: a connection authenticates ONCE with a leading token frame, then serves that
+// principal's requests for the life of the connection. Reads [u32 len][token]; authenticates → principal
+// (on failure: serve nothing, return false so the caller closes the connection); then runs the normal
+// matrix_serve_conn loop as that principal (AccessPolicy still gates each request). This is the realistic
+// model — authenticate per connection, not per request — and the inverse of MatrixClient::authenticate.
+inline bool matrix_serve_conn_auth(CPUMockEngine& eng, const AccessPolicy& policy,
+                                   const Authenticator& auth, int fd) {
+    uint32_t tlen = 0;
+    if (!matrixsrv_detail::recv_all(fd, &tlen, sizeof tlen)) return false;
+    if (tlen > 4096) return false;                            // sane token cap — never alloc on a bogus length
+    std::string token(tlen, '\0');
+    if (tlen != 0 && !matrixsrv_detail::recv_all(fd, token.data(), tlen)) return false;
+    uint64_t principal = 0;
+    if (!auth.authenticate(token, principal)) return false;   // unauthenticated: serve nothing, close
+    while (matrix_serve_conn(eng, policy, principal, fd)) { /* serve until the peer closes */ }
+    return true;
 }
 
 // TCP accept-loop on `port`: serve each connection's requests (one at a time) until the peer closes.

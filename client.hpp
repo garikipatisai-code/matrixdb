@@ -13,6 +13,16 @@ class MatrixClient {
 public:
     explicit MatrixClient(int fd) : fd_(fd) {}
 
+    // SE-1 handshake: send the leading token frame ([u32 len][token]) that authenticates this connection.
+    // Call ONCE before any op when the server uses matrix_serve_conn_auth. Returns false on a transport
+    // error. (The server validates the token; an invalid one makes it close the connection, so subsequent
+    // ops here return false.)
+    bool authenticate(const std::string& token) {
+        const uint32_t len = static_cast<uint32_t>(token.size());
+        if (!matrixsrv_detail::send_all(fd_, &len, sizeof len)) return false;
+        return len == 0 || matrixsrv_detail::send_all(fd_, token.data(), len);
+    }
+
     // GET key -> value. Returns false on a transport error OR a miss (no such key); true + out on a hit.
     bool get(uint64_t key, uint64_t& out) {
         MatrixRequest r; r.kind = ReqKind::GET; r.key = key;
