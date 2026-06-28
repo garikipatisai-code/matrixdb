@@ -187,12 +187,14 @@ in the current env (CPU, no network) vs needs real infra.
 
 | ID | Gap | Why | Sev | Effort | Local? |
 |----|-----|-----|-----|--------|--------|
-| QA-1 | No CI/CD pipeline | Every change verified by hand; CUDA only via manual Colab | P1 | M | partial |
-| QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through | P1 | L | yes |
+| QA-1 | No CI/CD pipeline | Every change verified by hand; CUDA only via manual Colab **[local CI gate landed — `run_tests.sh`]** | P1 | M | partial |
+| QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through **[grown to 34 CPU tests this session; `run_tests.sh` runs them all + the oracle]** | P1 | L | yes |
 | QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected | P1 | S | yes |
 | QA-4 | No fuzzing / property-based testing | Edge cases unexplored | P2 | M | yes |
 | QA-5 | No stress / chaos / failure-injection testing | Behavior under load & failure unknown | P2 | L | partial |
 | QA-6 | CUDA path has no automated test — host-syntax probe + manual runs only | GPU regressions only caught by hand | P1 | M | needs GPU CI |
+
+*QA-1 partial (local CI gate landed): `run_tests.sh` — one command that auto-discovers every `test_*.cpp` (skips the nvcc-only `test_migration_gpu.cpp`), compiles each under `-std=c++20 -O2 -Wall -Wextra`, runs it, then builds `main.cpp` and asserts the pipeline oracle (`83886070`); exits 0 only if ALL pass, non-zero (= failure count) otherwise. Portable (plain `-O3`, no `-mcpu`; `CXX` override; clang++→g++ fallback). Codifies the per-increment gate I'd been running by hand into a repeatable build verification. Verified ALL GREEN (34 tests + oracle, exit 0) and non-vacuous (a deliberately-failing throwaway test → `FAIL` + exit 1). This is the LOCAL CI gate; full CI/CD with the CUDA path on GPU runners remains QA-6 (needs GPU CI). The CPU suite is now 34 tests (QA-2 substantially improved from "a few oracle checks").*
 
 ## 9. Build, packaging & deployment
 
