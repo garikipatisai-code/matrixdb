@@ -232,22 +232,24 @@ public:
                             query_count_, total_query_ns_, max_query_ns_ };
     }
 
-    // Persist a catalog column's bytes to `path` (borrows to HOST to read, returns the borrow).
+    // Persist a catalog column (any type) to `path` via the typed file format (borrows to HOST, returns it).
     void save_column(uint64_t id, const std::string& path) {
-        // Fail loud (not assert — must hold in release): the u32 file format would mis-encode int64 bytes.
-        if (column_type(id) != MatrixType::U32) { std::fprintf(stderr, "save_column: typed-column persistence is DM-3c (id %llu)\n", static_cast<unsigned long long>(id)); std::abort(); }
         TieredColumn& col = *catalog_.at(id);
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
-        matrix_write_column(path, reinterpret_cast<const uint32_t*>(col.host_ptr()),
-                            col.size_bytes() / sizeof(uint32_t));
+        matrix_write_column_typed(path, col.host_ptr(), col.size_bytes(), static_cast<uint32_t>(column_type(id)));
         if (home != MemorySpace::HOST) col.migrate_to(home);
     }
-    // Load a column file into the catalog under `id` (born resident in HOST, like load_scan_column).
+    // Load a typed column file into the catalog under `id` (born HOST-resident; dispatched by element type).
     void load_column_from_file(uint64_t id, const std::string& path) {
-        std::vector<uint32_t> data;
-        matrix_read_column(path, data);
-        load_scan_column(id, data.data(), data.size());
+        std::vector<unsigned char> bytes; uint32_t type = 0;
+        matrix_read_column_typed(path, bytes, type);
+        if (type == static_cast<uint32_t>(MatrixType::I64))
+            load_scan_column_i64(id, reinterpret_cast<const int64_t*>(bytes.data()), bytes.size() / sizeof(int64_t));
+        else if (type == static_cast<uint32_t>(MatrixType::F64))
+            load_scan_column_f64(id, reinterpret_cast<const double*>(bytes.data()), bytes.size() / sizeof(double));
+        else
+            load_scan_column(id, reinterpret_cast<const uint32_t*>(bytes.data()), bytes.size() / sizeof(uint32_t));
     }
 
     // Ingest one uint32 column from a CSV file into the catalog under `id` (born HOST-resident, like
