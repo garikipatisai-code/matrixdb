@@ -172,6 +172,18 @@ inline int64_t matrix_cpu_reduce_all_i64(const int64_t* v, size_t n, MatrixAggOp
     }
 }
 
+// Null-aware int64 reduce (DM-3j across types): skip rows where nulls[i] != 0. Sentinels match
+// matrix_cpu_reduce_all_i64 (SUM/COUNT 0, MIN INT64_MAX, MAX INT64_MIN).
+inline int64_t matrix_cpu_reduce_all_i64_nullable(const int64_t* v, size_t n, MatrixAggOp op, const uint8_t* nulls) {
+    switch (op) {
+        case AGG_SUM: { int64_t s = 0; for (size_t i = 0; i < n; ++i) if (!nulls[i]) s += v[i]; return s; }
+        case AGG_MIN: { int64_t m = INT64_MAX; for (size_t i = 0; i < n; ++i) if (!nulls[i] && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { int64_t m = INT64_MIN; for (size_t i = 0; i < n; ++i) if (!nulls[i] && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { int64_t c = 0; for (size_t i = 0; i < n; ++i) c += (nulls[i] == 0); return c; }
+    }
+}
+
 enum class MatrixCmp : uint32_t { GT = 0, GE, LT, LE, EQ, NE, BETWEEN }; // GT == 0 == the default
 
 // A value predicate for WHERE. `a` = primary bound (threshold; inclusive lower for BETWEEN);
@@ -244,6 +256,18 @@ inline double matrix_cpu_reduce_all_f64(const double* v, size_t n, MatrixAggOp o
         case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if (v[i] > m) m = v[i]; return m; }
         case AGG_COUNT:
         default:      return static_cast<double>(n);
+    }
+}
+
+// Null-aware double reduce (DM-3j across types): skip rows where nulls[i] != 0. Sentinels match
+// matrix_cpu_reduce_all_f64 (SUM/COUNT 0, MIN +inf, MAX -inf). COUNT returns the non-null count.
+inline double matrix_cpu_reduce_all_f64_nullable(const double* v, size_t n, MatrixAggOp op, const uint8_t* nulls) {
+    switch (op) {
+        case AGG_SUM: { double s = 0.0; for (size_t i = 0; i < n; ++i) if (!nulls[i]) s += v[i]; return s; }
+        case AGG_MIN: { double m = std::numeric_limits<double>::infinity();  for (size_t i = 0; i < n; ++i) if (!nulls[i] && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if (!nulls[i] && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { double c = 0.0; for (size_t i = 0; i < n; ++i) c += (nulls[i] == 0) ? 1.0 : 0.0; return c; }
     }
 }
 

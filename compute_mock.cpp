@@ -160,7 +160,7 @@ public:
     // semantics). is_null must have one byte per row. ponytail: U32 unfiltered scalar only for this slice —
     // int64/double/filtered/grouped null-awareness is the follow-up (the maskless path is byte-identical).
     void set_column_nulls(uint64_t id, const std::vector<uint8_t>& is_null) {
-        assert(catalog_has(id) && column_type(id) == MatrixType::U32 && "set_column_nulls: U32 catalog column only");
+        assert(catalog_has(id) && "set_column_nulls: unknown catalog column");   // any byte-catalog column (U32/I64/F64)
         assert(is_null.size() == column_rows(id) && "null mask must have one entry per row");
         null_masks_[id] = is_null;
     }
@@ -840,6 +840,7 @@ private:
                                       MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.has_filter, out);
                 return MatrixQueryStatus::OK;
             }
+            if (!q.has_filter && null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q.value_col, q.agg)); return MatrixQueryStatus::OK; }
             out.assign(1, static_cast<uint64_t>(
                 scan_tiered_column_i64(q.value_col, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
@@ -856,6 +857,7 @@ private:
                                       MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.has_filter, out);
                 return MatrixQueryStatus::OK;
             }
+            if (!q.has_filter && null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q.value_col, q.agg)); return MatrixQueryStatus::OK; }
             out.assign(1, std::bit_cast<uint64_t>(
                 scan_tiered_column_f64(q.value_col, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
@@ -1018,16 +1020,27 @@ private:
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
     // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
     // HOST columns to SSD under the budget.
-    // Null-aware unfiltered scalar aggregate over a U32 column (DM-3j): borrow-and-return like
-    // scan_tiered_column, but skip NULL rows via the column's null mask.
+    // Null-aware unfiltered scalar aggregate over a U32/I64/F64 column (DM-3j): borrow-and-return like
+    // scan_tiered_column, but skip NULL rows via the column's null mask. Returns the result as a uint64
+    // (U32 value zero-extended; I64/F64 as the bit pattern — same convention as execute_query).
     uint64_t scalar_aggregate_nullable(uint64_t col_id, MatrixAggOp op) {
         TieredColumn& col = *catalog_.at(col_id);
         tier_mgr_.record_access(col_id, col.size_bytes());
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
-        const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
-        const size_t nvals = col.size_bytes() / sizeof(uint32_t);
-        const uint64_t result = matrix_cpu_reduce_all_nullable(vals, nvals, op, null_masks_.at(col_id).data());
+        const uint8_t* nulls = null_masks_.at(col_id).data();
+        const MatrixType ty = column_type(col_id);
+        uint64_t result;
+        if (ty == MatrixType::I64) {
+            const auto* v = reinterpret_cast<const int64_t*>(col.host_ptr());
+            result = static_cast<uint64_t>(matrix_cpu_reduce_all_i64_nullable(v, col.size_bytes() / sizeof(int64_t), op, nulls));
+        } else if (ty == MatrixType::F64) {
+            const auto* v = reinterpret_cast<const double*>(col.host_ptr());
+            result = std::bit_cast<uint64_t>(matrix_cpu_reduce_all_f64_nullable(v, col.size_bytes() / sizeof(double), op, nulls));
+        } else {
+            const auto* v = reinterpret_cast<const uint32_t*>(col.host_ptr());
+            result = matrix_cpu_reduce_all_nullable(v, col.size_bytes() / sizeof(uint32_t), op, nulls);
+        }
         if (home != MemorySpace::HOST) col.migrate_to(home);
         maybe_rebalance();
         return result;
