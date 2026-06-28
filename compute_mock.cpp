@@ -304,6 +304,22 @@ public:
                             query_count_, total_query_ns_, max_query_ns_ };
     }
 
+    // OB-2b: the per-query latency histogram — log2 buckets, bucket b counts queries with latency in
+    // ~[2^(b-1), 2^b) ns. Sums to stats().query_count.
+    std::array<uint64_t, 40> query_latency_histogram() const { return latency_hist_; }
+    // Estimate the p-th percentile (0..1) query latency in ns from the histogram (bucket-granular —
+    // returns ~the bucket's upper bound). p50/p99 are the real ops latency metrics (vs mean/max).
+    uint64_t query_latency_percentile_ns(double p) const {
+        if (query_count_ == 0) return 0;
+        const uint64_t target = static_cast<uint64_t>(p * static_cast<double>(query_count_));
+        uint64_t cum = 0;
+        for (int b = 0; b < LAT_BUCKETS; ++b) {
+            cum += latency_hist_[static_cast<size_t>(b)];
+            if (cum >= target) return (b == 0) ? 0ull : (1ull << b);
+        }
+        return max_query_ns_;
+    }
+
     // Persist a catalog column (any type) to `path` via the typed file format (borrows to HOST, returns it).
     void save_column(uint64_t id, const std::string& path) {
         TieredColumn& col = *catalog_.at(id);
@@ -693,6 +709,8 @@ public:
         const uint64_t ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
         ++query_count_; total_query_ns_ += ns; if (ns > max_query_ns_) max_query_ns_ = ns;
+        // OB-2b: bucket by floor(log2(ns+1)) (log-scale latency histogram) for percentile estimation.
+        { uint64_t x = ns + 1, b = 0; while (x > 1 && b < LAT_BUCKETS - 1) { x >>= 1; ++b; } ++latency_hist_[b]; }
         return st;
     }
 
@@ -1091,6 +1109,8 @@ private:
     uint64_t query_count_ = 0;     // observability: execute_query calls served (OK and ERR)
     uint64_t total_query_ns_ = 0;  // observability: summed execute_query wall-time (ns)
     uint64_t max_query_ns_ = 0;    // observability: slowest single execute_query (ns)
+    static constexpr int LAT_BUCKETS = 40;                  // log2 latency buckets (OB-2b); 2^39 ns ≈ 9 min
+    std::array<uint64_t, LAT_BUCKETS> latency_hist_{};      // per-query latency histogram (bucket = floor(log2(ns+1)))
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column
