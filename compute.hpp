@@ -206,13 +206,14 @@ inline bool matrix_pred_match(uint32_t v, const MatrixPredicate& p) {
 // Predicate-aware filtered scalar reduce — the general sibling of matrix_cpu_reduce. Same empty-set
 // sentinels (COUNT/SUM 0, MIN UINT64_MAX, MAX 0; see the MAX caveat in the design). matrix_cpu_reduce
 // (the GT fast path) is intentionally left untouched so the id-0 oracle scan is byte-identical.
-inline uint64_t matrix_cpu_reduce_pred(const uint32_t* v, size_t n, const MatrixPredicate& p, MatrixAggOp op) {
+inline uint64_t matrix_cpu_reduce_pred(const uint32_t* v, size_t n, const MatrixPredicate& p, MatrixAggOp op,
+                                       const uint8_t* nulls = nullptr) {
     switch (op) {
-        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(v[i], p)) s += v[i]; return s; }
-        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(v[i], p) && v[i] < m) m = v[i]; return m; }
-        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(v[i], p) && v[i] > m) m = v[i]; return m; }
+        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match(v[i], p)) s += v[i]; return s; }
+        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match(v[i], p) && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match(v[i], p) && v[i] > m) m = v[i]; return m; }
         case AGG_COUNT:
-        default:      { uint64_t c = 0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match(v[i], p); return c; }
+        default:      { uint64_t c = 0; for (size_t i = 0; i < n; ++i) c += ((!nulls || !nulls[i]) && matrix_pred_match(v[i], p)); return c; }
     }
 }
 
@@ -236,13 +237,14 @@ inline bool matrix_pred_match_i64(int64_t v, const MatrixPredicateI64& p) {
 // Filtered signed scalar reduce — the int64 sibling of matrix_cpu_reduce_pred. Same empty sentinels as
 // matrix_cpu_reduce_all_i64 (SUM/COUNT 0, MIN INT64_MAX, MAX INT64_MIN; the MAX sentinel is ambiguous
 // only for a column literally containing INT64_MIN — read COUNT).
-inline int64_t matrix_cpu_reduce_pred_i64(const int64_t* v, size_t n, const MatrixPredicateI64& p, MatrixAggOp op) {
+inline int64_t matrix_cpu_reduce_pred_i64(const int64_t* v, size_t n, const MatrixPredicateI64& p, MatrixAggOp op,
+                                          const uint8_t* nulls = nullptr) {
     switch (op) {
-        case AGG_SUM: { int64_t s = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_i64(v[i], p)) s += v[i]; return s; }
-        case AGG_MIN: { int64_t m = INT64_MAX; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_i64(v[i], p) && v[i] < m) m = v[i]; return m; }
-        case AGG_MAX: { int64_t m = INT64_MIN; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_i64(v[i], p) && v[i] > m) m = v[i]; return m; }
+        case AGG_SUM: { int64_t s = 0; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match_i64(v[i], p)) s += v[i]; return s; }
+        case AGG_MIN: { int64_t m = INT64_MAX; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match_i64(v[i], p) && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { int64_t m = INT64_MIN; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match_i64(v[i], p) && v[i] > m) m = v[i]; return m; }
         case AGG_COUNT:
-        default:      { int64_t c = 0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match_i64(v[i], p); return c; }
+        default:      { int64_t c = 0; for (size_t i = 0; i < n; ++i) c += ((!nulls || !nulls[i]) && matrix_pred_match_i64(v[i], p)); return c; }
     }
 }
 
@@ -284,13 +286,14 @@ inline bool matrix_pred_match_f64(double v, const MatrixPredicateF64& p) {
         default:                 return v >  p.a;
     }
 }
-inline double matrix_cpu_reduce_pred_f64(const double* v, size_t n, const MatrixPredicateF64& p, MatrixAggOp op) {
+inline double matrix_cpu_reduce_pred_f64(const double* v, size_t n, const MatrixPredicateF64& p, MatrixAggOp op,
+                                         const uint8_t* nulls = nullptr) {
     switch (op) {
-        case AGG_SUM: { double s = 0.0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match_f64(v[i], p)) s += v[i]; return s; }
-        case AGG_MIN: { double m = std::numeric_limits<double>::infinity();  for (size_t i = 0; i < n; ++i) if (matrix_pred_match_f64(v[i], p) && v[i] < m) m = v[i]; return m; }
-        case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if (matrix_pred_match_f64(v[i], p) && v[i] > m) m = v[i]; return m; }
+        case AGG_SUM: { double s = 0.0; for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match_f64(v[i], p)) s += v[i]; return s; }
+        case AGG_MIN: { double m = std::numeric_limits<double>::infinity();  for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match_f64(v[i], p) && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if ((!nulls || !nulls[i]) && matrix_pred_match_f64(v[i], p) && v[i] > m) m = v[i]; return m; }
         case AGG_COUNT:
-        default:      { double c = 0.0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match_f64(v[i], p) ? 1.0 : 0.0; return c; }
+        default:      { double c = 0.0; for (size_t i = 0; i < n; ++i) c += ((!nulls || !nulls[i]) && matrix_pred_match_f64(v[i], p)) ? 1.0 : 0.0; return c; }
     }
 }
 

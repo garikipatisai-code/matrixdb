@@ -54,6 +54,41 @@ static void test_nullable_typed() {
     std::cout << "[nullable typed] ok\n";
 }
 
+// Filtered scalar aggregates now also skip NULLs: WHERE + a null mask excludes a row whether or not it
+// matches the predicate. Across U32/I64/F64.
+static void test_filtered_nullable() {
+    CPUMockEngine eng;
+    std::vector<uint32_t> v = {10, 20, 30, 40, 50};
+    eng.load_scan_column(2, v.data(), v.size());
+    // WHERE value >= 30 with NO mask -> {30,40,50}: SUM 120 (baseline for non-vacuity)
+    { MatrixQuery q{}; q.value_col = 2; q.agg = AGG_SUM; q.has_filter = true; q.cmp = MatrixCmp::GE; q.threshold = 30;
+      std::vector<uint64_t> o; eng.execute_query(q, o); assert(o[0] == 120 && "maskless filtered baseline"); }
+    // mask rows 1,4 NULL (values 20,50). WHERE value >= 30 -> non-null AND >=30 = {30,40}: SUM 70, COUNT 2
+    eng.set_column_nulls(2, {0, 1, 0, 0, 1});
+    { MatrixQuery q{}; q.value_col = 2; q.agg = AGG_SUM; q.has_filter = true; q.cmp = MatrixCmp::GE; q.threshold = 30;
+      std::vector<uint64_t> o; eng.execute_query(q, o);
+      assert(o[0] == 70 && "filtered SUM skips null row 4 (50 excluded: 120 -> 70)"); }
+    { MatrixQuery q{}; q.value_col = 2; q.agg = AGG_COUNT; q.has_filter = true; q.cmp = MatrixCmp::GE; q.threshold = 30;
+      std::vector<uint64_t> o; eng.execute_query(q, o); assert(o[0] == 2 && "filtered COUNT of non-null matches"); }
+
+    // int64 filtered + nullable: {-5,100,7,200}, null row1 (100), WHERE value > 0 -> {7,200}: SUM 207
+    std::vector<int64_t> s = {-5, 100, 7, 200};
+    eng.load_scan_column_i64(3, s.data(), s.size());
+    eng.set_column_nulls(3, {0, 1, 0, 0});
+    { MatrixQuery q{}; q.value_col = 3; q.agg = AGG_SUM; q.has_filter = true; q.cmp = MatrixCmp::GT; q.lo_i64 = 0;
+      std::vector<uint64_t> o; eng.execute_query(q, o);
+      assert(static_cast<int64_t>(o[0]) == 207 && "int64 filtered+nullable SUM"); }
+
+    // double filtered + nullable: {1.5,2.5,3.5}, null row2 (3.5), WHERE value < 3.0 -> {1.5,2.5}: SUM 4.0
+    std::vector<double> d = {1.5, 2.5, 3.5};
+    eng.load_scan_column_f64(4, d.data(), d.size());
+    eng.set_column_nulls(4, {0, 0, 1});
+    { MatrixQuery q{}; q.value_col = 4; q.agg = AGG_SUM; q.has_filter = true; q.cmp = MatrixCmp::LT; q.lo_f64 = 3.0;
+      std::vector<uint64_t> o; eng.execute_query(q, o);
+      assert(std::bit_cast<double>(o[0]) == 4.0 && "double filtered+nullable SUM"); }
+    std::cout << "[filtered nullable] ok\n";
+}
+
 static void grp(CPUMockEngine& eng, uint64_t key, uint64_t val, uint32_t ng, MatrixAggOp op, std::vector<uint64_t>& o) {
     MatrixQuery q{}; q.value_col = val; q.key_col = key; q.num_groups = ng; q.grouped = true; q.agg = op;
     assert(eng.execute_query(q, o) == MatrixQueryStatus::OK);
@@ -100,4 +135,4 @@ static void test_grouped_nullable() {
     std::cout << "[grouped nullable] ok\n";
 }
 
-int main() { test_nullable(); test_nullable_typed(); test_grouped_nullable(); std::cout << "ALL NULLABLE TESTS PASSED\n"; return 0; }
+int main() { test_nullable(); test_nullable_typed(); test_filtered_nullable(); test_grouped_nullable(); std::cout << "ALL NULLABLE TESTS PASSED\n"; return 0; }
