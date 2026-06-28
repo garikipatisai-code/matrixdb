@@ -28,6 +28,8 @@ static void test_join_basic() {
     assert(got == exp && "hash join == brute oracle");
     // explicit expected set: (0,2),(1,0),(1,3),(3,0),(3,3)
     assert((got == Pairs{{0,2},{1,0},{1,3},{3,0},{3,3}}) && "exact pairs incl. duplicate-key Cartesian");
+    // count-only join (resource-safe): equals the materialized cardinality, no pairs stored.
+    assert(eng.hash_join_count(1, 2) == got.size() && eng.hash_join_count(1, 2) == 5 && "hash_join_count == cardinality");
     std::cout << "[join basic] ok\n";
 }
 

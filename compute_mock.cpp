@@ -456,6 +456,32 @@ public:
         return out;
     }
 
+    // Count an equi-join's matching pairs WITHOUT materializing them — resource-safe for huge joins
+    // (addresses hash_join's materialize-all ceiling). Builds a value->count map (O(distinct) memory,
+    // not O(left rows)) and sums match counts on probe. Equals hash_join(left,right).size(). DM-8/§6.
+    uint64_t hash_join_count(uint64_t left_key_id, uint64_t right_key_id) {
+        assert(catalog_has(left_key_id) && catalog_has(right_key_id) && "hash_join_count: unknown column id");
+        assert(column_type(left_key_id) == MatrixType::U32 && column_type(right_key_id) == MatrixType::U32
+               && "hash_join_count: keys must be uint32");
+        TieredColumn& lc = *catalog_.at(left_key_id);
+        TieredColumn& rc = *catalog_.at(right_key_id);
+        tier_mgr_.record_access(left_key_id, lc.size_bytes());
+        tier_mgr_.record_access(right_key_id, rc.size_bytes());
+        const MemorySpace lh = lc.tier(); if (lh != MemorySpace::HOST) { ++cold_borrows_; lc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace rh = rc.tier(); if (rh != MemorySpace::HOST) { ++cold_borrows_; rc.migrate_to(MemorySpace::HOST); }
+        const uint32_t* lk = reinterpret_cast<const uint32_t*>(lc.host_ptr());
+        const uint32_t* rk = reinterpret_cast<const uint32_t*>(rc.host_ptr());
+        const size_t ln = lc.size_bytes() / sizeof(uint32_t);
+        const size_t rn = rc.size_bytes() / sizeof(uint32_t);
+        std::unordered_map<uint32_t, uint64_t> build;                 // left value -> # of left rows
+        for (size_t i = 0; i < ln; ++i) ++build[lk[i]];
+        uint64_t pairs = 0;
+        for (size_t j = 0; j < rn; ++j) { auto it = build.find(rk[j]); if (it != build.end()) pairs += it->second; }
+        if (rh != MemorySpace::HOST) rc.migrate_to(rh);
+        if (lh != MemorySpace::HOST) lc.migrate_to(lh);
+        return pairs;
+    }
+
     // GROUP BY key WHERE <predicate> — same double borrow-and-return as grouped_aggregate_where.
     void grouped_aggregate_pred(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
                                 MatrixAggOp op, const MatrixPredicate& pred, std::vector<uint64_t>& out) {
