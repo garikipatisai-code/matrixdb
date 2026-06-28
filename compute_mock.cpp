@@ -937,7 +937,7 @@ private:
                                       MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.has_filter, out);
                 return MatrixQueryStatus::OK;
             }
-            if (!q.has_filter && null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q.value_col, q.agg)); return MatrixQueryStatus::OK; }
+            if (null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q)); return MatrixQueryStatus::OK; }
             out.assign(1, static_cast<uint64_t>(
                 scan_tiered_column_i64(q.value_col, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
@@ -954,7 +954,7 @@ private:
                                       MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.has_filter, out);
                 return MatrixQueryStatus::OK;
             }
-            if (!q.has_filter && null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q.value_col, q.agg)); return MatrixQueryStatus::OK; }
+            if (null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q)); return MatrixQueryStatus::OK; }
             out.assign(1, std::bit_cast<uint64_t>(
                 scan_tiered_column_f64(q.value_col, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
@@ -971,9 +971,9 @@ private:
             if (q.has_filter) grouped_aggregate_pred(q.key_col, q.value_col, q.num_groups, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
         } else {
-            // Null-aware path: a U32 column with a null mask + an unfiltered scalar agg skips NULL rows (DM-3j).
-            if (!q.has_filter && null_masks_.count(q.value_col))
-                out.assign(1, scalar_aggregate_nullable(q.value_col, q.agg));
+            // Null-aware path: a column with a null mask skips NULL rows; the filter (if any) is applied too (DM-3j).
+            if (null_masks_.count(q.value_col))
+                out.assign(1, scalar_aggregate_nullable(q));
             else
                 out.assign(1, scan_tiered_column(q.value_col, MatrixPredicate{q.cmp, q.threshold, q.upper}, q.agg, q.has_filter));
         }
@@ -1117,10 +1117,12 @@ private:
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
     // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
     // HOST columns to SSD under the budget.
-    // Null-aware unfiltered scalar aggregate over a U32/I64/F64 column (DM-3j): borrow-and-return like
-    // scan_tiered_column, but skip NULL rows via the column's null mask. Returns the result as a uint64
-    // (U32 value zero-extended; I64/F64 as the bit pattern — same convention as execute_query).
-    uint64_t scalar_aggregate_nullable(uint64_t col_id, MatrixAggOp op) {
+    // Null-aware scalar aggregate over a U32/I64/F64 column (DM-3j): borrow-and-return like
+    // scan_tiered_column, but skip NULL rows via the column's null mask. When q.has_filter, the WHERE
+    // predicate is applied too (the pred reducers null-check), so a NULL row is excluded whether or not it
+    // would match. Returns the result as a uint64 (U32 zero-extended; I64/F64 as the bit pattern).
+    uint64_t scalar_aggregate_nullable(const MatrixQuery& q) {
+        const uint64_t col_id = q.value_col; const MatrixAggOp op = q.agg;
         TieredColumn& col = *catalog_.at(col_id);
         tier_mgr_.record_access(col_id, col.size_bytes());
         const MemorySpace home = col.tier();
@@ -1130,13 +1132,24 @@ private:
         uint64_t result;
         if (ty == MatrixType::I64) {
             const auto* v = reinterpret_cast<const int64_t*>(col.host_ptr());
-            result = static_cast<uint64_t>(matrix_cpu_reduce_all_i64_nullable(v, col.size_bytes() / sizeof(int64_t), op, nulls));
+            const size_t nn = col.size_bytes() / sizeof(int64_t);
+            const int64_t r = q.has_filter
+                ? matrix_cpu_reduce_pred_i64(v, nn, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, op, nulls)
+                : matrix_cpu_reduce_all_i64_nullable(v, nn, op, nulls);
+            result = static_cast<uint64_t>(r);
         } else if (ty == MatrixType::F64) {
             const auto* v = reinterpret_cast<const double*>(col.host_ptr());
-            result = std::bit_cast<uint64_t>(matrix_cpu_reduce_all_f64_nullable(v, col.size_bytes() / sizeof(double), op, nulls));
+            const size_t nn = col.size_bytes() / sizeof(double);
+            const double r = q.has_filter
+                ? matrix_cpu_reduce_pred_f64(v, nn, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, op, nulls)
+                : matrix_cpu_reduce_all_f64_nullable(v, nn, op, nulls);
+            result = std::bit_cast<uint64_t>(r);
         } else {
             const auto* v = reinterpret_cast<const uint32_t*>(col.host_ptr());
-            result = matrix_cpu_reduce_all_nullable(v, col.size_bytes() / sizeof(uint32_t), op, nulls);
+            const size_t nn = col.size_bytes() / sizeof(uint32_t);
+            result = q.has_filter
+                ? matrix_cpu_reduce_pred(v, nn, MatrixPredicate{q.cmp, q.threshold, q.upper}, op, nulls)
+                : matrix_cpu_reduce_all_nullable(v, nn, op, nulls);
         }
         if (home != MemorySpace::HOST) col.migrate_to(home);
         maybe_rebalance();
