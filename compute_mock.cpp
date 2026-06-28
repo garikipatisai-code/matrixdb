@@ -259,6 +259,22 @@ public:
         if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }
     }
 
+    // Back up the whole durable state under one path prefix: <prefix>.catalog (tiered analytical columns,
+    // all types) + <prefix>.kv (the point-op store). A point-in-time snapshot; reuses the existing fail-loud
+    // writers. Works with or without an attached WAL (save_checkpoint snapshots the in-memory kv_).
+    void backup(const std::string& prefix) {
+        save_catalog(prefix + ".catalog");
+        save_checkpoint(prefix + ".kv");
+    }
+
+    // Restore a backup written by backup() into THIS engine (intended for a fresh engine — loading an
+    // already-registered column id asserts). Catalog-only backups restore the analytical store; a missing
+    // <prefix>.kv leaves the point-op store empty (load_checkpoint returns false).
+    void restore(const std::string& prefix) {
+        load_catalog(prefix + ".catalog");
+        load_checkpoint(prefix + ".kv");
+    }
+
     // Snapshot kv_ atomically to `path`: write temp -> fsync -> rename (POSIX-atomic replace). Fail-loud.
     // ponytail: file data is fsync'd; the rename's own power-loss durability would need a directory fsync
     // (a pre-existing gap shared with the WAL) — the upgrade path if rename-durability matters.
