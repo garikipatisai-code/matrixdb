@@ -127,6 +127,34 @@ public:
         col_types_[id] = MatrixType::F64;
     }
 
+    // --- Minimal variable-length string columns (DM-3i) ---
+    // A SELF-CONTAINED store, separate from the byte catalog_ (whose columns are fixed-width TieredColumns).
+    // Supports load + row count + equality-filter count + element access — the meaningful string ops
+    // (SUM/MIN/MAX don't apply numerically). ponytail: a plain id->vector<string> map — not tiered, and
+    // NOT in catalog_columns()/execute_query (those stay fixed-width-typed); full integration needs the
+    // catalog generalized beyond TieredColumn (XL — the upgrade path).
+    void load_string_column(uint64_t id, const std::vector<std::string>& data) {
+        assert(id != 0 && "column id 0 is reserved");
+        string_columns_[id] = data;
+    }
+    size_t string_column_rows(uint64_t id) const {
+        auto it = string_columns_.find(id);
+        return it == string_columns_.end() ? 0 : it->second.size();
+    }
+    // COUNT of rows whose string equals `value` (a string WHERE col = 'literal' count).
+    uint64_t string_count_where_eq(uint64_t id, const std::string& value) const {
+        auto it = string_columns_.find(id);
+        if (it == string_columns_.end()) return 0;
+        uint64_t c = 0;
+        for (const std::string& s : it->second) if (s == value) ++c;
+        return c;
+    }
+    std::string string_column_at(uint64_t id, size_t row) const {
+        auto it = string_columns_.find(id);
+        assert(it != string_columns_.end() && row < it->second.size() && "string_column_at: bad id/row");
+        return it->second[row];
+    }
+
     // Append `n` more rows to an existing catalog column, growing it (DM-9). The store is no longer
     // load-once. Asserts the column exists and the element type matches; works across the COLD tier
     // (append_raw borrows COLD->HOST, grows, returns the borrow). Appended rows are immediately queryable.
@@ -1052,6 +1080,7 @@ private:
     MigrationExecutor executor_;                        // moves the bytes per decision
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
     std::unordered_map<uint64_t, MatrixType> col_types_; // id -> element type (absent ⇒ U32); DM-3a
+    std::unordered_map<uint64_t, std::vector<std::string>> string_columns_; // DM-3i: separate string-column store
     std::unordered_map<uint64_t, std::string> column_names_;   // id -> optional name
     std::unordered_map<std::string, uint64_t> name_to_id_;     // name -> id (resolve)
     std::unordered_map<std::string, std::vector<uint64_t>> tables_;   // table name -> ordered column ids (DM-2c)
