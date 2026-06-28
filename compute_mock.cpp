@@ -45,6 +45,18 @@ struct EngineStats {
 // One catalog column's metadata (DM-2 introspection): id, optional name (""), element type, row count, tier.
 struct ColumnInfo { uint64_t id; std::string name; MatrixType type; size_t rows; MemorySpace tier; };
 
+// OB-3 health/readiness snapshot for an orchestrator probe: a ready verdict + the gauges that justify it.
+// `ready` is false when the engine is degraded (point-op writes dropped — the KVStore filled), so a
+// liveness/readiness probe can pull the instance out of rotation and page someone.
+struct HealthStatus {
+    bool     ready;                 // false if degraded (dropped_writes > 0)
+    bool     durable;               // a WAL is attached (committed point-ops survive restart)
+    size_t   catalog_columns;       // analytical columns registered
+    size_t   host_resident_bytes;   // catalog bytes currently in RAM
+    uint64_t wal_records_pending;   // un-checkpointed WAL records (a restart-recovery-cost proxy)
+    uint64_t dropped_writes;        // point-op writes lost to a full KVStore (the degradation signal)
+};
+
 // Tokenize a query string: identifiers/keywords/numbers, the comparison operators (> >= < <= = !=),
 // and parens. Whitespace-separated; operators and parens need no surrounding spaces. (free helper)
 inline std::vector<std::string> matrixparse_tokenize(const std::string& s) {
@@ -331,6 +343,14 @@ public:
                             tier_mgr_.resident_bytes(MemorySpace::HOST),
                             tier_mgr_.resident_bytes(MemorySpace::COLD),
                             query_count_, total_query_ns_, max_query_ns_ };
+    }
+
+    // OB-3 health/readiness probe: a ready verdict + the gauges behind it. `ready` is false when any
+    // point-op write has been dropped (KVStore full = data loss in progress) — a real degradation signal
+    // an orchestrator can act on. Cheap + const, so it's safe to poll on a liveness interval.
+    HealthStatus health() const {
+        return HealthStatus{ store_overflows_ == 0, cold_store_ != nullptr, catalog_.size(),
+                             tier_mgr_.resident_bytes(MemorySpace::HOST), wal_records(), store_overflows_ };
     }
 
     // OB-2b: the per-query latency histogram — log2 buckets, bucket b counts queries with latency in

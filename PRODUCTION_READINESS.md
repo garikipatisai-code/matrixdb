@@ -229,9 +229,11 @@ in the current env (CPU, no network) vs needs real infra.
 |----|-----|-----|-----|--------|--------|
 | OB-1 | No structured logging (just `cout`) | Can't diagnose production issues | P1 | S | yes |
 | OB-2 | No metrics/telemetry export (latency, throughput, queue depth, GPU util) | Operators are blind | P1 | M | yes |
-| OB-3 | No health checks / readiness probes | Can't run under an orchestrator | P2 | S | partial |
+| OB-3 | No health checks / readiness probes | Can't run under an orchestrator **[FIXED — OB-3: health()]** | P2 | S | partial |
 | OB-4 | No runtime config (constants are compile-time `constexpr`) | Can't tune without recompiling | P1 | M | yes |
 | OB-5 | No admin/management interface | No way to inspect/operate a running instance | P2 | M | partial |
+
+*OB-3 landed (health/readiness probe, CPU): `HealthStatus health()` returns a `ready` verdict plus the gauges behind it — `durable` (WAL attached), `catalog_columns`, `host_resident_bytes`, `wal_records_pending` (un-checkpointed records ≈ restart-recovery cost), and `dropped_writes`. `ready` is **false when any point-op write has been dropped** (the KVStore filled = data loss in progress), a genuine degradation signal an orchestrator can act on (pull from rotation, page). Cheap + const, safe to poll on a liveness interval; composes over existing counters (no new state). test_health.cpp pins the gauges (catalog/resident track loads; `durable` flips with a WAL; `wal_records_pending` tracks commits and resets after `shutdown()`) and the verdict invariant `ready == (dropped_writes == 0)`. (The degraded `ready=false` path needs a release build + a full KVStore — the overflow asserts in debug — so it's covered by the invariant, not a forced 65k-key overflow.) 53-test suite + oracle green. Deferred: exposing `health()` over the wire/transport, a `/healthz`-style endpoint, structured-log emission (OB-1).*
 
 ## 8. Correctness, testing & CI
 
