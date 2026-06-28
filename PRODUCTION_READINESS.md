@@ -215,9 +215,11 @@ in the current env (CPU, no network) vs needs real infra.
 | ID | Gap | Why | Sev | Effort | Local? |
 |----|-----|-----|-----|--------|--------|
 | RM-1 | `CUDA_CHECK` aborts the process on any GPU error | A transient GPU error kills the whole DB; needs graceful degradation/retry | P1 | M | partial |
-| RM-2 | No memory limits / quotas / admission control | One big query can OOM the box | P1 | M | yes |
+| RM-2 | No memory limits / quotas / admission control | One big query can OOM the box **[partial — RM-2: runtime-tunable per-query group cap]** | P1 | M | yes |
 | RM-3 | No eviction / spill when VRAM or RAM is full | Working set > capacity → crash, not graceful | P2 | L | partial |
 | RM-4 | No graceful shutdown / drain beyond the demo harness | Can't stop cleanly under load | P1 | S | yes |
+
+*RM-2 partial (per-query admission control, CPU): the grouped-query `num_groups` ceiling — formerly the compile-time `MAX_QUERY_GROUPS` (2^28, the out-vector alloc guard) — is now a runtime-settable engine member `max_query_groups_` (default = that constant, so every existing query is byte-identical). `set_max_query_groups(n)` / `max_query_groups()` let an operator tighten the cap so one runaway GROUP BY can't OOM the box (the out vector is `num_groups × 8` bytes); a query over the cap returns `ERR_TOO_MANY_GROUPS` before any allocation. The 3 `execute_query` group checks (u32/i64/f64) read the member. Also a first step toward OB-4 (runtime config — a knob that was constexpr is now tunable). test_admission_control.cpp (default cap allows; tightened cap rejects with empty out; strict `>` boundary at num_groups==cap; knob is live both ways). 51-test suite + oracle green. Deferred: budgets for `count_distinct`/`hash_join` result memory (O(n)), a global RAM admission gate, per-principal quotas.*
 
 ## 7. Observability & operability
 
