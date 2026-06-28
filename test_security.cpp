@@ -55,8 +55,39 @@ static void test_access_control() {
     std::cout << "[access control] ok\n";
 }
 
+// SE-1: the authenticating matrix_serve validates a bearer token -> principal BEFORE authz; a bad/empty
+// token is rejected with ERR_UNAUTHENTICATED and no engine work, a valid token serves as its principal.
+static void test_authentication() {
+    const size_t N = 100; std::vector<uint32_t> v(N);
+    for (size_t i = 0; i < N; ++i) v[i] = static_cast<uint32_t>(i);
+    CPUMockEngine eng; eng.load_scan_column(2, v.data(), N);
+    using S = ServerStatus;
+
+    Authenticator auth;
+    auth.add_credential("s3cr3t-alice", 1);                    // token -> principal 1
+    AccessPolicy p; p.allow_column(1, 2);                      // principal 1 may query col 2
+
+    MatrixRequest q = mk(ReqKind::QUERY); q.query = MatrixQuery{.value_col = 2, .agg = AGG_SUM};
+    const std::vector<uint8_t> qb = matrix_serialize_request(q);
+    auto serve = [&](const std::string& tok) {
+        MatrixResponse r; matrix_deserialize_response(matrix_serve(eng, p, auth, tok, qb), r); return r;
+    };
+    // valid token -> authenticated as principal 1 -> authorized -> OK
+    assert(serve("s3cr3t-alice").status == static_cast<uint32_t>(MatrixQueryStatus::OK) && "valid token authenticates");
+    // unknown / empty token -> ERR_UNAUTHENTICATED, no results
+    assert(serve("wrong-token").status == static_cast<uint32_t>(S::ERR_UNAUTHENTICATED) && "bad token rejected");
+    assert(serve("").status == static_cast<uint32_t>(S::ERR_UNAUTHENTICATED) && "empty token rejected");
+    assert(serve("wrong-token").results.empty() && "rejected request returns no data");
+
+    // authn precedes authz: a valid token for a principal WITHOUT the grant -> ERR_FORBIDDEN (not UNAUTH)
+    auth.add_credential("s3cr3t-bob", 2);                      // principal 2 has no column grant
+    assert(serve("s3cr3t-bob").status == static_cast<uint32_t>(S::ERR_FORBIDDEN) && "authenticated but unauthorized");
+    std::cout << "[authentication] ok\n";
+}
+
 int main() {
     test_access_control();
+    test_authentication();
     std::cout << "ALL SECURITY TESTS PASSED\n";
     return 0;
 }
