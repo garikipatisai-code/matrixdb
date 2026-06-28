@@ -27,6 +27,14 @@ static void test_query_latency() {
     assert(s.max_query_ns > 0 && s.max_query_ns <= s.total_query_ns && "max is one sample of the total");
     std::cout << "[query latency] ok (count=" << s.query_count
               << " mean_ns=" << (s.total_query_ns / s.query_count) << " max_ns=" << s.max_query_ns << ")\n";
+    // OB-2b: latency histogram + percentiles
+    auto hist = eng.query_latency_histogram();
+    uint64_t hsum = 0; for (uint64_t b : hist) hsum += b;
+    assert(hsum == s.query_count && "histogram sums to query_count");
+    const uint64_t p50 = eng.query_latency_percentile_ns(0.50), p99 = eng.query_latency_percentile_ns(0.99);
+    assert(p99 >= p50 && "p99 >= p50 (cumulative histogram is monotone)");
+    assert(p99 > 0 && "real queries -> nonzero p99 latency");
+    std::cout << "[latency histogram] ok (p50~" << p50 << "ns p99~" << p99 << "ns)\n";
 }
 
 int main() { test_query_latency(); std::cout << "ALL QUERY-LATENCY TESTS PASSED\n"; return 0; }
