@@ -351,6 +351,29 @@ public:
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
 
+    // GROUP BY a uint32 key over a double value column (DM-3f). Double borrow-and-return like
+    // grouped_aggregate; out holds double group aggregates as uint64 bit-patterns. No rebalance (GROUP BY
+    // is not scan-driven, matching grouped_aggregate).
+    void grouped_aggregate_f64(uint64_t key_id, uint64_t value_id, uint32_t num_groups, MatrixAggOp op,
+                               const MatrixPredicateF64& pred, bool has_filter, std::vector<uint64_t>& out) {
+        TieredColumn& kc = *catalog_.at(key_id);
+        TieredColumn& vc = *catalog_.at(value_id);
+        tier_mgr_.record_access(key_id, kc.size_bytes());
+        tier_mgr_.record_access(value_id, vc.size_bytes());
+        const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) { ++cold_borrows_; kc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
+        const double*   vals = reinterpret_cast<const double*>(vc.host_ptr());
+        const size_t n = vc.size_bytes() / sizeof(double);
+        std::vector<double> tmp(num_groups);
+        if (has_filter) matrix_cpu_group_reduce_f64_pred(keys, vals, n, num_groups, op, pred, tmp.data());
+        else            matrix_cpu_group_reduce_f64(keys, vals, n, num_groups, op, tmp.data());
+        out.resize(num_groups);
+        for (uint32_t g = 0; g < num_groups; ++g) out[g] = std::bit_cast<uint64_t>(tmp[g]);
+        if (vh != MemorySpace::HOST) vc.migrate_to(vh);
+        if (kh != MemorySpace::HOST) kc.migrate_to(kh);
+    }
+
     // Unified analytical query over catalog columns. Validates input at the boundary and returns a
     // status (never crashes on caller input); on any ERR, out is cleared. Scalar -> out[0];
     // grouped -> out[0..num_groups). Catalog columns only (the legacy id-0 fixed column is the
@@ -378,7 +401,17 @@ public:
             return MatrixQueryStatus::OK;
         }
         if (column_type(q.value_col) == MatrixType::F64) {
-            if (q.grouped) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;   // grouped double = DM-3f
+            if (q.grouped) {
+                if (catalog_has(q.key_col) && column_type(q.key_col) != MatrixType::U32)
+                    return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;                  // double key = later
+                if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
+                    || column_rows(q.key_col) != column_rows(q.value_col))
+                    return MatrixQueryStatus::ERR_INVALID_GROUP;
+                if (q.num_groups > MAX_QUERY_GROUPS) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
+                grouped_aggregate_f64(q.key_col, q.value_col, q.num_groups, q.agg,
+                                      MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.has_filter, out);
+                return MatrixQueryStatus::OK;
+            }
             out.assign(1, std::bit_cast<uint64_t>(
                 scan_tiered_column_f64(q.value_col, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
