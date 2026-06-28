@@ -33,6 +33,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_double.cpp",
            "test_typed_double_grouped.cpp",
            "test_typed_csv.cpp",
+           "test_query_latency.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -214,6 +215,11 @@ cells += [
        "CSV (negatives, values beyond uint32, fractions) — gracefully rejecting malformed input."),
     code("!clang++ -std=c++20 -O2 test_typed_csv.cpp -o /tmp/ttc 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_csv.cpp -o /tmp/ttc; /tmp/ttc"),
+    md("### Per-query latency metrics\n"
+       "EngineStats now reports query_count / total_query_ns / max_query_ns — execute_query times every "
+       "call (OK and error) so query latency (count, mean, max) is observable, the #1 DB ops metric."),
+    code("!clang++ -std=c++20 -O2 test_query_latency.cpp -o /tmp/tql 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_query_latency.cpp -o /tmp/tql; /tmp/tql"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
