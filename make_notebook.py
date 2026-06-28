@@ -37,6 +37,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_backup.cpp",
            "test_schema.cpp",
            "test_append.cpp",
+           "test_kv_range.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -238,6 +239,11 @@ cells += [
        "tier) — the store is no longer load-once; appended rows are immediately queryable."),
     code("!clang++ -std=c++20 -O2 test_append.cpp -o /tmp/tap 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_append.cpp -o /tmp/tap; /tmp/tap"),
+    md("### Key range scan (point-op store)\n"
+       "kv_range(lo, hi) returns every (key, value) with lo <= key <= hi — a range access path over the "
+       "point-op store, beyond exact-key get. (O(n) scan; a sorted index is the deferred upgrade.)"),
+    code("!clang++ -std=c++20 -O2 test_kv_range.cpp -o /tmp/tkr 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_kv_range.cpp -o /tmp/tkr; /tmp/tkr"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

@@ -161,6 +161,16 @@ public:
     // Point-op read accessor (tests): true + sets out if present. Mirrors execute_batch's OP_READ.
     bool kv_get(uint64_t key, uint64_t& out) const { return kv_.get(key, out); }
 
+    // Range scan over the point-op store: every (key, value) with lo <= key <= hi (inclusive). Order
+    // unspecified (hash order — sort if needed). ponytail: O(capacity) full scan via KVStore::for_each;
+    // a sorted secondary index for log-time selective ranges is the deferred upgrade (the "index" half
+    // of DM-7).
+    std::vector<std::pair<uint64_t, uint64_t>> kv_range(uint64_t lo, uint64_t hi) const {
+        std::vector<std::pair<uint64_t, uint64_t>> out;
+        kv_.for_each([&](uint64_t k, uint64_t v) { if (k >= lo && k <= hi) out.emplace_back(k, v); });
+        return out;
+    }
+
     // --- Atomic transactions (WAL group commit) ---
     void begin() { assert(!in_txn_ && "transaction already open"); txn_buf_.clear(); in_txn_ = true; }
     void txn_put(uint64_t key, uint64_t value) { assert(in_txn_ && "txn_put outside a transaction"); txn_buf_.emplace_back(key, value); }
