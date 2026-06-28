@@ -9,10 +9,22 @@
 // the page-ownership model; concurrent serving is NW-2, which is contra the lock-free thesis).
 #include "server.hpp"          // matrix_serve, AccessPolicy, CPUMockEngine
 #include <sys/socket.h>
+#include <sys/time.h>          // struct timeval (SO_RCVTIMEO)
 #include <netinet/in.h>
 #include <unistd.h>
 #include <cstdint>
 #include <vector>
+
+// NW-5 connection management: bound how long a recv may block, so a client that connects but never sends
+// (slowloris-style) can't hang the single-owner serve loop forever. After the timeout, recv fails →
+// recv_all returns false → matrix_serve_conn returns false → the loop drops the stuck connection and moves
+// on. ms == 0 clears the timeout (block forever, the default). Returns true on success.
+inline bool matrix_set_recv_timeout(int fd, unsigned ms) {
+    struct timeval tv;
+    tv.tv_sec  = static_cast<long>(ms / 1000);
+    tv.tv_usec = static_cast<long>((ms % 1000) * 1000);
+    return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) == 0;
+}
 
 namespace matrixsrv_detail {
 // Read/write EXACTLY n bytes over a stream socket, looping over partial transfers; false on EOF/error.
@@ -71,7 +83,9 @@ inline bool matrix_serve_conn_auth(CPUMockEngine& eng, const AccessPolicy& polic
 // TCP accept-loop on `port`: serve each connection's requests (one at a time) until the peer closes.
 // HOST-ONLY (see file header — bind is blocked in the build sandbox). Returns -1 on a setup error.
 // principal=0 here; a real deployment derives the principal from the authenticated connection (SE-1/3).
-inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint16_t port) {
+// Each accepted connection gets a recv timeout (NW-5) so one stuck client can't hang the loop forever.
+inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint16_t port,
+                            unsigned recv_timeout_ms = 30000) {
     const int srv = ::socket(AF_INET, SOCK_STREAM, 0);
     if (srv < 0) return -1;
     int yes = 1; ::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
@@ -81,6 +95,7 @@ inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint
     for (;;) {
         const int c = ::accept(srv, nullptr, nullptr);
         if (c < 0) continue;
+        if (recv_timeout_ms) matrix_set_recv_timeout(c, recv_timeout_ms);   // NW-5: drop a stuck client
         while (matrix_serve_conn(eng, policy, /*principal=*/0, c)) { /* serve until the peer closes */ }
         ::close(c);
     }
