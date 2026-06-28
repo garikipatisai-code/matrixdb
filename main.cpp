@@ -255,6 +255,9 @@ void analytical_query_demo() {
               << " catalog_cols=" << st.catalog_columns
               << " | resident HOST=" << st.host_resident_bytes / (1024 * 1024) << "MB"
               << " COLD=" << st.cold_resident_bytes / (1024 * 1024) << "MB" << std::endl;
+    std::cout << "  query latency: count=" << st.query_count
+              << " mean=" << (st.query_count ? st.total_query_ns / st.query_count / 1000 : 0) << "us"
+              << " max=" << st.max_query_ns / 1000 << "us\n";
 }
 
 int main() {
