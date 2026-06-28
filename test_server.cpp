@@ -76,11 +76,36 @@ static void test_bad_request() {
     std::cout << "[bad request] ok\n";
 }
 
+static void test_serve_health() {
+    const size_t N = 50; std::vector<uint32_t> col(N, 1);
+    CPUMockEngine eng(0, "", SIZE_MAX); eng.load_scan_column(2, col.data(), N);
+    MatrixRequest hq; hq.kind = ReqKind::HEALTH;
+    MatrixResponse hr; assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(hq)), hr));
+    // results layout: [ready, durable, catalog_columns, host_resident_bytes, wal_pending, dropped]
+    assert(hr.status == 0 && hr.results.size() == 6 && "HEALTH -> 6-field snapshot");
+    HealthStatus h = eng.health();
+    assert(hr.results[0] == (h.ready ? 1u : 0u) && hr.results[1] == (h.durable ? 1u : 0u));
+    assert(hr.results[2] == 1 && "one column in the catalog");
+    assert(hr.results[3] == N * sizeof(uint32_t) && "resident bytes over the wire");
+    assert(hr.results[0] == 1 && hr.results[5] == 0 && "ready, no dropped writes");
+    // HEALTH is probeable even by a principal with NO grants (operational status, not data)
+    AccessPolicy locked;                                       // grants nothing
+    MatrixResponse lr; assert(matrix_deserialize_response(matrix_serve(eng, locked, /*principal=*/42,
+                                                          matrix_serialize_request(hq)), lr));
+    assert(lr.status == 0 && lr.results.size() == 6 && "HEALTH allowed without grants");
+    // a GET by the same locked principal IS denied (proves the policy is otherwise restrictive)
+    MatrixRequest g; g.kind = ReqKind::GET; g.key = 1;
+    MatrixResponse gr; assert(matrix_deserialize_response(matrix_serve(eng, locked, 42, matrix_serialize_request(g)), gr));
+    assert(gr.status == static_cast<uint32_t>(ServerStatus::ERR_FORBIDDEN) && "GET still forbidden for the locked principal");
+    std::cout << "[serve health] ok\n";
+}
+
 int main() {
     test_request_roundtrip();
     test_response_roundtrip();
     test_serve_get_put();
     test_serve_query();
+    test_serve_health();
     test_bad_request();
     std::cout << "ALL SERVER TESTS PASSED\n";
     return 0;

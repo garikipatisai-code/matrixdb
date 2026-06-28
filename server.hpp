@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-enum class ReqKind : uint32_t { GET = 1, PUT = 2, QUERY = 3 };
+enum class ReqKind : uint32_t { GET = 1, PUT = 2, QUERY = 3, HEALTH = 4 };
 enum class ServerStatus : uint32_t { OK = 0, ERR_BADREQUEST = 1000, ERR_FORBIDDEN = 1001 };
 
 struct MatrixRequest {
@@ -91,7 +91,7 @@ inline bool matrix_deserialize_request(const std::vector<uint8_t>& b, MatrixRequ
     r.u64(out.query.value_col); r.u32(agg); r.u8(hf); r.u32(out.query.threshold);
     r.u8(gr); r.u64(out.query.key_col); r.u32(out.query.num_groups);
     if (!r.ok || !r.done()) return false;
-    if (kind < 1 || kind > 3) return false;
+    if (kind < 1 || kind > 4) return false;
     out.kind = static_cast<ReqKind>(kind);
     out.query.agg = static_cast<MatrixAggOp>(agg);
     out.query.has_filter = (hf != 0);
@@ -140,6 +140,7 @@ inline std::vector<uint8_t> serve_core(CPUMockEngine& eng, const AccessPolicy& p
         case ReqKind::PUT:   authorized = policy.can_write(principal); break;
         case ReqKind::QUERY: authorized = policy.can_query(principal, req.query.value_col)
                                  && (!req.query.grouped || policy.can_query(principal, req.query.key_col)); break;
+        case ReqKind::HEALTH: authorized = true; break;   // operational status (no data) — always probeable
     }
     if (!authorized) {
         resp.status = static_cast<uint32_t>(ServerStatus::ERR_FORBIDDEN);
@@ -162,6 +163,16 @@ inline std::vector<uint8_t> serve_core(CPUMockEngine& eng, const AccessPolicy& p
             const MatrixQueryStatus st = eng.execute_query(req.query, o);
             resp.status = static_cast<uint32_t>(st);
             resp.results = std::move(o);
+            break;
+        }
+        case ReqKind::HEALTH: {
+            // Pack the health snapshot into the result vector (fixed order — the client reads by index):
+            // [ready, durable, catalog_columns, host_resident_bytes, wal_records_pending, dropped_writes].
+            const HealthStatus h = eng.health();
+            resp.results = { h.ready ? 1u : 0u, h.durable ? 1u : 0u,
+                             static_cast<uint64_t>(h.catalog_columns), static_cast<uint64_t>(h.host_resident_bytes),
+                             h.wal_records_pending, h.dropped_writes };
+            resp.status = static_cast<uint32_t>(ServerStatus::OK);
             break;
         }
     }
