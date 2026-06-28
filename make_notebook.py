@@ -44,6 +44,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_column_io.cpp",
            "test_kv_index.cpp",
            "test_gather.cpp",
+           "test_tables.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -281,6 +282,11 @@ cells += [
        "hash_join so a join yields joined data, not just index pairs."),
     code("!clang++ -std=c++20 -O2 test_gather.cpp -o /tmp/tg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_gather.cpp -o /tmp/tg; /tmp/tg"),
+    md("### Named tables\n"
+       "create_table groups equal-length columns into a named, validated, introspectable unit "
+       "(table_columns / tables) — organizational schema over the named columns."),
+    code("!clang++ -std=c++20 -O2 test_tables.cpp -o /tmp/tt 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_tables.cpp -o /tmp/tt; /tmp/tt"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "

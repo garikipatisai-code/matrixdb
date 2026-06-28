@@ -184,6 +184,38 @@ public:
         return out;
     }
 
+    // Group existing, equal-length columns into a named table (a row-aligned unit) — DM-2c. Returns false
+    // (no table created) if a column id is unknown or the columns differ in row count (the table invariant).
+    // Organizational schema over the named columns; queries still run per-column (a table-scoped query
+    // planner is the upgrade). ponytail: stores column ids; a dropped column would dangle (no drop exists).
+    bool create_table(const std::string& name, const std::vector<uint64_t>& col_ids) {
+        if (col_ids.empty()) return false;
+        size_t rows = 0; bool first = true;
+        for (uint64_t id : col_ids) {
+            if (!catalog_has(id)) return false;
+            const size_t r = column_rows(id);
+            if (first) { rows = r; first = false; } else if (r != rows) return false;   // row-aligned invariant
+        }
+        tables_[name] = col_ids;
+        return true;
+    }
+    // The columns of a named table (in declared order), as ColumnInfo; empty if no such table.
+    std::vector<ColumnInfo> table_columns(const std::string& name) const {
+        std::vector<ColumnInfo> out;
+        auto it = tables_.find(name);
+        if (it == tables_.end()) return out;
+        for (uint64_t id : it->second)
+            if (catalog_has(id))
+                out.push_back(ColumnInfo{ id, column_name(id), column_type(id), column_rows(id), catalog_.at(id)->tier() });
+        return out;
+    }
+    // Names of all registered tables (order unspecified).
+    std::vector<std::string> tables() const {
+        std::vector<std::string> out; out.reserve(tables_.size());
+        for (const auto& kv : tables_) out.push_back(kv.first);
+        return out;
+    }
+
     // Point-op read accessor (tests): true + sets out if present. Mirrors execute_batch's OP_READ.
     bool kv_get(uint64_t key, uint64_t& out) const { return kv_.get(key, out); }
 
@@ -1022,6 +1054,7 @@ private:
     std::unordered_map<uint64_t, MatrixType> col_types_; // id -> element type (absent ⇒ U32); DM-3a
     std::unordered_map<uint64_t, std::string> column_names_;   // id -> optional name
     std::unordered_map<std::string, uint64_t> name_to_id_;     // name -> id (resolve)
+    std::unordered_map<std::string, std::vector<uint64_t>> tables_;   // table name -> ordered column ids (DM-2c)
     uint64_t scans_since_rebalance_ = 0;
     uint64_t cold_borrows_ = 0;    // observability: COLD->HOST borrows
     uint64_t rebalances_ = 0;      // observability: rebalance passes
