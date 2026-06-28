@@ -178,6 +178,23 @@ public:
         return true;
     }
 
+    // int64 / double siblings of load_column_from_csv (DM-3g). Ingest a signed-64-bit or floating-point
+    // column straight from CSV. Same graceful contract: malformed CSV → false, no catalog entry, no crash.
+    bool load_column_from_csv_i64(uint64_t id, const std::string& path, size_t col_index,
+                                  bool has_header = false, char delim = ',') {
+        std::vector<int64_t> data;
+        if (!matrix_read_csv_column_i64(path, col_index, has_header, delim, data)) return false;
+        load_scan_column_i64(id, data.data(), data.size());
+        return true;
+    }
+    bool load_column_from_csv_f64(uint64_t id, const std::string& path, size_t col_index,
+                                  bool has_header = false, char delim = ',') {
+        std::vector<double> data;
+        if (!matrix_read_csv_column_f64(path, col_index, has_header, delim, data)) return false;
+        load_scan_column_f64(id, data.data(), data.size());
+        return true;
+    }
+
     // Snapshot every catalog column to `path`: [u32 magic][u64 num_cols] then per column
     // [u64 id][u64 count][count×u32]. Borrows COLD columns to HOST to read, returns them.
     // Fail-loud on I/O error (never leave a half-written snapshot mistaken for valid).
