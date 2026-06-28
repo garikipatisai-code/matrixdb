@@ -142,6 +142,19 @@ inline uint64_t matrix_cpu_reduce_all(const uint32_t* v, size_t n, MatrixAggOp o
     }
 }
 
+// Null-aware unfiltered scalar reduce over a uint32 column (DM-3j): rows where nulls[i] != 0 are SKIPPED
+// (SQL NULL semantics — COUNT counts non-null, SUM/MIN/MAX ignore nulls). Empty/all-null sentinels match
+// matrix_cpu_reduce (COUNT/SUM 0, MIN UINT64_MAX, MAX 0). `nulls` has one byte per row.
+inline uint64_t matrix_cpu_reduce_all_nullable(const uint32_t* v, size_t n, MatrixAggOp op, const uint8_t* nulls) {
+    switch (op) {
+        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) if (!nulls[i]) s += v[i]; return s; }
+        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if (!nulls[i] && v[i] < m) m = v[i]; return m; }
+        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if (!nulls[i] && v[i] > m) m = v[i]; return m; }
+        case AGG_COUNT:
+        default:      { uint64_t c = 0; for (size_t i = 0; i < n; ++i) c += (nulls[i] == 0); return c; }
+    }
+}
+
 // Per-column element type. U32 == 0 is the default (an untagged column is uint32). int64 columns
 // (DM-3a) hold signed 64-bit values — negatives and values beyond UINT32_MAX, which uint32 cannot.
 enum class MatrixType : uint32_t { U32 = 0, I64, F64 };   // F64 == 2 (DM-3e)

@@ -47,6 +47,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_gather.cpp",
            "test_tables.cpp",
            "test_string_columns.cpp",
+           "test_nullable.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -297,6 +298,11 @@ cells += [
        "no support for — a minimal self-contained store (load, row count, equality-filter count)."),
     code("!clang++ -std=c++20 -O2 test_string_columns.cpp -o /tmp/tsc 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_string_columns.cpp -o /tmp/tsc; /tmp/tsc"),
+    md("### Nullable columns\n"
+       "set_column_nulls marks NULL rows; unfiltered scalar aggregates skip them (SQL NULL semantics) — "
+       "COUNT counts non-null, SUM/MIN/MAX ignore nulls. A maskless column is unchanged."),
+    code("!clang++ -std=c++20 -O2 test_nullable.cpp -o /tmp/tn 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_nullable.cpp -o /tmp/tn; /tmp/tn"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
