@@ -155,6 +155,16 @@ public:
         return it->second[row];
     }
 
+    // --- Nullable columns (DM-3j) ---
+    // Mark which rows of a U32 catalog column are NULL (1=null), so scalar aggregates skip them (SQL NULL
+    // semantics). is_null must have one byte per row. ponytail: U32 unfiltered scalar only for this slice —
+    // int64/double/filtered/grouped null-awareness is the follow-up (the maskless path is byte-identical).
+    void set_column_nulls(uint64_t id, const std::vector<uint8_t>& is_null) {
+        assert(catalog_has(id) && column_type(id) == MatrixType::U32 && "set_column_nulls: U32 catalog column only");
+        assert(is_null.size() == column_rows(id) && "null mask must have one entry per row");
+        null_masks_[id] = is_null;
+    }
+
     // Append `n` more rows to an existing catalog column, growing it (DM-9). The store is no longer
     // load-once. Asserts the column exists and the element type matches; works across the COLD tier
     // (append_raw borrows COLD->HOST, grows, returns the borrow). Appended rows are immediately queryable.
@@ -862,7 +872,11 @@ private:
             if (q.has_filter) grouped_aggregate_pred(q.key_col, q.value_col, q.num_groups, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out);
             else              grouped_aggregate(q.key_col, q.value_col, q.num_groups, q.agg, out);
         } else {
-            out.assign(1, scan_tiered_column(q.value_col, MatrixPredicate{q.cmp, q.threshold, q.upper}, q.agg, q.has_filter));
+            // Null-aware path: a U32 column with a null mask + an unfiltered scalar agg skips NULL rows (DM-3j).
+            if (!q.has_filter && null_masks_.count(q.value_col))
+                out.assign(1, scalar_aggregate_nullable(q.value_col, q.agg));
+            else
+                out.assign(1, scan_tiered_column(q.value_col, MatrixPredicate{q.cmp, q.threshold, q.upper}, q.agg, q.has_filter));
         }
         return MatrixQueryStatus::OK;
     }
@@ -1004,6 +1018,21 @@ private:
     // accounting (no side-channel migration the budget can't see). Every REBALANCE_EVERY scans,
     // run the brain + executor: promote hot columns (DEVICE inert here), demote the coldest
     // HOST columns to SSD under the budget.
+    // Null-aware unfiltered scalar aggregate over a U32 column (DM-3j): borrow-and-return like
+    // scan_tiered_column, but skip NULL rows via the column's null mask.
+    uint64_t scalar_aggregate_nullable(uint64_t col_id, MatrixAggOp op) {
+        TieredColumn& col = *catalog_.at(col_id);
+        tier_mgr_.record_access(col_id, col.size_bytes());
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        const uint32_t* vals = reinterpret_cast<const uint32_t*>(col.host_ptr());
+        const size_t nvals = col.size_bytes() / sizeof(uint32_t);
+        const uint64_t result = matrix_cpu_reduce_all_nullable(vals, nvals, op, null_masks_.at(col_id).data());
+        if (home != MemorySpace::HOST) col.migrate_to(home);
+        maybe_rebalance();
+        return result;
+    }
+
     uint64_t scan_tiered_column(uint64_t col_id, MatrixPredicate pred, MatrixAggOp op, bool has_filter = true) {
         auto it = catalog_.find(col_id);
         if (it == catalog_.end()) {
@@ -1099,6 +1128,7 @@ private:
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
     std::unordered_map<uint64_t, MatrixType> col_types_; // id -> element type (absent ⇒ U32); DM-3a
     std::unordered_map<uint64_t, std::vector<std::string>> string_columns_; // DM-3i: separate string-column store
+    std::unordered_map<uint64_t, std::vector<uint8_t>> null_masks_;          // DM-3j: id -> per-row NULL flag (1=null)
     std::unordered_map<uint64_t, std::string> column_names_;   // id -> optional name
     std::unordered_map<std::string, uint64_t> name_to_id_;     // name -> id (resolve)
     std::unordered_map<std::string, std::vector<uint64_t>> tables_;   // table name -> ordered column ids (DM-2c)
