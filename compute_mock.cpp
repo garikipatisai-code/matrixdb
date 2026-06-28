@@ -32,6 +32,9 @@ struct EngineStats {
     size_t   catalog_columns;     // # columns in the tiered catalog
     size_t   host_resident_bytes; // catalog bytes currently in RAM (TierManager's view)
     size_t   cold_resident_bytes; // catalog bytes currently on SSD
+    uint64_t query_count;         // execute_query calls served (OK and ERR)
+    uint64_t total_query_ns;      // summed execute_query wall-time (ns)
+    uint64_t max_query_ns;        // slowest single execute_query (ns)
 };
 
 class CPUMockEngine : public ComputeInterface {
@@ -146,7 +149,8 @@ public:
     EngineStats stats() const {
         return EngineStats{ cold_borrows_, rebalances_, migrations_, catalog_.size(),
                             tier_mgr_.resident_bytes(MemorySpace::HOST),
-                            tier_mgr_.resident_bytes(MemorySpace::COLD) };
+                            tier_mgr_.resident_bytes(MemorySpace::COLD),
+                            query_count_, total_query_ns_, max_query_ns_ };
     }
 
     // Persist a catalog column's bytes to `path` (borrows to HOST to read, returns the borrow).
@@ -394,8 +398,19 @@ public:
     // Unified analytical query over catalog columns. Validates input at the boundary and returns a
     // status (never crashes on caller input); on any ERR, out is cleared. Scalar -> out[0];
     // grouped -> out[0..num_groups). Catalog columns only (the legacy id-0 fixed column is the
-    // benchmark fixture, not a query target).
+    // benchmark fixture, not a query target). Public API: times every call (OB-2) — see the
+    // execute_query_impl below for the body; this thin wrapper records latency on all return paths.
     MatrixQueryStatus execute_query(const MatrixQuery& q, std::vector<uint64_t>& out) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const MatrixQueryStatus st = execute_query_impl(q, out);
+        const uint64_t ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+        ++query_count_; total_query_ns_ += ns; if (ns > max_query_ns_) max_query_ns_ = ns;
+        return st;
+    }
+
+private:
+    MatrixQueryStatus execute_query_impl(const MatrixQuery& q, std::vector<uint64_t>& out) {
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
         if (column_type(q.value_col) == MatrixType::I64) {
@@ -450,6 +465,7 @@ public:
         return MatrixQueryStatus::OK;
     }
 
+public:
     ~CPUMockEngine() override {
         // Make the fixed-capacity overflow seam loud (not silent) even in release builds:
         // if any write was dropped because the KVStore filled, report it. Inc 3's SSD
@@ -668,6 +684,9 @@ private:
     uint64_t cold_borrows_ = 0;    // observability: COLD->HOST borrows
     uint64_t rebalances_ = 0;      // observability: rebalance passes
     uint64_t migrations_ = 0;      // observability: migration decisions executed
+    uint64_t query_count_ = 0;     // observability: execute_query calls served (OK and ERR)
+    uint64_t total_query_ns_ = 0;  // observability: summed execute_query wall-time (ns)
+    uint64_t max_query_ns_ = 0;    // observability: slowest single execute_query (ns)
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column
