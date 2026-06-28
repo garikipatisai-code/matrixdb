@@ -54,6 +54,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_count_distinct.cpp",
            "test_admission_control.cpp",
            "test_shutdown.cpp",
+           "test_health.cpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
@@ -342,6 +343,12 @@ cells += [
        "Idempotent; no-op without a WAL."),
     code("!clang++ -std=c++20 -O2 test_shutdown.cpp -o /tmp/tsd 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_shutdown.cpp -o /tmp/tsd; /tmp/tsd"),
+    md("### Health / readiness probe (OB-3)\n"
+       "health() returns a ready verdict + the gauges behind it (catalog size, durable flag, pending-WAL "
+       "records, resident bytes, dropped writes). ready is false when point-op writes have been dropped "
+       "(store full) — a real degradation signal an orchestrator can act on."),
+    code("!clang++ -std=c++20 -O2 test_health.cpp -o /tmp/thl 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_health.cpp -o /tmp/thl; /tmp/thl"),
     md("### Fuzz harness (untrusted-input crash-safety)\n"
        "Seeded pseudo-random + mutated inputs hammer the untrusted paths (parse_query, "
        "deserialize_request, CSV) — they must never crash. Run under ASan/UBSan for memory safety."),
