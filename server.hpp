@@ -10,7 +10,7 @@
 #include <vector>
 
 enum class ReqKind : uint32_t { GET = 1, PUT = 2, QUERY = 3, HEALTH = 4, STATS = 5 };
-enum class ServerStatus : uint32_t { OK = 0, ERR_BADREQUEST = 1000, ERR_FORBIDDEN = 1001 };
+enum class ServerStatus : uint32_t { OK = 0, ERR_BADREQUEST = 1000, ERR_FORBIDDEN = 1001, ERR_UNAUTHENTICATED = 1002 };
 
 struct MatrixRequest {
     ReqKind  kind  = ReqKind::GET;
@@ -55,6 +55,26 @@ private:
     bool allow_all_ = false;
     std::unordered_map<uint64_t, std::unordered_set<uint64_t>> cols_;
     std::unordered_set<uint64_t> read_, write_;
+};
+
+// SE-1 authentication: validate a bearer credential (token) -> principal id. Distinct from AccessPolicy
+// (authz): authn establishes WHO a caller is; authz decides what that principal may do. The transport
+// extracts the token from the connection and passes it here; an unknown/empty token authenticates to
+// nobody. (Tokens are opaque strings — a real deployment stores salted hashes, not plaintext; this is the
+// mechanism, not a credential store.)
+class Authenticator {
+public:
+    void add_credential(const std::string& token, uint64_t principal) { tokens_[token] = principal; }
+    // True + principal if the token is known; false (principal untouched) otherwise. Empty token -> false.
+    bool authenticate(const std::string& token, uint64_t& principal) const {
+        if (token.empty()) return false;
+        auto it = tokens_.find(token);
+        if (it == tokens_.end()) return false;
+        principal = it->second;
+        return true;
+    }
+private:
+    std::unordered_map<std::string, uint64_t> tokens_;
 };
 
 namespace matrixsrv_detail {
@@ -214,4 +234,19 @@ inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy&
 inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const std::vector<uint8_t>& req_bytes) {
     static const AccessPolicy permissive = AccessPolicy::permissive();
     return matrix_serve(eng, permissive, /*principal=*/0, req_bytes);
+}
+
+// SE-1 authenticating dispatch: validate the bearer `token` -> principal FIRST; an unknown/empty token is
+// rejected with ERR_UNAUTHENTICATED and NO engine call (authn precedes authz precedes any work). On a valid
+// token, serve as that principal (so AccessPolicy still gates what it may do). The transport supplies the
+// token from the connection; it is never read from the request payload (no spoofing).
+inline std::vector<uint8_t> matrix_serve(CPUMockEngine& eng, const AccessPolicy& policy,
+                                         const Authenticator& auth, const std::string& token,
+                                         const std::vector<uint8_t>& req_bytes) {
+    uint64_t principal = 0;
+    if (!auth.authenticate(token, principal)) {
+        MatrixResponse resp; resp.status = static_cast<uint32_t>(ServerStatus::ERR_UNAUTHENTICATED);
+        return matrix_serialize_response(resp);
+    }
+    return matrix_serve(eng, policy, principal, req_bytes);
 }

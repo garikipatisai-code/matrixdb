@@ -207,7 +207,7 @@ in the current env (CPU, no network) vs needs real infra.
 
 | ID | Gap | Why | Sev | Effort | Local? |
 |----|-----|-----|-----|--------|--------|
-| SE-1 | No authentication | Anyone who reaches it owns it | P1 | M | partial |
+| SE-1 | No authentication | Anyone who reaches it owns it **[FIXED — SE-1: Authenticator + authenticating matrix_serve]** | P1 | M | partial |
 | SE-2 | No authorization / access control | No per-user/role permissions | P1 | L | yes |
 | SE-3 | No TLS / encryption in transit | Wire sniffable | P1 | M | partial |
 | SE-4 | No encryption at rest | Disk/backup readable if stolen | P2 | M | yes |
@@ -217,6 +217,8 @@ in the current env (CPU, no network) vs needs real infra.
 *SE-2 landed (authorization / access control, CPU): `AccessPolicy` (per-principal grants — `allow_column` for QUERY column-level access, `allow_read`/`allow_write` for point GET/PUT, `permissive()` default) + an authorizing `matrix_serve(eng, policy, principal, bytes)` that checks the principal BEFORE any engine call — a denied request returns `ERR_FORBIDDEN` with zero side effects (a reviewer's runtime probe confirmed a denied PUT leaves the WAL at 0 bytes) and no existence leak (authz precedes existence). Principal is supplied by the authenticated caller, never the payload (no spoofing). The 2-arg `matrix_serve` delegates to a permissive policy (NW-1 unchanged). 18-test suite + oracle green. See spec/plan 2026-06-27-access-control. Remaining SE (local): SE-6 audit log, SE-4 encryption-at-rest; SE-1 authn + SE-3 TLS ride the deferred transport.*
 
 *SE-6 landed (audit logging, CPU): `AuditLog` (append-only) + `AuditEntry{principal, kind, status, key, column}` + a `matrix_serve(…, AuditLog&)` overload recording EVERY served request — allowed, **denied** (the forbidden attempt + its principal — the forensic point), and malformed (kind 0). Refactored the serve pipeline into a shared `serve_core` so the existing overloads stay byte-identical (verified by source diff + green regression). 19-test suite + oracle green. See spec/plan 2026-06-27-audit-logging. Remaining SE (local): SE-4 encryption-at-rest; SE-1 authn + SE-3 TLS need the transport.*
+
+*SE-1 landed (authentication — completes the authn/authz/audit triad, CPU): `Authenticator` validates a bearer credential (token) → principal, distinct from `AccessPolicy` (authn = WHO you are; authz = what you may do). A new `matrix_serve(eng, policy, authenticator, token, req)` overload authenticates FIRST — an unknown/empty token is rejected with the new `ERR_UNAUTHENTICATED` (=1002) and **no engine work** — then serves as the resolved principal (so `AccessPolicy` still gates it). The token is supplied by the transport from the connection, never read from the request payload (no spoofing — same discipline as SE-2's principal). test_security.cpp `test_authentication` proves the ordering: valid token → OK; bad/empty token → ERR_UNAUTHENTICATED with no data; a valid token for an un-granted principal → ERR_FORBIDDEN (authn precedes authz). ponytail: tokens are opaque strings in a map — a real deployment stores salted hashes + ties the token to the connection (a handshake on `matrix_serve_conn`); this is the mechanism, not a credential store. All 6 server-dependent tests green. 56-test suite + oracle green. Remaining SE: SE-3 TLS (needs a vetted library + the transport), SE-4 encryption-at-rest (won't hand-roll crypto).*
 
 ## 6. Resource management & failure handling
 
