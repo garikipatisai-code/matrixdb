@@ -770,6 +770,25 @@ public:
         return out;
     }
 
+    // Parse + run an AVG query string ("SELECT AVG(col) [WHERE ...] [GROUP BY k]") -> the average(s) as
+    // double(s). AVG isn't a reducer op (see average()), so rather than teach the parser a phantom agg we
+    // rewrite the AVG token to SUM, reuse the full parser (WHERE/GROUP BY/etc.), then derive SUM/COUNT.
+    // The tokenizer round-trips (space-join re-tokenizes identically), so this needs no parser change.
+    // Empty on parse error or a non-AVG query.
+    std::vector<double> avg_query(const std::string& sql) {
+        std::vector<std::string> tk = matrixparse_tokenize(sql);
+        if (tk.size() < 2) return {};
+        std::string a = tk[1];
+        for (char& c : a) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (a != "AVG") return {};                                   // only the AVG string form lives here
+        tk[1] = "SUM";                                               // rewrite the aggregate keyword
+        std::string rewritten;
+        for (size_t i = 0; i < tk.size(); ++i) { if (i) rewritten += ' '; rewritten += tk[i]; }
+        MatrixQuery q;
+        if (parse_query(rewritten, q) != MatrixQueryStatus::OK) return {};
+        return average(q);
+    }
+
     // Parse + run a top-N grouped query string ("SELECT SUM(x) GROUP BY k ORDER BY SUM DESC LIMIT n").
     // Returns the (group, value) pairs by value desc; empty on parse error or a query without GROUP BY + LIMIT.
     std::vector<std::pair<uint64_t, uint64_t>> top_query(const std::string& sql) {
