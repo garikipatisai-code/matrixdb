@@ -101,6 +101,22 @@ public:
         col_types_[id] = MatrixType::F64;
     }
 
+    // Append `n` more rows to an existing catalog column, growing it (DM-9). The store is no longer
+    // load-once. Asserts the column exists and the element type matches; works across the COLD tier
+    // (append_raw borrows COLD->HOST, grows, returns the borrow). Appended rows are immediately queryable.
+    void append_to_column(uint64_t id, const uint32_t* data, size_t n) {
+        assert(catalog_has(id) && column_type(id) == MatrixType::U32 && "append type must match column (u32)");
+        append_raw(id, reinterpret_cast<const unsigned char*>(data), n * sizeof(uint32_t));
+    }
+    void append_to_column_i64(uint64_t id, const int64_t* data, size_t n) {
+        assert(catalog_has(id) && column_type(id) == MatrixType::I64 && "append type must match column (int64)");
+        append_raw(id, reinterpret_cast<const unsigned char*>(data), n * sizeof(int64_t));
+    }
+    void append_to_column_f64(uint64_t id, const double* data, size_t n) {
+        assert(catalog_has(id) && column_type(id) == MatrixType::F64 && "append type must match column (double)");
+        append_raw(id, reinterpret_cast<const unsigned char*>(data), n * sizeof(double));
+    }
+
     // Inspection (tests): where the bytes actually live vs where the brain believes, the
     // HOST bytes the brain is accounting for, and a column's integrity checksum.
     MemorySpace column_tier(uint64_t id) const { return catalog_.at(id)->tier(); }
@@ -630,6 +646,17 @@ public:
 private:
     // True iff `id` names a real catalog column (id 0 is the legacy fixed column, never a query target).
     bool catalog_has(uint64_t id) const { return id != 0 && catalog_.count(id) != 0; }
+
+    // Append `n` elements of raw bytes to catalog column `id`, growing it (borrow COLD->HOST, append,
+    // return the borrow, update the brain's accounting). Private — typed wrappers enforce the element type.
+    void append_raw(uint64_t id, const unsigned char* bytes, size_t byte_count) {
+        TieredColumn& col = *catalog_.at(id);
+        const MemorySpace home = col.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
+        col.append_bytes(bytes, byte_count);
+        if (home != MemorySpace::HOST) col.migrate_to(home);     // return the borrow (grown buffer)
+        tier_mgr_.update_bytes(id, col.size_bytes());
+    }
 
     // Scan one catalog column for value>threshold. A cold column is borrowed to HOST for the
     // scan then returned to its home tier, so the engine's residency always matches the brain's

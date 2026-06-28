@@ -29,6 +29,13 @@ public:
                            /*arrived_tick*/tick_};
     }
 
+    // TierManager (public): update a column's byte size in place after an append. Preserves tier/heat/
+    // recent_bytes (unlike register_column, which resets them). No-op if id is unknown.
+    void update_bytes(uint64_t id, size_t bytes) {
+        auto it = cols_.find(id);
+        if (it != cols_.end()) it->second.bytes = bytes;
+    }
+
     // --- tunables (calibration targets) ---
     static constexpr double HEAT_ALPHA = 0.5;          // EWMA weight on recent accesses
     static constexpr double HYSTERESIS = 1.5;          // promote only if benefit > 1.5x cost
