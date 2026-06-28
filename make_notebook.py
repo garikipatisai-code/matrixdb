@@ -64,6 +64,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_fuzz.cpp",
            "test_stress.cpp",
            "test_server_tcp.cpp",
+           "test_recv_timeout.cpp",
            "test_client.cpp",
            "test_version.cpp",
            "test_logging.cpp",
@@ -392,6 +393,12 @@ cells += [
        "accept loop (bind is sandbox-blocked, so its loop is compile-verified here)."),
     code("!clang++ -std=c++20 -O2 test_server_tcp.cpp -o /tmp/ttcp 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_server_tcp.cpp -o /tmp/ttcp; /tmp/ttcp"),
+    md("### Connection read timeout (NW-5)\n"
+       "matrix_set_recv_timeout bounds how long a recv blocks, so a client that connects but never sends "
+       "(slowloris) can't hang the single-owner serve loop — recv times out, serve_conn returns false, the "
+       "loop drops the stuck connection. matrix_serve_tcp sets it on every accepted connection."),
+    code("!clang++ -std=c++20 -O2 test_recv_timeout.cpp -o /tmp/trt 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_recv_timeout.cpp -o /tmp/trt; /tmp/trt"),
     md("### Client driver (NW-4)\n"
        "MatrixClient is the app-side of the wire protocol — wraps a connected socket with typed "
        "get/put/query/health/stats calls (frame -> send -> recv -> deframe), the inverse of "
