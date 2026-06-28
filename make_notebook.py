@@ -32,6 +32,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_typed_snapshot.cpp",
            "test_typed_double.cpp",
            "test_typed_double_grouped.cpp",
+           "test_typed_csv.cpp",
            "test_migration_gpu.cpp"]
 
 def code(src):
@@ -208,6 +209,11 @@ cells += [
        "query parity; verified incl. negative-group MAX and mixed-width row-count guards."),
     code("!clang++ -std=c++20 -O2 test_typed_double_grouped.cpp -o /tmp/tdg 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_typed_double_grouped.cpp -o /tmp/tdg; /tmp/tdg"),
+    md("### Typed CSV ingest (int64 + double)\n"
+       "load_column_from_csv_i64 / _f64 ingest signed-64-bit and floating-point columns straight from "
+       "CSV (negatives, values beyond uint32, fractions) — gracefully rejecting malformed input."),
+    code("!clang++ -std=c++20 -O2 test_typed_csv.cpp -o /tmp/ttc 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_typed_csv.cpp -o /tmp/ttc; /tmp/ttc"),
     md("## 4b. Migration GPU proof (needs T4 GPU)\n"
        "\n"
        "A column migrated HOST->VRAM is byte-intact AND GPU-scannable in place: the u32x4 "
