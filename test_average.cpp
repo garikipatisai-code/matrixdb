@@ -54,4 +54,23 @@ static void test_avg_grouped() {
     std::cout << "[avg grouped] ok\n";
 }
 
-int main() { test_avg_scalar(); test_avg_grouped(); std::cout << "ALL AVG TESTS PASSED\n"; return 0; }
+// avg_query: the string entry point — "SELECT AVG(col) [WHERE ...] [GROUP BY k]" -> rewrite AVG->SUM,
+// parse, derive. Round-trips through the full parser (WHERE + GROUP BY supported).
+static void test_avg_query() {
+    CPUMockEngine eng;
+    std::vector<uint32_t> region = {0, 1, 0, 2}, amount = {10, 20, 30, 40};
+    eng.load_scan_column(1, region.data(), region.size());
+    eng.load_scan_column(2, amount.data(), amount.size());
+    eng.name_column(1, "region"); eng.name_column(2, "amount");
+    auto s = eng.avg_query("SELECT AVG(amount)");                  // (10+20+30+40)/4 = 25
+    assert(s.size() == 1 && s[0] == 25.0 && "scalar AVG from string");
+    auto w = eng.avg_query("SELECT AVG(amount) WHERE amount >= 30");// (30+40)/2 = 35
+    assert(w.size() == 1 && w[0] == 35.0 && "filtered AVG from string");
+    auto g = eng.avg_query("SELECT AVG(amount) GROUP BY region");  // g0=(10+30)/2=20, g1=20, g2=40
+    assert(g.size() == 3 && g[0] == 20.0 && g[1] == 20.0 && g[2] == 40.0 && "grouped AVG from string");
+    assert(eng.avg_query("SELECT SUM(amount)").empty() && "non-AVG query -> empty");
+    assert(eng.avg_query("garbage").empty() && "junk -> empty");
+    std::cout << "[avg query] ok\n";
+}
+
+int main() { test_avg_scalar(); test_avg_grouped(); test_avg_query(); std::cout << "ALL AVG TESTS PASSED\n"; return 0; }
