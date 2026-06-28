@@ -272,8 +272,10 @@ in the current env (CPU, no network) vs needs real infra.
 |----|-----|-----|-----|--------|--------|
 | BP-1 | Build is manual `clang++`/`nvcc` one-liners; cmake not even installed | Not reproducible; no real build system in use | P1 | S | yes |
 | BP-2 | No packaging (container/binary/release artifact) | Nothing to deploy | P1 | M | partial |
-| BP-3 | No versioning / release process | Can't ship or roll back | P2 | S | yes |
+| BP-3 | No versioning / release process | Can't ship or roll back **[partial — BP-3: build version + wire-exposed]** | P2 | S | yes |
 | BP-4 | No multi-platform build matrix (Apple ARM / Linux x86 / CUDA) | "Works on my Mac" only | P1 | M | needs CI |
+
+*BP-3 partial (build versioning, CPU): `version.hpp` carries the semver build version (`MATRIXDB_VERSION` "0.1.0" + major/minor/patch macros). The engine reports it via `version()` (string) and `version_u64()` (packed `major<<32|minor<<16|patch`, so versions compare with `<` and fit a wire field). STATS gained a 12th field = the packed version, and `MatrixClient::server_version()` reads it — so a client/monitor can see and compare which build it's talking to over the wire. test_version.cpp (string/packed/engine-getter agree; packed forms order like semver) + the server/client STATS tests assert the version field. ponytail: the release *process* (bump + git tag + artifact) is manual (the user pushes tags); this is the version a running instance reports, not an automated release pipeline. 57-test suite + oracle green. Deferred: a `git describe` build stamp, the release/tag automation, packaging (BP-2).*
 
 ## 10. Reliability & HA (mostly P3 for the single-box wedge)
 
