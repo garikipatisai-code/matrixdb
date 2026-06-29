@@ -50,6 +50,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_gather.cpp",
            "test_tables.cpp",
            "test_string_columns.cpp",
+           "test_string_dict.cpp",
            "test_nullable.cpp",
            "test_top_groups.cpp",
            "test_having.cpp",
@@ -321,6 +322,12 @@ cells += [
        "no support for — a minimal self-contained store (load, row count, equality-filter count)."),
     code("!clang++ -std=c++20 -O2 test_string_columns.cpp -o /tmp/tsc 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_string_columns.cpp -o /tmp/tsc; /tmp/tsc"),
+    md("### Dictionary-encoded string columns\n"
+       "load_string_column_dict encodes strings -> u32 codes and registers the codes as an ordinary u32 "
+       "catalog column, so a string column becomes first-class: GROUP BY a string dimension, WHERE s=='x', "
+       "and COUNT(DISTINCT) all run through the existing engine (and ride tiering/snapshot/GPU for free)."),
+    code("!clang++ -std=c++20 -O2 test_string_dict.cpp -o /tmp/tsdict 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_string_dict.cpp -o /tmp/tsdict; /tmp/tsdict"),
     md("### Nullable columns\n"
        "set_column_nulls marks NULL rows; unfiltered scalar aggregates skip them (SQL NULL semantics) — "
        "COUNT counts non-null, SUM/MIN/MAX ignore nulls. A maskless column is unchanged."),

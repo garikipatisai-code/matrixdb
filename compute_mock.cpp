@@ -214,6 +214,49 @@ public:
         return it->second[row];
     }
 
+    // --- Dictionary-encoded string columns: strings as a first-class queryable type ---
+    // load_string_column_dict encodes the strings to u32 codes (distinct value -> code, first-appearance
+    // order) and registers the code vector as an ordinary u32 catalog column (via load_scan_column) — so a
+    // string column instantly inherits the whole analytical engine: tiering, snapshot, scalar+grouped
+    // aggregation, and the GPU path. The id->string dictionary (code -> string) stays here for decode.
+    // "Top categories": GROUP BY the code column (num_groups = string_dict_size); "WHERE s == 'x'": filter
+    // the code column EQ string_encode(id,"x"); COUNT(DISTINCT) on the codes == string_dict_size.
+    void load_string_column_dict(uint64_t id, const std::vector<std::string>& data) {
+        assert(id != 0 && "column id 0 is reserved");
+        std::unordered_map<std::string, uint32_t> enc;
+        std::vector<std::string> dict;                 // code -> string (first-appearance order)
+        std::vector<uint32_t> codes; codes.reserve(data.size());
+        for (const std::string& s : data) {
+            auto it = enc.find(s);
+            uint32_t code;
+            if (it == enc.end()) { code = static_cast<uint32_t>(dict.size()); enc.emplace(s, code); dict.push_back(s); }
+            else                   code = it->second;
+            codes.push_back(code);
+        }
+        load_scan_column(id, codes.data(), codes.size());   // codes become a first-class u32 catalog column
+        string_dicts_[id] = std::move(dict);
+        string_encoders_[id] = std::move(enc);
+    }
+    // Distinct-string count of a dict-encoded column (== its GROUP BY group count, == COUNT(DISTINCT)).
+    uint32_t string_dict_size(uint64_t id) const {
+        auto it = string_dicts_.find(id);
+        return it == string_dicts_.end() ? 0u : static_cast<uint32_t>(it->second.size());
+    }
+    // Decode a code back to its string (empty if id isn't dict-encoded or code is out of range).
+    std::string string_decode(uint64_t id, uint32_t code) const {
+        auto it = string_dicts_.find(id);
+        if (it == string_dicts_.end() || code >= it->second.size()) return std::string{};
+        return it->second[code];
+    }
+    // Encode a literal to its code for building a filter (WHERE s == value). Returns string_dict_size(id) —
+    // a code no row holds — when the value is absent, so an EQ filter on it correctly matches nothing.
+    uint32_t string_encode(uint64_t id, const std::string& value) const {
+        auto it = string_encoders_.find(id);
+        if (it == string_encoders_.end()) return 0u;
+        auto e = it->second.find(value);
+        return e == it->second.end() ? static_cast<uint32_t>(it->second.size()) : e->second;
+    }
+
     // --- Nullable columns (DM-3j) ---
     // Mark which rows of a U32 catalog column are NULL (1=null), so scalar aggregates skip them (SQL NULL
     // semantics). is_null must have one byte per row. ponytail: U32 unfiltered scalar only for this slice —
@@ -1517,6 +1560,8 @@ private:
     std::unordered_map<uint64_t, std::unique_ptr<TieredColumn>> catalog_; // id -> column
     std::unordered_map<uint64_t, MatrixType> col_types_; // id -> element type (absent ⇒ U32); DM-3a
     std::unordered_map<uint64_t, std::vector<std::string>> string_columns_; // DM-3i: separate string-column store
+    std::unordered_map<uint64_t, std::vector<std::string>> string_dicts_;   // dict-encoded: code -> string (decode)
+    std::unordered_map<uint64_t, std::unordered_map<std::string, uint32_t>> string_encoders_; // string -> code (encode/filter)
     std::unordered_map<uint64_t, std::vector<uint8_t>> null_masks_;          // DM-3j: id -> per-row NULL flag (1=null)
     std::unordered_map<uint64_t, std::string> column_names_;   // id -> optional name
     std::unordered_map<std::string, uint64_t> name_to_id_;     // name -> id (resolve)
