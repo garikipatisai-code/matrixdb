@@ -115,6 +115,42 @@ int main() {
                     (unsigned long long)lex_count(">", "books"), (unsigned long long)betw);
     }
 
+    // cross-column WHERE: aggregate one column while filtering on ANOTHER (the string-dict complement)
+    eng.name_column(2, "revenue");
+    {
+        uint64_t sum_books = 0, sum_gt_books = 0;
+        for (size_t i = 0; i < N; ++i) {
+            if (cats[i] == "books") sum_books += rev[i];
+            if (cats[i] >  "books") sum_gt_books += rev[i];
+        }
+        MatrixQuery q1; std::vector<uint64_t> r1;
+        assert(eng.parse_query("SELECT SUM(revenue) WHERE category = 'books'", q1) == MatrixQueryStatus::OK);
+        assert(q1.value_col == eng.column_id("revenue") && q1.filter_col == eng.column_id("category") && "cross-column resolved");
+        assert(eng.execute_query(q1, r1) == MatrixQueryStatus::OK && r1[0] == sum_books);
+        MatrixQuery q2; std::vector<uint64_t> r2;   // ordered string filter, different aggregate column
+        assert(eng.parse_query("SELECT SUM(revenue) WHERE category > 'books'", q2) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(q2, r2) == MatrixQueryStatus::OK && r2[0] == sum_gt_books);
+        std::printf("[cross-column WHERE] ok (SUM revenue WHERE category='books'=%llu, >'books'=%llu)\n",
+                    (unsigned long long)r1[0], (unsigned long long)r2[0]);
+    }
+
+    // cross-column WHERE over TYPED value columns (exercises the i64/f64 filtered_by reducers)
+    {
+        std::vector<int64_t> rev64(N); std::vector<double> revf(N);
+        for (size_t i = 0; i < N; ++i) { rev64[i] = ((int64_t)(i % 100) - 50) * 1000000000LL; revf[i] = ((double)((int64_t)(i % 100) - 50)) * 0.5; }
+        eng.load_scan_column_i64(3, rev64.data(), N); eng.name_column(3, "rev64");
+        eng.load_scan_column_f64(4, revf.data(), N);  eng.name_column(4, "revf");
+        int64_t s64 = 0; double sf = 0.0;
+        for (size_t i = 0; i < N; ++i) if (cats[i] == "books") { s64 += rev64[i]; sf += revf[i]; }
+        MatrixQuery qi; std::vector<uint64_t> ri;
+        assert(eng.parse_query("SELECT SUM(rev64) WHERE category = 'books'", qi) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(qi, ri) == MatrixQueryStatus::OK && static_cast<int64_t>(ri[0]) == s64);
+        MatrixQuery qf2; std::vector<uint64_t> rf;
+        assert(eng.parse_query("SELECT SUM(revf) WHERE category = 'books'", qf2) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(qf2, rf) == MatrixQueryStatus::OK && matrix_bit_cast<double>(rf[0]) == sf);
+        std::printf("[cross-column typed] ok (i64=%lld, f64=%g)\n", (long long)s64, sf);
+    }
+
     std::printf("ALL STRING-DICT TESTS PASSED\n");
     return 0;
 }

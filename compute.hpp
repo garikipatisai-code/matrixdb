@@ -326,6 +326,7 @@ struct MatrixQuery {
     uint64_t    key_col    = 0;
     uint32_t    num_groups = 0;
     uint64_t    limit      = 0;   // ORDER BY agg DESC LIMIT n -> top-N groups; 0 = no limit (parse-side; not wire-serialized)
+    uint64_t    filter_col = 0;   // cross-column WHERE: u32 column the filter reads (0 = filter the value column itself; parse-side, not wire-serialized)
 };
 
 // Result of CPUMockEngine::execute_query — OK or a specific input-validation rejection (the query
@@ -443,6 +444,38 @@ inline void matrix_cpu_group_reduce_f64_pred(const uint32_t* keys, const double*
                                              uint32_t num_groups, MatrixAggOp op, const MatrixPredicateF64& pred, double* out,
                                              const uint8_t* nulls = nullptr) {
     matrix_group_reduce_f64_impl<true>(keys, values, n, num_groups, op, pred, out, nulls);
+}
+
+// --- Cross-column scalar reduce: aggregate the VALUE column `a` over rows where the u32 filter predicate
+// `p` holds on a DIFFERENT, aligned column `f` (the analytical "SELECT agg(value) WHERE other <pred>").
+// Filter column is u32 (covers dict-encoded strings + u32 dims); value is u32/i64/f64. Same empty-set
+// sentinels as matrix_cpu_reduce_all*. COUNT returns the number of rows matching the filter. ---
+inline uint64_t matrix_cpu_reduce_filtered_by(const uint32_t* f, const MatrixPredicate& p, const uint32_t* a, size_t n, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { uint64_t s = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p)) s += a[i]; return s; }
+        case AGG_MIN: { uint64_t m = UINT64_MAX; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p) && a[i] < m) m = a[i]; return m; }
+        case AGG_MAX: { uint64_t m = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p) && a[i] > m) m = a[i]; return m; }
+        case AGG_COUNT:
+        default:      { uint64_t c = 0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match(f[i], p); return c; }
+    }
+}
+inline int64_t matrix_cpu_reduce_filtered_by_i64(const uint32_t* f, const MatrixPredicate& p, const int64_t* a, size_t n, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { int64_t s = 0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p)) s += a[i]; return s; }
+        case AGG_MIN: { int64_t m = INT64_MAX; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p) && a[i] < m) m = a[i]; return m; }
+        case AGG_MAX: { int64_t m = INT64_MIN; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p) && a[i] > m) m = a[i]; return m; }
+        case AGG_COUNT:
+        default:      { int64_t c = 0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match(f[i], p); return c; }
+    }
+}
+inline double matrix_cpu_reduce_filtered_by_f64(const uint32_t* f, const MatrixPredicate& p, const double* a, size_t n, MatrixAggOp op) {
+    switch (op) {
+        case AGG_SUM: { double s = 0.0; for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p)) s += a[i]; return s; }
+        case AGG_MIN: { double m = std::numeric_limits<double>::infinity();  for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p) && a[i] < m) m = a[i]; return m; }
+        case AGG_MAX: { double m = -std::numeric_limits<double>::infinity(); for (size_t i = 0; i < n; ++i) if (matrix_pred_match(f[i], p) && a[i] > m) m = a[i]; return m; }
+        case AGG_COUNT:
+        default:      { double c = 0.0; for (size_t i = 0; i < n; ++i) c += matrix_pred_match(f[i], p); return c; }
+    }
 }
 
 /**

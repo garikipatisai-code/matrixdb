@@ -1161,17 +1161,23 @@ public:
         // optional WHERE <valuecol> <op> <val> [AND <val>]
         if (peek() == "WHERE") {
             next();                                                            // consume WHERE
-            if (column_id(next()) != vid) return MatrixQueryStatus::ERR_PARSE; // filter col must == select col
+            // The filter column may differ from the SELECT column (cross-column WHERE) — but only a u32
+            // column can be the filter (v1: dict-encoded strings + u32 dims). Same column keeps any type.
+            const uint64_t fcol = column_id(next());
+            if (fcol == 0) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
+            if (fcol != vid && column_type(fcol) != MatrixType::U32) return MatrixQueryStatus::ERR_PARSE;
+            const uint64_t pcol = fcol;                       // the column the predicate reads
+            out.filter_col = (fcol == vid) ? 0 : fcol;        // 0 = filter the value column (existing behavior)
             const std::string ops = up(next());
-            const MatrixType ty = column_type(vid);
+            const MatrixType ty = column_type(pcol);
             out.has_filter = true;
-            if (string_dicts_.find(vid) != string_dicts_.end()) {
+            if (string_dicts_.find(pcol) != string_dicts_.end()) {
                 // Dict-encoded string column: the dict is sorted, so a code's order == its string's order.
                 // EQ/NE use the exact code (string_encode -> a no-row code if absent: '=' matches nothing,
                 // '!=' all). Ordered ops + BETWEEN translate the (optionally quoted) literal to a code rank via
                 // binary search on the sorted dict, so they mean lexicographic string comparison.
                 auto unquote = [](std::string s){ return (s.size() >= 2 && (s.front()=='\'' || s.front()=='"') && s.back()==s.front()) ? s.substr(1, s.size()-2) : s; };
-                const std::vector<std::string>& dict = string_dicts_.at(vid);   // sorted
+                const std::vector<std::string>& dict = string_dicts_.at(pcol);   // sorted
                 auto lb = [&](const std::string& x){ return static_cast<uint32_t>(std::lower_bound(dict.begin(), dict.end(), x) - dict.begin()); }; // first code with dict[c] >= x
                 auto ub = [&](const std::string& x){ return static_cast<uint32_t>(std::upper_bound(dict.begin(), dict.end(), x) - dict.begin()); }; // first code with dict[c] >  x
                 if (ops == "BETWEEN") {
@@ -1183,7 +1189,7 @@ public:
                 } else if (ops == "=" || ops == "!=") {
                     out.cmp = (ops == "=") ? MatrixCmp::EQ : MatrixCmp::NE;
                     const std::string lit = next(); if (lit.empty()) return MatrixQueryStatus::ERR_PARSE;
-                    out.threshold = string_encode(vid, unquote(lit));
+                    out.threshold = string_encode(pcol, unquote(lit));
                 } else {
                     const std::string x = unquote(next()); if (x.empty()) return MatrixQueryStatus::ERR_PARSE;
                     if      (ops == ">")  { out.cmp = MatrixCmp::GE; out.threshold = ub(x); }   // s >  x: codes >= upper_bound(x)
@@ -1268,9 +1274,45 @@ private:
         return (n == 0) ? 0u : static_cast<uint32_t>(mx + 1);
     }
 
+    // Cross-column scalar WHERE: aggregate value_col over the rows where the u32 filter_col satisfies the
+    // predicate. Borrows both columns to HOST, dispatches by the value type, returns the encoded result
+    // (same codec as the per-type scalar scans). ponytail: two-pass borrow + one fused reduce; a GPU
+    // cross-column kernel + a grouped variant are the documented follow-ups.
+    uint64_t scalar_cross_filter(const MatrixQuery& q) {
+        TieredColumn& fc = *catalog_.at(q.filter_col);
+        TieredColumn& vc = *catalog_.at(q.value_col);
+        tier_mgr_.record_access(q.filter_col, fc.size_bytes());
+        tier_mgr_.record_access(q.value_col, vc.size_bytes());
+        const MemorySpace fh = fc.tier(); if (fh != MemorySpace::HOST) { ++cold_borrows_; fc.migrate_to(MemorySpace::HOST); }
+        const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
+        const uint32_t* f = reinterpret_cast<const uint32_t*>(fc.host_ptr());
+        const size_t n = fc.size_bytes() / sizeof(uint32_t);
+        const MatrixPredicate p{q.cmp, q.threshold, q.upper};
+        const MatrixType vty = column_type(q.value_col);
+        uint64_t enc;
+        if (vty == MatrixType::I64)
+            enc = static_cast<uint64_t>(matrix_cpu_reduce_filtered_by_i64(f, p, reinterpret_cast<const int64_t*>(vc.host_ptr()), n, q.agg));
+        else if (vty == MatrixType::F64)
+            enc = matrix_bit_cast<uint64_t>(matrix_cpu_reduce_filtered_by_f64(f, p, reinterpret_cast<const double*>(vc.host_ptr()), n, q.agg));
+        else
+            enc = matrix_cpu_reduce_filtered_by(f, p, reinterpret_cast<const uint32_t*>(vc.host_ptr()), n, q.agg);
+        if (vh != MemorySpace::HOST) vc.migrate_to(vh);
+        if (fh != MemorySpace::HOST) fc.migrate_to(fh);
+        maybe_rebalance();
+        return enc;
+    }
+
     MatrixQueryStatus execute_query_impl(const MatrixQuery& q, std::vector<uint64_t>& out) {
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
+        // Cross-column scalar WHERE (v1): filter on a different u32 column than the aggregate. Grouped
+        // cross-column + value NULL-awareness on this path are the documented next increments.
+        if (!q.grouped && q.has_filter && q.filter_col != 0 && q.filter_col != q.value_col) {
+            if (!catalog_has(q.filter_col) || column_type(q.filter_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
+            if (column_rows(q.filter_col) != column_rows(q.value_col)) return MatrixQueryStatus::ERR_INVALID_GROUP;   // misaligned columns
+            out.assign(1, scalar_cross_filter(q));
+            return MatrixQueryStatus::OK;
+        }
         if (column_type(q.value_col) == MatrixType::I64) {
             if (q.grouped) {
                 // Key-type check FIRST: an int64 GROUP BY key is unsupported (DM-3d) regardless of whether
