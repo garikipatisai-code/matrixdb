@@ -221,6 +221,148 @@ __global__ void matrix_group_max_kernel(const uint32_t* keys, const uint32_t* va
         const uint32_t k = keys[i]; if (k < num_groups) atomicMax(&out[k], (unsigned long long)vals[i]);
     }
 }
+
+// === GPU-5 (typed int64 + double) — ADDITIVE; the u32 kernels above are untouched. ===
+// Device predicates mirroring matrix_pred_match_i64 / matrix_pred_match_f64 (compute.hpp).
+__device__ __forceinline__ bool matrix_pred_match_i64_dev(long long v, MatrixCmp c, long long a, long long b) {
+    switch (c) {
+        case MatrixCmp::GE:      return v >= a;
+        case MatrixCmp::LT:      return v <  a;
+        case MatrixCmp::LE:      return v <= a;
+        case MatrixCmp::EQ:      return v == a;
+        case MatrixCmp::NE:      return v != a;
+        case MatrixCmp::BETWEEN: return v >= a && v <= b;
+        case MatrixCmp::GT:
+        default:                 return v >  a;
+    }
+}
+__device__ __forceinline__ bool matrix_pred_match_f64_dev(double v, MatrixCmp c, double a, double b) {
+    switch (c) {
+        case MatrixCmp::GE:      return v >= a;
+        case MatrixCmp::LT:      return v <  a;
+        case MatrixCmp::LE:      return v <= a;
+        case MatrixCmp::EQ:      return v == a;
+        case MatrixCmp::NE:      return v != a;
+        case MatrixCmp::BETWEEN: return v >= a && v <= b;
+        case MatrixCmp::GT:
+        default:                 return v >  a;
+    }
+}
+// double has no native atomicMin/Max — CAS loop on the bit pattern (the standard idiom). Works on
+// shared or global. NaN: matches the CPU's IEEE behavior (a NaN val never updates, since cur<=NaN is false).
+__device__ __forceinline__ double atomicMinDouble(double* addr, double val) {
+    unsigned long long* p = (unsigned long long*)addr;
+    unsigned long long old = *p, assumed;
+    do { assumed = old;
+         if (__longlong_as_double(assumed) <= val) break;
+         old = atomicCAS(p, assumed, __double_as_longlong(val));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+__device__ __forceinline__ double atomicMaxDouble(double* addr, double val) {
+    unsigned long long* p = (unsigned long long*)addr;
+    unsigned long long old = *p, assumed;
+    do { assumed = old;
+         if (__longlong_as_double(assumed) >= val) break;
+         old = atomicCAS(p, assumed, __double_as_longlong(val));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+// Native atomicAdd(double*) exists on arch >= 6.0 and in the host pass; nvcc without an explicit -arch
+// can default the device pass below 6.0, where the overload is absent. Provide the CAS fallback ONLY in
+// that device pass (defined(__CUDA_ARCH__) && < 600) — NOT the host pass, where the native one is already
+// declared (defining it there is the redefinition Colab caught).
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
+__device__ __forceinline__ double atomicAdd(double* address, double val) {
+    unsigned long long* p = (unsigned long long*)address;
+    unsigned long long old = *p, assumed;
+    do { assumed = old;
+         old = atomicCAS(p, assumed, __double_as_longlong(val + __longlong_as_double(assumed)));
+    } while (assumed != old);
+    return __longlong_as_double(old);
+}
+#endif
+#define MATRIX_DEV_POSINF __longlong_as_double((long long)0x7FF0000000000000ULL)
+#define MATRIX_DEV_NEGINF __longlong_as_double((long long)0xFFF0000000000000ULL)
+
+// int64 predicate-filtered reductions. out is `long long*`; sentinels match matrix_cpu_reduce_pred_i64
+// (COUNT/SUM 0, MIN INT64_MAX, MAX INT64_MIN — caller cudaMemcpy's the init). SUM accumulates as unsigned
+// (two's-complement add is bit-identical to signed; same overflow-wrap as the CPU).
+__global__ void matrix_count_kernel_pred_i64(const long long* d, size_t n, MatrixCmp c, long long a, long long b, long long* out) {
+    __shared__ unsigned long long blk; if (threadIdx.x == 0) blk = 0; __syncthreads();
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_i64_dev(d[i], c, a, b)) ++local;
+    atomicAdd(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicAdd((unsigned long long*)out, blk);
+}
+__global__ void matrix_sum_kernel_pred_i64(const long long* d, size_t n, MatrixCmp c, long long a, long long b, long long* out) {
+    __shared__ unsigned long long blk; if (threadIdx.x == 0) blk = 0; __syncthreads();
+    long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_i64_dev(d[i], c, a, b)) local += d[i];
+    atomicAdd(&blk, (unsigned long long)local); __syncthreads();
+    if (threadIdx.x == 0) atomicAdd((unsigned long long*)out, blk);
+}
+__global__ void matrix_min_kernel_pred_i64(const long long* d, size_t n, MatrixCmp c, long long a, long long b, long long* out) {
+    __shared__ long long blk; if (threadIdx.x == 0) blk = INT64_MAX; __syncthreads();
+    long long local = INT64_MAX;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_i64_dev(d[i], c, a, b) && d[i] < local) local = d[i];
+    atomicMin(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicMin(out, blk);
+}
+__global__ void matrix_max_kernel_pred_i64(const long long* d, size_t n, MatrixCmp c, long long a, long long b, long long* out) {
+    __shared__ long long blk; if (threadIdx.x == 0) blk = INT64_MIN; __syncthreads();
+    long long local = INT64_MIN;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_i64_dev(d[i], c, a, b) && d[i] > local) local = d[i];
+    atomicMax(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicMax(out, blk);
+}
+// double predicate-filtered reductions. out is `double*`; sentinels match matrix_cpu_reduce_pred_f64
+// (COUNT/SUM 0.0, MIN +inf, MAX -inf — caller cudaMemcpy's the init). atomicAdd(double*) needs arch>=6.0
+// (T4 is 7.5); MIN/MAX use the CAS-loop helpers above.
+__global__ void matrix_count_kernel_pred_f64(const double* d, size_t n, MatrixCmp c, double a, double b, double* out) {
+    __shared__ double blk; if (threadIdx.x == 0) blk = 0.0; __syncthreads();
+    double local = 0.0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_f64_dev(d[i], c, a, b)) local += 1.0;
+    atomicAdd(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, blk);
+}
+__global__ void matrix_sum_kernel_pred_f64(const double* d, size_t n, MatrixCmp c, double a, double b, double* out) {
+    __shared__ double blk; if (threadIdx.x == 0) blk = 0.0; __syncthreads();
+    double local = 0.0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_f64_dev(d[i], c, a, b)) local += d[i];
+    atomicAdd(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, blk);
+}
+__global__ void matrix_min_kernel_pred_f64(const double* d, size_t n, MatrixCmp c, double a, double b, double* out) {
+    __shared__ double blk; if (threadIdx.x == 0) blk = MATRIX_DEV_POSINF; __syncthreads();
+    double local = MATRIX_DEV_POSINF;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_f64_dev(d[i], c, a, b) && d[i] < local) local = d[i];
+    atomicMinDouble(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicMinDouble(out, blk);
+}
+__global__ void matrix_max_kernel_pred_f64(const double* d, size_t n, MatrixCmp c, double a, double b, double* out) {
+    __shared__ double blk; if (threadIdx.x == 0) blk = MATRIX_DEV_NEGINF; __syncthreads();
+    double local = MATRIX_DEV_NEGINF;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_f64_dev(d[i], c, a, b) && d[i] > local) local = d[i];
+    atomicMaxDouble(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicMaxDouble(out, blk);
+}
 // Vectorized uint32 scan: each thread loads 4 values per instruction via uint4
 // (LDG.128 = 16 bytes/load). This is the standard memory-bound fix across DL/DB/HPC
 // kernels — more bytes in flight per thread => deeper memory-level parallelism =>
