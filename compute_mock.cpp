@@ -90,6 +90,8 @@ inline uint64_t matrix_gpu_reduce_dev_u32(const void* d, size_t n, MatrixPredica
 inline int64_t  matrix_gpu_reduce_dev_i64(const void* d, size_t n, MatrixPredicateI64 pred, MatrixAggOp op, bool has_filter);
 inline double   matrix_gpu_reduce_dev_f64(const void* d, size_t n, MatrixPredicateF64 pred, MatrixAggOp op, bool has_filter);
 inline void     matrix_gpu_group_reduce_dev(const void* keys, const void* vals, size_t n, uint32_t num_groups, MatrixAggOp op, MatrixPredicate pred, bool has_filter, uint64_t* out_host);
+inline void     matrix_gpu_group_reduce_dev_i64(const void* keys, const void* vals, size_t n, uint32_t num_groups, MatrixAggOp op, MatrixPredicateI64 pred, bool has_filter, uint64_t* out_host);
+inline void     matrix_gpu_group_reduce_dev_f64(const void* keys, const void* vals, size_t n, uint32_t num_groups, MatrixAggOp op, MatrixPredicateF64 pred, bool has_filter, uint64_t* out_host);
 #endif
 
 class CPUMockEngine : public ComputeInterface {
@@ -810,6 +812,16 @@ public:
         TieredColumn& vc = *catalog_.at(value_id);
         tier_mgr_.record_access(key_id, kc.size_bytes());
         tier_mgr_.record_access(value_id, vc.size_bytes());
+#if defined(MATRIX_USE_CUDA)
+        {   // GPU-3g: u32 key + i64 value both VRAM-resident + no null mask -> GROUP BY in VRAM
+            const size_t gn = vc.size_bytes() / sizeof(int64_t);
+            if (kc.tier() == MemorySpace::DEVICE && vc.tier() == MemorySpace::DEVICE && value_nulls(value_id, gn) == nullptr) {
+                out.resize(num_groups);
+                matrix_gpu_group_reduce_dev_i64(kc.device_ptr(), vc.device_ptr(), gn, num_groups, op, pred, has_filter, out.data());
+                return;
+            }
+        }
+#endif
         const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) { ++cold_borrows_; kc.migrate_to(MemorySpace::HOST); }
         const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
         const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());
@@ -834,6 +846,18 @@ public:
         TieredColumn& vc = *catalog_.at(value_id);
         tier_mgr_.record_access(key_id, kc.size_bytes());
         tier_mgr_.record_access(value_id, vc.size_bytes());
+        tier_mgr_.record_access(key_id, kc.size_bytes());
+        tier_mgr_.record_access(value_id, vc.size_bytes());
+#if defined(MATRIX_USE_CUDA)
+        {   // GPU-3g: u32 key + f64 value both VRAM-resident + no null mask -> GROUP BY in VRAM
+            const size_t gn = vc.size_bytes() / sizeof(double);
+            if (kc.tier() == MemorySpace::DEVICE && vc.tier() == MemorySpace::DEVICE && value_nulls(value_id, gn) == nullptr) {
+                out.resize(num_groups);
+                matrix_gpu_group_reduce_dev_f64(kc.device_ptr(), vc.device_ptr(), gn, num_groups, op, pred, has_filter, out.data());
+                return;
+            }
+        }
+#endif
         const MemorySpace kh = kc.tier(); if (kh != MemorySpace::HOST) { ++cold_borrows_; kc.migrate_to(MemorySpace::HOST); }
         const MemorySpace vh = vc.tier(); if (vh != MemorySpace::HOST) { ++cold_borrows_; vc.migrate_to(MemorySpace::HOST); }
         const uint32_t* keys = reinterpret_cast<const uint32_t*>(kc.host_ptr());

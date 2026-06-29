@@ -554,6 +554,104 @@ inline void matrix_gpu_group_reduce_dev(const void* keys_dev, const void* vals_d
     CUDA_CHECK(cudaFree(d_out));
 }
 
+// === Typed (int64/double) grouped kernels — GROUP BY a u32 key over an i64/f64 value, predicate-gated on
+// the VALUE (unfiltered = an all-match predicate synthesized by the wrapper). Per-group atomics reuse the
+// verified GPU-5 typed atomics; out[] carries the same int64/double bit-pattern per group as the CPU
+// matrix_cpu_group_reduce_{i64,f64}. ===
+__global__ void matrix_group_count_kernel_i64(const uint32_t* keys, const long long* vals, size_t n, uint32_t num_groups, MatrixCmp c, long long a, long long b, long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_i64_dev(vals[i], c, a, b)) atomicAdd((unsigned long long*)&out[k], 1ull);
+    }
+}
+__global__ void matrix_group_sum_kernel_i64(const uint32_t* keys, const long long* vals, size_t n, uint32_t num_groups, MatrixCmp c, long long a, long long b, long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_i64_dev(vals[i], c, a, b)) atomicAdd((unsigned long long*)&out[k], (unsigned long long)vals[i]);
+    }
+}
+__global__ void matrix_group_min_kernel_i64(const uint32_t* keys, const long long* vals, size_t n, uint32_t num_groups, MatrixCmp c, long long a, long long b, long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_i64_dev(vals[i], c, a, b)) atomicMin(&out[k], vals[i]);
+    }
+}
+__global__ void matrix_group_max_kernel_i64(const uint32_t* keys, const long long* vals, size_t n, uint32_t num_groups, MatrixCmp c, long long a, long long b, long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_i64_dev(vals[i], c, a, b)) atomicMax(&out[k], vals[i]);
+    }
+}
+__global__ void matrix_group_count_kernel_f64(const uint32_t* keys, const double* vals, size_t n, uint32_t num_groups, MatrixCmp c, double a, double b, double* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_f64_dev(vals[i], c, a, b)) atomicAdd(&out[k], 1.0);
+    }
+}
+__global__ void matrix_group_sum_kernel_f64(const uint32_t* keys, const double* vals, size_t n, uint32_t num_groups, MatrixCmp c, double a, double b, double* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_f64_dev(vals[i], c, a, b)) atomicAdd(&out[k], vals[i]);
+    }
+}
+__global__ void matrix_group_min_kernel_f64(const uint32_t* keys, const double* vals, size_t n, uint32_t num_groups, MatrixCmp c, double a, double b, double* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_f64_dev(vals[i], c, a, b)) atomicMinDouble(&out[k], vals[i]);
+    }
+}
+__global__ void matrix_group_max_kernel_f64(const uint32_t* keys, const double* vals, size_t n, uint32_t num_groups, MatrixCmp c, double a, double b, double* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x*blockDim.x+threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups && matrix_pred_match_f64_dev(vals[i], c, a, b)) atomicMaxDouble(&out[k], vals[i]);
+    }
+}
+
+// Typed grouped wrappers: same per-group encoding as matrix_cpu_group_reduce_{i64,f64} (int64/double bits).
+// Sentinels (MIN INT64_MAX/+inf, MAX INT64_MIN/-inf, SUM/COUNT 0) aren't byte-fillable, so init via memcpy.
+// Unfiltered synthesizes an all-match predicate (GE min) to mirror the unfiltered CPU reducer.
+inline void matrix_gpu_group_reduce_dev_i64(const void* keys_dev, const void* vals_dev, size_t n,
+                                            uint32_t num_groups, MatrixAggOp op, MatrixPredicateI64 pred,
+                                            bool has_filter, uint64_t* out_host) {
+    const uint32_t*  dk = reinterpret_cast<const uint32_t*>(keys_dev);
+    const long long* dv = reinterpret_cast<const long long*>(vals_dev);
+    long long* d_out = nullptr; CUDA_CHECK(cudaMalloc(&d_out, (size_t)num_groups * sizeof(long long)));
+    std::vector<long long> init(num_groups, (op == AGG_MIN) ? INT64_MAX : (op == AGG_MAX ? INT64_MIN : 0));
+    CUDA_CHECK(cudaMemcpy(d_out, init.data(), (size_t)num_groups * sizeof(long long), cudaMemcpyHostToDevice));
+    const MatrixCmp  c = has_filter ? pred.cmp : MatrixCmp::GE;
+    const long long  a = has_filter ? pred.a   : INT64_MIN;
+    const long long  b = has_filter ? pred.b   : 0;
+    constexpr int TPB = 256, BLOCKS = 1024;
+    if (op == AGG_SUM)      matrix_group_sum_kernel_i64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    else if (op == AGG_MIN) matrix_group_min_kernel_i64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    else if (op == AGG_MAX) matrix_group_max_kernel_i64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    else                    matrix_group_count_kernel_i64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(out_host, d_out, (size_t)num_groups * sizeof(long long), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_out));
+}
+inline void matrix_gpu_group_reduce_dev_f64(const void* keys_dev, const void* vals_dev, size_t n,
+                                            uint32_t num_groups, MatrixAggOp op, MatrixPredicateF64 pred,
+                                            bool has_filter, uint64_t* out_host) {
+    const uint32_t* dk = reinterpret_cast<const uint32_t*>(keys_dev);
+    const double*   dv = reinterpret_cast<const double*>(vals_dev);
+    const double inf = std::numeric_limits<double>::infinity();
+    double* d_out = nullptr; CUDA_CHECK(cudaMalloc(&d_out, (size_t)num_groups * sizeof(double)));
+    std::vector<double> init(num_groups, (op == AGG_MIN) ? inf : (op == AGG_MAX ? -inf : 0.0));
+    CUDA_CHECK(cudaMemcpy(d_out, init.data(), (size_t)num_groups * sizeof(double), cudaMemcpyHostToDevice));
+    const MatrixCmp c = has_filter ? pred.cmp : MatrixCmp::GE;
+    const double    a = has_filter ? pred.a   : -inf;
+    const double    b = has_filter ? pred.b   : 0.0;
+    constexpr int TPB = 256, BLOCKS = 1024;
+    if (op == AGG_SUM)      matrix_group_sum_kernel_f64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    else if (op == AGG_MIN) matrix_group_min_kernel_f64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    else if (op == AGG_MAX) matrix_group_max_kernel_f64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    else                    matrix_group_count_kernel_f64<<<BLOCKS, TPB>>>(dk, dv, n, num_groups, c, a, b, d_out);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaMemcpy(out_host, d_out, (size_t)num_groups * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_out));
+}
+
 /**
  * @brief Real CUDA GPU engine, page-ownership model. Device-resident store persists
  * across batches (it is the database). Same ComputeInterface + correctness contract
