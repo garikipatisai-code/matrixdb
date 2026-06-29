@@ -94,6 +94,50 @@ __global__ void matrix_scan_kernel_u32(const uint32_t* data, size_t n,
     if (threadIdx.x == 0) atomicAdd(count, block_count);
 }
 
+// AGG-2 (GPU-1): SUM / MIN / MAX of values matching `value > threshold`, same grid-stride +
+// block-local + one-atomic-per-block shape as the COUNT kernel, differing only in accumulator + atomic.
+// Each is correct iff its result equals matrix_cpu_reduce(host, n, threshold, op) over the same bytes
+// (the cross-backend invariant — test_gpu_agg.cu is the merge gate). Empty-match sentinels match the CPU:
+// SUM 0, MIN UINT64_MAX, MAX 0. `out` must be pre-initialized to the sentinel before launch.
+__global__ void matrix_sum_kernel_u32(const uint32_t* data, size_t n,
+                                      uint32_t threshold, unsigned long long* out) {
+    __shared__ unsigned long long blk;
+    if (threadIdx.x == 0) blk = 0;
+    __syncthreads();
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (data[i] > threshold) local += data[i];
+    atomicAdd(&blk, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, blk);
+}
+__global__ void matrix_min_kernel_u32(const uint32_t* data, size_t n,
+                                      uint32_t threshold, unsigned long long* out) {
+    __shared__ unsigned long long blk;
+    if (threadIdx.x == 0) blk = 0xFFFFFFFFFFFFFFFFull;   // UINT64_MAX (CPU empty-MIN sentinel)
+    __syncthreads();
+    unsigned long long local = 0xFFFFFFFFFFFFFFFFull;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (data[i] > threshold && data[i] < local) local = data[i];
+    atomicMin(&blk, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicMin(out, blk);
+}
+__global__ void matrix_max_kernel_u32(const uint32_t* data, size_t n,
+                                      uint32_t threshold, unsigned long long* out) {
+    __shared__ unsigned long long blk;
+    if (threadIdx.x == 0) blk = 0;                       // 0 (CPU empty-MAX sentinel)
+    __syncthreads();
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (data[i] > threshold && data[i] > local) local = data[i];
+    atomicMax(&blk, local);
+    __syncthreads();
+    if (threadIdx.x == 0) atomicMax(out, blk);
+}
 // Vectorized uint32 scan: each thread loads 4 values per instruction via uint4
 // (LDG.128 = 16 bytes/load). This is the standard memory-bound fix across DL/DB/HPC
 // kernels — more bytes in flight per thread => deeper memory-level parallelism =>
@@ -251,19 +295,30 @@ public:
     void execute_scan(DatabaseQuery& q) override {
         // u32x4 filter-count over the resident column, on the dedicated scan stream so
         // it overlaps point-op submission on stream_ and never head-of-line-blocks them.
-        // NOTE(AGG-2): this GPU path honors only AGG_COUNT — it ignores matrix_get_scan_agg_op
-        // and always counts. SUM/MIN/MAX (the CPU engine's matrix_cpu_reduce) need a GPU
-        // parallel-reduction kernel, deferred to AGG-2. Until then, send non-COUNT aggregates to
-        // the CPU engine; a non-COUNT op reaching here would silently return a COUNT.
+        // AGG-2 (GPU-1): dispatch on matrix_get_scan_agg_op(q). COUNT keeps the byte-identical u32x4
+        // path (the 83886070 oracle); SUM/MIN/MAX init `out` to the matching CPU sentinel then launch the
+        // scalar reduction kernel. Each is verified GPU==matrix_cpu_reduce by test_gpu_agg.cu.
         const auto st0 = std::chrono::steady_clock::now();
         const uint32_t threshold = matrix_get_scan_threshold(q);
-        CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), scan_stream_));
+        const MatrixAggOp op = matrix_get_scan_agg_op(q);
         constexpr int SCAN_TPB = 256;
         const int blocks = 1024;
-        const uint4* col4 = reinterpret_cast<const uint4*>(d_scan_col_);
         CUDA_CHECK(cudaEventRecord(scan_k0_, scan_stream_));
-        matrix_scan_kernel_u32x4<<<blocks, SCAN_TPB, 0, scan_stream_>>>(
-            col4, MATRIX_SCAN_COLUMN_SIZE / 4, threshold, d_scan_count_);
+        if (op == AGG_SUM) {
+            CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), scan_stream_));  // SUM sentinel 0
+            matrix_sum_kernel_u32<<<blocks, SCAN_TPB, 0, scan_stream_>>>(d_scan_col_, MATRIX_SCAN_COLUMN_SIZE, threshold, d_scan_count_);
+        } else if (op == AGG_MIN) {
+            CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0xFF, sizeof(unsigned long long), scan_stream_)); // MIN sentinel UINT64_MAX
+            matrix_min_kernel_u32<<<blocks, SCAN_TPB, 0, scan_stream_>>>(d_scan_col_, MATRIX_SCAN_COLUMN_SIZE, threshold, d_scan_count_);
+        } else if (op == AGG_MAX) {
+            CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), scan_stream_));    // MAX sentinel 0
+            matrix_max_kernel_u32<<<blocks, SCAN_TPB, 0, scan_stream_>>>(d_scan_col_, MATRIX_SCAN_COLUMN_SIZE, threshold, d_scan_count_);
+        } else {                                                                                       // AGG_COUNT (default) — unchanged
+            CUDA_CHECK(cudaMemsetAsync(d_scan_count_, 0, sizeof(unsigned long long), scan_stream_));
+            const uint4* col4 = reinterpret_cast<const uint4*>(d_scan_col_);
+            matrix_scan_kernel_u32x4<<<blocks, SCAN_TPB, 0, scan_stream_>>>(
+                col4, MATRIX_SCAN_COLUMN_SIZE / 4, threshold, d_scan_count_);
+        }
         CUDA_CHECK(cudaEventRecord(scan_k1_, scan_stream_));
         CUDA_CHECK(cudaGetLastError());
         unsigned long long c = 0;

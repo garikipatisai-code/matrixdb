@@ -51,7 +51,7 @@ int main() {
         FILE* f = std::fopen(PATH, "rb");
         std::fseek(f, 0, SEEK_END); long size = std::ftell(f); std::fclose(f);
         assert(size == 3*28 && "three 28-byte records");
-        ::truncate(PATH, 2*28 + 10); // 2 whole records + 10 bytes of the third (torn)
+        if (::truncate(PATH, 2*28 + 10) != 0) std::perror("truncate"); // 2 whole records + 10 bytes of the third (torn)
         ColdStore r(PATH);
         int n = 0; uint64_t last = 0;
         r.replay([&](uint64_t k, uint64_t){ ++n; last = k; });
@@ -66,7 +66,7 @@ int main() {
         // Flip a byte inside the FIRST record's payload (offset 8 = start of payload).
         FILE* f = std::fopen(PATH, "rb+");
         std::fseek(f, 8, SEEK_SET);            // first record's payload byte 0
-        unsigned char b; std::fread(&b, 1, 1, f);
+        unsigned char b = 0; if (std::fread(&b, 1, 1, f) != 1) std::perror("fread");
         b ^= 0xFF;
         std::fseek(f, 8, SEEK_SET); std::fwrite(&b, 1, 1, f);
         std::fclose(f);

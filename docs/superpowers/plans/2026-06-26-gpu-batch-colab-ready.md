@@ -162,7 +162,7 @@ __global__ void matrix_sum_kernel_f64(const double* d, size_t n, MatrixCmp c, do
 
 ## Execution checklist (on Colab, in order)
 1. Open `matrixdb_colab.ipynb` (it embeds all sources incl. the CPU reducers as the oracle).
-2. GPU-1 SUM/MIN/MAX (u32, GT); cross-backend cell vs `matrix_cpu_reduce`. Green.
+2. **✅ DONE (Colab T4, hardware-verified):** GPU-1 SUM/MIN/MAX (u32, GT); cross-backend cell `test_gpu_agg.cu` vs `matrix_cpu_reduce` — GREEN (incl. >2^32 SUM + empty sentinels). Merged to `main`. The same run exposed + fixed a C++17/`std::bit_cast` regression in the pipeline build (now `matrix_bit_cast`, memcpy-based).
 3. GPU-4 predicates: generalize the filter; cross-backend vs `matrix_cpu_reduce_pred` (all 7 ops). Green.
 4. GPU-2 grouped (u32); vs `matrix_cpu_group_reduce(_where/_pred)`. Green.
 5. GPU-5 typed int64/double scalar (+ grouped); vs the `_i64`/`_f64` reducers. Green.
