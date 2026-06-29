@@ -12,7 +12,7 @@
 
 int main() {
     CPUMockEngine eng;
-    const char* names[] = {"books", "games", "music"};   // 3 distinct categories
+    const char* names[] = {"music", "books", "games"};   // 3 distinct categories; appearance order != sorted
     const size_t N = 30000;
     std::vector<std::string> cats; std::vector<uint32_t> rev;
     cats.reserve(N); rev.reserve(N);
@@ -84,6 +84,35 @@ int main() {
         assert(eng.parse_query("SELECT COUNT(category) WHERE category = 'absent'", qz) == MatrixQueryStatus::OK);
         assert(eng.execute_query(qz, rz) == MatrixQueryStatus::OK && rz[0] == 0);
         std::printf("[parse string literal] ok (= %llu, != %llu)\n", (unsigned long long)r[0], (unsigned long long)rn[0]);
+    }
+
+    // sorted dictionary: codes are lexicographic rank, so ordered string predicates are meaningful
+    assert(eng.string_decode(1, 0) == "books" && eng.string_decode(1, 1) == "games" && eng.string_decode(1, 2) == "music"
+           && "dict is sorted (code == lexicographic rank)");
+    {
+        auto lex_count = [&](const std::string& op, const std::string& x) {
+            uint64_t n = 0;
+            for (const auto& s : cats) n += (op == ">" ? s > x : op == ">=" ? s >= x : op == "<" ? s < x : s <= x);
+            return n;
+        };
+        struct Cse { const char* sql; const char* op; const char* lit; };
+        const Cse cases[] = {
+            {"SELECT COUNT(category) WHERE category > 'books'",  ">",  "books"},
+            {"SELECT COUNT(category) WHERE category >= 'games'", ">=", "games"},
+            {"SELECT COUNT(category) WHERE category < 'music'",  "<",  "music"},
+            {"SELECT COUNT(category) WHERE category <= 'games'", "<=", "games"},
+        };
+        for (const auto& c : cases) {
+            MatrixQuery q; std::vector<uint64_t> r;
+            assert(eng.parse_query(c.sql, q) == MatrixQueryStatus::OK);
+            assert(eng.execute_query(q, r) == MatrixQueryStatus::OK && r[0] == lex_count(c.op, c.lit));
+        }
+        uint64_t betw = 0; for (const auto& s : cats) betw += (s >= "books" && s <= "games");   // inclusive
+        MatrixQuery qb; std::vector<uint64_t> rb;
+        assert(eng.parse_query("SELECT COUNT(category) WHERE category BETWEEN 'books' AND 'games'", qb) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(qb, rb) == MatrixQueryStatus::OK && rb[0] == betw);
+        std::printf("[ordered string predicates] ok (>books=%llu, BETWEEN books..games=%llu)\n",
+                    (unsigned long long)lex_count(">", "books"), (unsigned long long)betw);
     }
 
     std::printf("ALL STRING-DICT TESTS PASSED\n");

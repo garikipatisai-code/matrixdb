@@ -215,24 +215,23 @@ public:
     }
 
     // --- Dictionary-encoded string columns: strings as a first-class queryable type ---
-    // load_string_column_dict encodes the strings to u32 codes (distinct value -> code, first-appearance
-    // order) and registers the code vector as an ordinary u32 catalog column (via load_scan_column) — so a
-    // string column instantly inherits the whole analytical engine: tiering, snapshot, scalar+grouped
-    // aggregation, and the GPU path. The id->string dictionary (code -> string) stays here for decode.
-    // "Top categories": GROUP BY the code column (num_groups = string_dict_size); "WHERE s == 'x'": filter
-    // the code column EQ string_encode(id,"x"); COUNT(DISTINCT) on the codes == string_dict_size.
+    // load_string_column_dict encodes the strings to u32 codes (distinct value -> code in SORTED /
+    // lexicographic order, so a code's order == its string's order) and registers the code vector as an
+    // ordinary u32 catalog column (via load_scan_column) — so a string column instantly inherits the whole
+    // analytical engine: tiering, snapshot, scalar+grouped aggregation, and the GPU path. The id->string
+    // dictionary (code -> string, sorted) stays here for decode + range translation. "Top categories":
+    // GROUP BY the code column; "WHERE s == 'x'": EQ string_encode(id,"x"); "WHERE s > 'x'": the parser maps
+    // the literal to a code rank via the sorted dict; COUNT(DISTINCT) on the codes == string_dict_size.
     void load_string_column_dict(uint64_t id, const std::vector<std::string>& data) {
         assert(id != 0 && "column id 0 is reserved");
-        std::unordered_map<std::string, uint32_t> enc;
-        std::vector<std::string> dict;                 // code -> string (first-appearance order)
+        std::vector<std::string> dict(data.begin(), data.end());   // distinct strings in sorted order ...
+        std::sort(dict.begin(), dict.end());
+        dict.erase(std::unique(dict.begin(), dict.end()), dict.end());
+        std::unordered_map<std::string, uint32_t> enc;             // ... so code == lexicographic rank
+        enc.reserve(dict.size());
+        for (uint32_t c = 0; c < dict.size(); ++c) enc.emplace(dict[c], c);
         std::vector<uint32_t> codes; codes.reserve(data.size());
-        for (const std::string& s : data) {
-            auto it = enc.find(s);
-            uint32_t code;
-            if (it == enc.end()) { code = static_cast<uint32_t>(dict.size()); enc.emplace(s, code); dict.push_back(s); }
-            else                   code = it->second;
-            codes.push_back(code);
-        }
+        for (const std::string& s : data) codes.push_back(enc[s]);
         load_scan_column(id, codes.data(), codes.size());   // codes become a first-class u32 catalog column
         string_dicts_[id] = std::move(dict);
         string_encoders_[id] = std::move(enc);
@@ -1167,16 +1166,32 @@ public:
             const MatrixType ty = column_type(vid);
             out.has_filter = true;
             if (string_dicts_.find(vid) != string_dicts_.end()) {
-                // Dict-encoded string column: compare by equality only (codes are first-appearance ids, not
-                // lexicographic, so ordered ops would be misleading). Encode the (optionally quoted) literal
-                // to its code; an absent literal maps to a no-row code so '=' matches nothing / '!=' all.
+                // Dict-encoded string column: the dict is sorted, so a code's order == its string's order.
+                // EQ/NE use the exact code (string_encode -> a no-row code if absent: '=' matches nothing,
+                // '!=' all). Ordered ops + BETWEEN translate the (optionally quoted) literal to a code rank via
+                // binary search on the sorted dict, so they mean lexicographic string comparison.
                 auto unquote = [](std::string s){ return (s.size() >= 2 && (s.front()=='\'' || s.front()=='"') && s.back()==s.front()) ? s.substr(1, s.size()-2) : s; };
-                if      (ops == "=")  out.cmp = MatrixCmp::EQ;
-                else if (ops == "!=") out.cmp = MatrixCmp::NE;
-                else return MatrixQueryStatus::ERR_PARSE;                       // ordered ops meaningless on string codes
-                const std::string lit = next();
-                if (lit.empty()) return MatrixQueryStatus::ERR_PARSE;
-                out.threshold = string_encode(vid, unquote(lit));
+                const std::vector<std::string>& dict = string_dicts_.at(vid);   // sorted
+                auto lb = [&](const std::string& x){ return static_cast<uint32_t>(std::lower_bound(dict.begin(), dict.end(), x) - dict.begin()); }; // first code with dict[c] >= x
+                auto ub = [&](const std::string& x){ return static_cast<uint32_t>(std::upper_bound(dict.begin(), dict.end(), x) - dict.begin()); }; // first code with dict[c] >  x
+                if (ops == "BETWEEN") {
+                    const std::string lo = unquote(next());
+                    if (up(next()) != "AND") return MatrixQueryStatus::ERR_PARSE;
+                    const std::string hi = unquote(next());
+                    const uint32_t u = ub(hi);
+                    out.cmp = MatrixCmp::BETWEEN; out.threshold = lb(lo); out.upper = (u == 0 ? 0u : u - 1); // codes [lb(lo), ub(hi)-1] == strings [lo,hi]
+                } else if (ops == "=" || ops == "!=") {
+                    out.cmp = (ops == "=") ? MatrixCmp::EQ : MatrixCmp::NE;
+                    const std::string lit = next(); if (lit.empty()) return MatrixQueryStatus::ERR_PARSE;
+                    out.threshold = string_encode(vid, unquote(lit));
+                } else {
+                    const std::string x = unquote(next()); if (x.empty()) return MatrixQueryStatus::ERR_PARSE;
+                    if      (ops == ">")  { out.cmp = MatrixCmp::GE; out.threshold = ub(x); }   // s >  x: codes >= upper_bound(x)
+                    else if (ops == ">=") { out.cmp = MatrixCmp::GE; out.threshold = lb(x); }   // s >= x: codes >= lower_bound(x)
+                    else if (ops == "<")  { out.cmp = MatrixCmp::LT; out.threshold = lb(x); }   // s <  x: codes <  lower_bound(x)
+                    else if (ops == "<=") { out.cmp = MatrixCmp::LT; out.threshold = ub(x); }   // s <= x: codes <  upper_bound(x)
+                    else return MatrixQueryStatus::ERR_PARSE;
+                }
             } else if (ops == "BETWEEN") {
                 out.cmp = MatrixCmp::BETWEEN;
                 if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
