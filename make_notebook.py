@@ -68,7 +68,8 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_client.cpp",
            "test_version.cpp",
            "test_logging.cpp",
-           "test_migration_gpu.cpp"]
+           "test_migration_gpu.cpp",
+           "test_gpu_agg.cu"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -425,6 +426,14 @@ cells += [
        "bytes. Closes the heat->decision->migration->faster-scan loop on real hardware."),
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA test_migration_gpu.cpp -o test_migration_gpu && ./test_migration_gpu"),
+    md("## 4c. GPU AGG-2 cross-backend proof (needs T4 GPU)\n"
+       "\n"
+       "The GPU SUM/MIN/MAX/COUNT reduction kernels must equal `matrix_cpu_reduce` over the SAME "
+       "bytes — the correctness anchor for the GPU aggregate phase. Checks a matching predicate and an "
+       "empty-match predicate (the empty sentinels: SUM 0, MIN UINT64_MAX, MAX 0). This is the merge "
+       "gate for GPU-1: green here means the GPU SUM/MIN/MAX can land on `main`."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_agg.cu -o test_gpu_agg && ./test_gpu_agg"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
