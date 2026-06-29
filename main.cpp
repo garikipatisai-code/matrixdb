@@ -234,21 +234,31 @@ void analytical_query_demo() {
         demo.execute_query(MatrixQuery{.value_col = 1, .agg = AGG_COUNT}, scalar);
         demo.execute_query(MatrixQuery{.value_col = 2, .agg = AGG_COUNT}, scalar);
     }
+#if defined(MATRIX_USE_CUDA)
+    // GPU-3: with the DEVICE tier live, the cost model legitimately places columns differently than the
+    // 2-tier (HOST/COLD) build — the hot columns promote to VRAM, which can relieve host pressure so the
+    // idle column need not spill to SSD. Exact placement is the brain's call; the budget invariant still
+    // holds: a 12 MB working set cannot all sit in an 8 MB host cap, so at least one column is off-HOST
+    // (on DEVICE or COLD). Query correctness regardless of tier is checked below (vb_sum).
+    assert((demo.column_tier(1) != MemorySpace::HOST || demo.column_tier(2) != MemorySpace::HOST
+            || demo.column_tier(3) != MemorySpace::HOST) && "over-budget working set tiered off pure-HOST");
+#else
     assert(demo.column_tier(3) == MemorySpace::COLD && "idle column auto-demoted to SSD");
     assert(demo.column_tier(1) == MemorySpace::HOST && demo.column_tier(2) == MemorySpace::HOST
            && "hot columns kept resident");
+#endif
 
     const char* sp[] = {"HOST", "DEVICE", "COLD", "UNIFIED"};
     std::cout << "After a hot workload on cols 1 & 2, tier residency: col1="
               << sp[(int)demo.column_tier(1)] << " col2=" << sp[(int)demo.column_tier(2)]
               << " col3=" << sp[(int)demo.column_tier(3)]
-              << "  (3-column working set in a 2-column RAM budget; col 3 auto-tiered to SSD)" << std::endl;
+              << "  (3-column working set in a 2-column RAM budget; the brain keeps the hot set in the fastest tier, spills the rest)" << std::endl;
 
-    // Query the demoted column -> pulled back to RAM, correct regardless of tier.
+    // Query the demoted column -> pulled back to RAM (or scanned in VRAM under CUDA), correct regardless of tier.
     demo.execute_query(MatrixQuery{.value_col = 3, .agg = AGG_SUM}, scalar);
-    assert(scalar.size() == 1 && scalar[0] == vb_sum && "query over the SSD-resident column is correct");
-    std::cout << "SELECT SUM(vb)  [col 3 was on SSD] -> " << scalar[0]
-              << "  (pulled back to RAM, correct). Demo OK." << std::endl;
+    assert(scalar.size() == 1 && scalar[0] == vb_sum && "query over the tiered column is correct regardless of its tier");
+    std::cout << "SELECT SUM(vb)  [col 3 tier=" << sp[(int)demo.column_tier(3)] << "] -> " << scalar[0]
+              << "  (scanned in place / pulled back as needed, correct). Demo OK." << std::endl;
     const EngineStats st = demo.stats();
     std::cout << "engine stats: cold_borrows=" << st.cold_borrows
               << " rebalances=" << st.rebalances << " migrations=" << st.migrations
