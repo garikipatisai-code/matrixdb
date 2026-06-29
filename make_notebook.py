@@ -73,7 +73,8 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_gpu_pred.cu",
            "test_gpu_grouped.cu",
            "test_gpu_typed.cu",
-           "test_gpu_catalog.cu"]
+           "test_gpu_catalog.cu",
+           "test_gpu_catalog_grouped.cu"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -470,6 +471,15 @@ cells += [
        "Merge gate for GPU-3 — the live-engine version of the 24x scan thesis."),
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA test_gpu_catalog.cu -o test_gpu_catalog && ./test_gpu_catalog"),
+    md("## 4h. GPU-3g grouped VRAM proof (needs T4 GPU)\n"
+       "\n"
+       "Completes the analytical-on-GPU surface: a `GROUP BY` over DEVICE/VRAM-resident key+value columns "
+       "runs **in place on the GPU** (the `matrix_group_*_kernel[_pred]` kernels) instead of borrowing both "
+       "down to HOST. Must equal `matrix_cpu_group_reduce(_pred)` per group for {COUNT,SUM,MIN,MAX} x "
+       "{filtered,unfiltered}. Merge gate for grouped-on-device (the filtered grouped kernel is new this "
+       "round — a predicate-gated variant of the 4e-verified unfiltered kernel)."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_catalog_grouped.cu -o test_gpu_catalog_grouped && ./test_gpu_catalog_grouped"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
