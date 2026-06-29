@@ -71,7 +71,8 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_migration_gpu.cpp",
            "test_gpu_agg.cu",
            "test_gpu_pred.cu",
-           "test_gpu_grouped.cu"]
+           "test_gpu_grouped.cu",
+           "test_gpu_typed.cu"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -450,6 +451,15 @@ cells += [
        "both backends ignore them. Merge gate for GPU-2 (GROUP BY on the GPU)."),
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA test_gpu_grouped.cu -o test_gpu_grouped && ./test_gpu_grouped"),
+    md("## 4f. GPU-5 typed (int64 + double) cross-backend proof (needs T4 GPU)\n"
+       "\n"
+       "The GPU int64 + double predicate reductions must equal `matrix_cpu_reduce_pred_i64`/`_f64` over the "
+       "SAME bytes (incl. negatives, values > 2^32, and fractions), for several predicates x "
+       "{COUNT,SUM,MIN,MAX}. int64 uses native signed atomics; double MIN/MAX use a CAS loop on the bit "
+       "pattern (no native double atomicMin/Max). Merge gate for GPU-5. (double data is half-integers so "
+       "the order-dependent float SUM is bit-exact across the GPU's nondeterministic accumulation order.)"),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_typed.cu -o test_gpu_typed && ./test_gpu_typed"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
