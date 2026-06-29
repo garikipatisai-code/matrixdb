@@ -72,7 +72,8 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_gpu_agg.cu",
            "test_gpu_pred.cu",
            "test_gpu_grouped.cu",
-           "test_gpu_typed.cu"]
+           "test_gpu_typed.cu",
+           "test_gpu_catalog.cu"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -460,6 +461,15 @@ cells += [
        "the order-dependent float SUM is bit-exact across the GPU's nondeterministic accumulation order.)"),
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA test_gpu_typed.cu -o test_gpu_typed && ./test_gpu_typed"),
+    md("## 4g. GPU-3 VRAM catalog proof (needs T4 GPU)\n"
+       "\n"
+       "The payoff: the *analytical* `execute_query` path runs on the GPU. A catalog column is pinned to "
+       "DEVICE/VRAM (`pin_device`), then `execute_query` reduces it **in place on the GPU** (the verified "
+       "`matrix_gpu_reduce_dev_*` kernels) instead of borrowing it down to HOST. Must equal "
+       "`matrix_cpu_reduce_*` over the same bytes for u32/i64/f64 x {COUNT,SUM,MIN,MAX} x {filtered,unfiltered}. "
+       "Merge gate for GPU-3 — the live-engine version of the 24x scan thesis."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_catalog.cu -o test_gpu_catalog && ./test_gpu_catalog"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
