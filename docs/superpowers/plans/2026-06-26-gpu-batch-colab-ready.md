@@ -165,10 +165,8 @@ __global__ void matrix_sum_kernel_f64(const double* d, size_t n, MatrixCmp c, do
 2. **✅ DONE (Colab T4, hardware-verified):** GPU-1 SUM/MIN/MAX (u32, GT); cross-backend cell `test_gpu_agg.cu` vs `matrix_cpu_reduce` — GREEN (incl. >2^32 SUM + empty sentinels). Merged to `main`. The same run exposed + fixed a C++17/`std::bit_cast` regression in the pipeline build (now `matrix_bit_cast`, memcpy-based).
 3. **✅ DONE (Colab T4):** GPU-4 predicates — `test_gpu_pred.cu` vs `matrix_cpu_reduce_pred`, every op × {COUNT,SUM,MIN,MAX} + empty-match — GREEN. Merged. Additive `matrix_{count,sum,min,max}_kernel_pred_u32` + `matrix_pred_match_dev`.
 4. **✅ DONE (Colab T4):** GPU-2 grouped — `test_gpu_grouped.cu` vs `matrix_cpu_group_reduce` (incl. out-of-range keys) — GREEN. Merged. Additive `matrix_group_{count,sum,min,max}_kernel`.
-3. GPU-4 predicates: generalize the filter; cross-backend vs `matrix_cpu_reduce_pred` (all 7 ops). Green.
-4. GPU-2 grouped (u32); vs `matrix_cpu_group_reduce(_where/_pred)`. Green.
-5. GPU-5 typed int64/double scalar (+ grouped); vs the `_i64`/`_f64` reducers. Green.
-6. GPU-3 VRAM promotion; assert promote + GPU==CPU + capture GB/s vs CPU (the 24× thesis).
+5. **✅ DONE (Colab T4):** GPU-5 typed int64+double — `test_gpu_typed.cu` vs `matrix_cpu_reduce_pred_i64`/`_f64`, every op × {COUNT,SUM,MIN,MAX} incl. negatives, >2^32, fractions, half-integer exact SUM, inf/INT64 sentinels — GREEN. Merged. Additive `matrix_{count,sum,min,max}_kernel_pred_{i64,f64}` + `atomicMinDouble`/`atomicMaxDouble` CAS helpers + a `sm_60`-scoped CAS-fallback `atomicAdd(double*)`. (Two build fixes this run: native double `atomicAdd` absent under the default arch, then a host-pass redefinition — final guard `defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600`.)
+6. **▶ NEXT — sole remaining piece:** GPU-3 VRAM *catalog* promotion; assert a hot analytical column promotes to DEVICE + GPU `execute_query` == CPU + capture GB/s vs CPU (the live-engine 24× thesis). NB the prototype scan path already shows 112.7 GB/s vs 4.47 CPU (~25×) on the T4 — GPU-3 brings that to the `execute_query` tiered catalog, not just the legacy scan column.
 7. Commit each piece to `main` only after its cell is green (now hardware-verified). No big-bang.
 
 Each piece is independently verifiable and independently mergeable once green.
