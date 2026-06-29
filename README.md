@@ -1,7 +1,8 @@
 # MatrixDB Prototype
 
-A GPU-accelerated database engine: a lock-free ingestion pipeline that routes each
-workload to the hardware where it wins, driven by measurement on a real Tesla T4.
+A GPU-accelerated analytical database engine: a lock-free ingestion pipeline that routes each
+workload to the hardware where it wins, over a three-tier (VRAM / RAM / SSD) columnar store with a
+full analytical query surface — and **every GPU result cross-checked byte-for-byte against the CPU**.
 
 One ingestion pipeline (lock-free SPSC ring → dual-trigger batching) feeds two
 interchangeable compute backends, selected at compile time:
@@ -19,7 +20,7 @@ byte-identical state on CPU and GPU.
 
 ## The one-line thesis (measured, not claimed)
 
-**A GPU cannot beat a CPU at key-value point ops, but wins big at scans over resident data.**
+**A GPU cannot beat a CPU at key-value point ops, but wins big at scans/aggregations over resident data.**
 The bus to the GPU (PCIe ~12 GB/s) is slower than the CPU's own cache, so tiny point ops
 lose. But data living *resident* in VRAM, scanned in place, runs at the GPU's memory
 bandwidth — far past what the CPU can stream. MatrixDB routes each workload to where it wins.
@@ -28,44 +29,89 @@ bandwidth — far past what the CPU can stream. MatrixDB routes each workload to
 |---|---|---|---|
 | Point ops (KV get/put) | ~19M ops/sec | ~20M ops/sec (plateaus) | **CPU** (GPU PCIe-bound) |
 | Scan, standalone kernel | ~10 GB/s | **~240 GB/s** (75% of peak) | **GPU ~24×** |
-| Scan, end-to-end through engine | ~8 ms/scan | **~0.4–0.7 ms/scan** | **GPU ~12–19×** |
+| Scan/aggregate, end-to-end through engine | ~8–20 ms/scan | **~0.5 ms/scan (~135 GB/s)** | **GPU ~16–25×** |
 
 (64 MB resident `uint32` column, filter-count. Standalone vs end-to-end differ because each
 integrated scan still pays per-scan launch/copy/sync overhead — see *Known limits*.)
 
+## What it does now
+
+A real analytical engine, not just a count-scan demo — the CPU surface is feature-complete and the
+**entire analytical surface is also verified on the GPU**:
+
+- **Analytical queries** over `uint32` / `int64` / `double` columns: COUNT / SUM / MIN / MAX / AVG,
+  COUNT(DISTINCT), scalar **and** `GROUP BY`, filters (GT/GE/LT/LE/EQ/NE/BETWEEN), NULL-aware
+  (SQL semantics), top-N (`ORDER BY agg DESC LIMIT`), HAVING — via a struct API *and* a SQL-ish
+  text parser. **Cross-column WHERE** (filter one column, aggregate another).
+- **Dictionary-encoded strings** as a first-class type: `GROUP BY` a string dimension, `WHERE s = 'x'`
+  and ordered/`BETWEEN` (sorted dictionary), COUNT(DISTINCT), durable — encoded to `u32` codes so they
+  ride the whole engine (tiering, snapshot, GPU) for free.
+- **Three-tier storage** DEVICE (VRAM) / HOST (RAM) / COLD (SSD) with heat-driven auto-tiering: hot
+  analytical columns auto-promote to VRAM and are scanned there in place; cold columns spill to SSD and
+  are pulled back on demand.
+- **GPU analytical surface — complete & T4-verified.** Scalar + grouped reductions, all three types,
+  filtered + unfiltered, run in VRAM. Each kernel is gated by a **cross-backend invariant**: its result
+  must equal the CPU reducer over the *same bytes* (the merge gate for every GPU piece — see the `4b`–`4h`
+  cells in the notebook).
+- **Durability & transactions:** write-ahead log + checkpoint/compaction + backup/restore + selectable
+  fsync policy + corrupt-WAL recovery (torn tail dropped, CRC-stopped replay); atomic group-commit
+  transactions; catalog snapshot/restore (incl. string dictionaries).
+- **Serving:** a serializable GET/PUT/QUERY/HEALTH/STATS request protocol + length-prefixed TCP transport
+  + a client driver, with token authentication, per-principal column-level access control, and an audit log.
+- **Ops:** health/readiness probe, query-latency + tiering metrics, structured leveled logging, admission
+  control (group-count cap), graceful shutdown, semver build version.
+
+Verified by **61 CPU tests + the pipeline oracle** (`run_tests.sh`), clean under ASan/UBSan and TSan; the
+GPU cross-checks run on a Colab T4 via the notebook.
+
 ## Files
-- `types.hpp` — `DatabaseQuery` (cache-aligned POD), opcodes, store + page-ownership + scan-column layout
-- `ring_buffer.hpp` — lock-free SPSC ring (Component 1: the ingestion dam)
-- `compute.hpp` — `ComputeInterface` contract + page-binning helper + scan-threshold codec
-- `memory_model.hpp` / `cost_model.hpp` / `router.hpp` — cost-based hardware router: places each dataset on CPU or GPU by measured cost, dispatches queries to the engine that owns the data (open to unified memory via a seam, discrete-only for now)
-- `compute_mock.cpp` — CPU engine (Component 5: local sandbox)
-- `compute_cuda.cuh` — CUDA engine: block-per-page point ops + u32x4 resident-column scan (Component 4)
-- `main.cpp` — orchestration, latency/throughput/scan benchmarks, oracle asserts
-- `test_scan_coverage.cpp` — CPU simulation of the scan kernel's index math (catches GPU-only bugs)
-- `make_notebook.py` — regenerates `matrixdb_colab.ipynb` from the real source (run after edits)
-- `FINDINGS.md` — engineering journal: every measured result, overturned hypothesis, and idea for later
-- `CMakeLists.txt` — CPU build (CUDA uses the one-liner below)
+
+**Pipeline & contract** — `types.hpp` (`DatabaseQuery` POD, opcodes, page/store layout), `ring_buffer.hpp`
+(lock-free SPSC ring), `compute.hpp` (`ComputeInterface`, `MatrixQuery`, the CPU reducers that are the
+semantics-of-record + the scan codec).
+
+**Routing & tiering** — `memory_model.hpp` / `cost_model.hpp` / `router.hpp` (cost-based hardware router),
+`tiered_column.hpp` (one column's bytes resident in exactly one of HOST/DEVICE/COLD), `tier_manager.hpp`
+(the heat-driven promote/demote brain), `migration_executor.hpp` (applies its decisions).
+
+**Engines** — `compute_mock.cpp` (the CPU analytical engine: catalog, `execute_query`, WAL, strings, server
+hooks), `compute_cuda.cuh` (the CUDA engine: page-ownership point ops, the `u32x4` resident scan, and the
+analytical reduction kernels — scalar/grouped × u32/i64/f64 × filtered/unfiltered).
+
+**Storage & I/O** — `kv_store.hpp` (point-op hash store), `cold_store.hpp` (SSD WAL), `column_io.hpp`
+(binary column persistence), `csv_ingest.hpp` (CSV ingest).
+
+**Serving & ops** — `server.hpp` (request protocol + auth/authz/audit), `server_tcp.hpp` (TCP adapter),
+`client.hpp` (client driver), `version.hpp`, `logging.hpp`.
+
+**Harness** — `main.cpp` (orchestration + benchmarks + oracle asserts), `run_tests.sh` (CI gate),
+`test_*.cpp` (61 CPU tests, run by `run_tests.sh`), `test_gpu_*.cu` (GPU cross-check gates), `make_notebook.py` (regenerates
+`matrixdb_colab.ipynb` from the real source — run after edits).
+
+**Docs** — `FINDINGS.md` (engineering journal), `PRODUCTION_READINESS.md` (per-increment gap register),
+`docs/superpowers/` (specs + plans).
 
 ## Architecture
 
-**Page ownership (single-owner per page, shared-nothing across pages).** The key space
-is split into pages;
-exactly one owner (one CUDA block) reads/writes a page's slots. The same key always routes
-to the same owner, so writes serialize by ownership — **no store atomics, no OCC, no delta
-log**. Point ops bin to their pages (a counting sort) and the GPU runs one block per page.
+**Page ownership (single-owner per page, shared-nothing across pages).** The key space is split into
+pages; exactly one owner (one CUDA block) reads/writes a page's slots. The same key always routes to the
+same owner, so writes serialize by ownership — **no store atomics, no OCC, no delta log**. Point ops bin
+to their pages (a counting sort) and the GPU runs one block per page.
 
-**Resident scan column.** A 16M-value `uint32` column lives in VRAM, filled once, never
-shipped per query. `OP_SCAN` queries (threshold carried in the payload) flow through the
-same ring + batcher and run the chosen `u32x4` vectorized kernel over it in place.
+**Tiered analytical catalog.** Columns register into a catalog whose `TierManager` keeps the hot working
+set in the fastest tier under a budget: hot columns promote HOST→DEVICE (VRAM), cold ones demote
+HOST→COLD (SSD), and a scan of a non-resident column borrows it back. `execute_query` runs scalar/grouped
+aggregation with predicates and NULL semantics over these columns; when a column is DEVICE-resident the
+reduction runs on the GPU in place, otherwise on the CPU — same result either way.
 
-### Routing
+**Cross-backend invariant.** The CPU reducers (`matrix_cpu_reduce*`) are the semantics-of-record. Every
+GPU kernel is correct *iff*, over the same bytes, its result equals the CPU reducer's — the same checksum
+discipline that anchors the page-ownership store. This is the merge gate for each GPU increment.
 
-Both engines live in one process behind a `Router`. A `CostModel` (parameterized by
-measured hardware constants) decides each dataset's single home — point-op KV store on
-the CPU, scan columns on CPU or GPU by size — and queries execute where their data lives.
-No data is duplicated, so there is no coherence protocol. A `MemorySpace`/`MemoryModel`
-seam keeps the design open to unified-memory hardware (e.g. DGX Spark, Grace-Hopper);
-only the discrete-memory path is implemented today.
+**Routing.** Both engines live in one process behind a `Router`. A `CostModel` (parameterized by measured
+hardware constants) decides each dataset's single home and queries execute where their data lives. No data
+is duplicated, so there is no coherence protocol. A `MemorySpace`/`MemoryModel` seam keeps the design open
+to unified-memory hardware (e.g. Grace-Hopper); only the discrete-memory path is implemented today.
 
 ## Build & run locally (CPU)
 ```sh
@@ -79,8 +125,10 @@ SAN=1 ./run_tests.sh   # same, under AddressSanitizer + UBSan (catches UB/OOB; s
 
 ## Test on Google Colab (GPU)
 
-**Easiest:** open `matrixdb_colab.ipynb` in Colab (Runtime → T4 GPU → Run all). It writes
-its own source, runs the CPU coverage test, builds with `nvcc`, and runs — no uploads.
+**Easiest:** open `matrixdb_colab.ipynb` in Colab (Runtime → T4 GPU → Run all). It writes its own source,
+runs the CPU tests, then builds with `nvcc` and runs the GPU cross-check cells (`4b`–`4h`): migration,
+aggregation, predicates, grouped, typed int64/double, and the VRAM-resident `execute_query` (scalar +
+grouped) — each asserting `GPU == matrix_cpu_*`. No uploads.
 
 **Manual** — Runtime → T4 GPU, then:
 ```sh
@@ -96,29 +144,26 @@ Output ends with `Scan result sum: 83886070 (oracle 83886070)` and
 
 ## How it was built: measure, then cut
 
-Each step was decided by a benchmark, not a guess. Notable findings:
+Each step was decided by a benchmark or a cross-check, not a guess. Notable findings:
 - **Sub-microsecond ingestion confirmed:** raw SPSC handoff ~64 ns p50 on the T4.
 - **GPU point-ops lose by physics:** PCIe < CPU cache; no amount of tuning changes it.
 - **Scan bandwidth lever:** narrowest column type + vectorized (`uint4`) loads won; register
   blocking (CUB's `ITEMS_PER_THREAD`) was tested and came second — hardware decided, not theory.
 - **A GPU-only kernel bug** (wrong index striding) was caught *before* a Colab run by
   `test_scan_coverage.cpp`, which simulates the kernel's integer math on the CPU.
+- **The cross-check gate earned its keep:** the Colab runs caught a C++17/`std::bit_cast` regression and
+  two `nvcc` `atomicAdd(double*)` arch-guard bugs that local CPU builds had masked — each fixed before merge.
 
 ## Known limits / deferred (marked `// ponytail:` at each site)
-- **Per-scan overhead is NOT a problem** (measured): cudaEvent instrumentation puts GPU
-  launch/copy/sync at ~4% of scan time (kernel 0.41 ms/scan @ 163 GB/s on the 16M column).
-  An earlier "70% overhead" claim was a measurement artifact (host-wall vs cudaEvent timing,
-  mismatched column sizes) — the integrated scan is ~96% efficient.
-- **HTAP head-of-line blocking — fixed.** Point ops and scans now run on separate queues
-  and threads (GPU: separate streams), so a multi-ms scan no longer stalls point ops.
-  Measured on CPU: point-op queue residency p99 ~1.8 ms with ten 8 ms scans running
-  concurrently (was ~40 ms pre-split, ~22×). On GPU, point-op residency is no longer
-  scan-bound — what remains (~2.6 ms p99) is the point-op path's own per-batch
-  launch/sync cost (see next item), not scan interference.
-- **Per-batch GPU sync (point-op path):** each `execute_batch` blocks on a
-  `cudaStreamSynchronize`, so queries queue while it runs. Double-buffering / async
-  batches would hide it. Hypothesis — not yet instrumented like the scan path was.
-- **Scans return a count, not rows;** no SUM/MIN/MAX yet.
-- **Full OCC** (TEV lock-bit + read-set validation) — unnecessary while page ownership holds.
-- **Page binning on host** — folding it into the dual-trigger batcher is a future step.
-- Hyper-Q multi-stream, `cudaHostRegister` pinned-DMA.
+- **Cross-column WHERE is scalar-only** for now; grouped cross-column (`GROUP BY dim WHERE other …`) and a
+  non-`u32` filter column are the next SQL increments (see `docs/superpowers/specs/…-richer-sql-grammar-design.md`).
+- **SQL grammar is the analytical subset people type, not full ANSI** — multi-aggregate `SELECT`, projections
+  (returning rows), and SQL-level joins are roadmap items (the `hash_join` + `gather` primitives exist).
+- **Concurrency is single-owner by design** — the lock-free page-ownership model trades concurrent writers /
+  MVCC isolation for zero store atomics; that's a deliberate architecture choice, not a gap.
+- **Transport is plaintext** (TLS wants a vetted library); **no encryption-at-rest** (won't hand-roll crypto).
+- **Per-batch GPU sync (point-op path):** each `execute_batch` blocks on a `cudaStreamSynchronize`;
+  double-buffering / async batches would hide it. HTAP head-of-line blocking between scans and point ops is
+  already fixed (separate queues/threads, GPU separate streams).
+- **Page binning on host** — folding it into the dual-trigger batcher is a future step. Hyper-Q multi-stream
+  and `cudaHostRegister` pinned-DMA remain open.
