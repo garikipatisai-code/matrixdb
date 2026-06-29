@@ -82,6 +82,15 @@ inline std::vector<std::string> matrixparse_tokenize(const std::string& s) {
     return t;
 }
 
+#if defined(MATRIX_USE_CUDA)
+// GPU-3: defined in compute_cuda.cuh (included after this file in the nvcc TU). Reduce a DEVICE/VRAM-
+// resident column's bytes with the cross-checked GPU kernels; the return matches the CPU reducers'
+// encoding so execute_query's DEVICE path is bit-identical to its CPU path.
+inline uint64_t matrix_gpu_reduce_dev_u32(const void* d, size_t n, MatrixPredicate pred, MatrixAggOp op, bool has_filter);
+inline int64_t  matrix_gpu_reduce_dev_i64(const void* d, size_t n, MatrixPredicateI64 pred, MatrixAggOp op, bool has_filter);
+inline double   matrix_gpu_reduce_dev_f64(const void* d, size_t n, MatrixPredicateF64 pred, MatrixAggOp op, bool has_filter);
+#endif
+
 class CPUMockEngine : public ComputeInterface {
 public:
     // host_cap is the RAM budget (bytes) for the tiered catalog; default unbounded so the
@@ -91,7 +100,13 @@ public:
     // cap means no real column ever fits, so no DEVICE decision is emitted (cap==0 == unbounded).
     explicit CPUMockEngine(size_t /*worker_count*/ = 0, std::string wal_path = "",
                            size_t host_cap = SIZE_MAX, SyncPolicy sync = SyncPolicy::SYNC_EACH)
+#if defined(MATRIX_USE_CUDA)
+        // GPU-3: a real device budget + gpu=true cost model makes the DEVICE tier live, so hot analytical
+        // columns promote to VRAM and scan_tiered_column* reduces them in place on the GPU (1 GiB << T4's 16 GB).
+        : tier_mgr_(CostModel(MemoryModel::detect(true), true), /*device_cap=*/(size_t)1 << 30, host_cap)
+#else
         : tier_mgr_(CostModel(MemoryModel::detect(false), false), /*device_cap=*/1, host_cap)
+#endif
         , binned_(MATRIX_BATCH_MAX)
         , scan_column_(MATRIX_SCAN_COLUMN_SIZE) {
         for (size_t i = 0; i < MATRIX_SCAN_COLUMN_SIZE; ++i)
@@ -238,6 +253,17 @@ public:
     }
 
     // Attach (or overwrite) a name for an existing catalog column. Duplicate names: last wins for column_id.
+#if defined(MATRIX_USE_CUDA)
+    // GPU-3: pin a catalog column to DEVICE/VRAM now (deterministic promotion for tests/ops; the heat
+    // brain also promotes hot columns under the device budget). Returns false if the id is unknown.
+    bool pin_device(uint64_t col_id) {
+        auto it = catalog_.find(col_id);
+        if (it == catalog_.end()) return false;
+        it->second->migrate_to(MemorySpace::DEVICE);
+        return true;
+    }
+#endif
+
     void name_column(uint64_t id, const std::string& name) {
         assert(catalog_has(id) && "name_column: unknown column id");
         column_names_[id] = name;
@@ -1335,6 +1361,14 @@ private:
         }
         TieredColumn& col = *it->second;
         tier_mgr_.record_access(col_id, col.size_bytes());          // heat signal
+#if defined(MATRIX_USE_CUDA)
+        if (col.tier() == MemorySpace::DEVICE) {                    // GPU-3: reduce in VRAM, no borrow-down
+            const size_t nvals = col.size_bytes() / sizeof(uint32_t);
+            const uint64_t result = matrix_gpu_reduce_dev_u32(col.device_ptr(), nvals, pred, op, has_filter);
+            maybe_rebalance();
+            return result;
+        }
+#endif
 
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); } // pull SSD->RAM to scan
@@ -1369,6 +1403,14 @@ private:
     int64_t scan_tiered_column_i64(uint64_t col_id, MatrixPredicateI64 pred, MatrixAggOp op, bool has_filter = false) {
         TieredColumn& col = *catalog_.at(col_id);
         tier_mgr_.record_access(col_id, col.size_bytes());
+#if defined(MATRIX_USE_CUDA)
+        if (col.tier() == MemorySpace::DEVICE) {                    // GPU-3: reduce in VRAM, no borrow-down
+            const size_t nvals = col.size_bytes() / sizeof(int64_t);
+            const int64_t result = matrix_gpu_reduce_dev_i64(col.device_ptr(), nvals, pred, op, has_filter);
+            maybe_rebalance();
+            return result;
+        }
+#endif
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
         const int64_t* vals = reinterpret_cast<const int64_t*>(col.host_ptr());
@@ -1387,6 +1429,14 @@ private:
     double scan_tiered_column_f64(uint64_t col_id, MatrixPredicateF64 pred, MatrixAggOp op, bool has_filter = false) {
         TieredColumn& col = *catalog_.at(col_id);
         tier_mgr_.record_access(col_id, col.size_bytes());
+#if defined(MATRIX_USE_CUDA)
+        if (col.tier() == MemorySpace::DEVICE) {                    // GPU-3: reduce in VRAM, no borrow-down
+            const size_t nvals = col.size_bytes() / sizeof(double);
+            const double result = matrix_gpu_reduce_dev_f64(col.device_ptr(), nvals, pred, op, has_filter);
+            maybe_rebalance();
+            return result;
+        }
+#endif
         const MemorySpace home = col.tier();
         if (home != MemorySpace::HOST) { ++cold_borrows_; col.migrate_to(MemorySpace::HOST); }
         const double* vals = reinterpret_cast<const double*>(col.host_ptr());

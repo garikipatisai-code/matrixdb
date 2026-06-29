@@ -16,6 +16,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <cstdint>
 
 #define CUDA_CHECK(call)                                                            \
     do {                                                                           \
@@ -423,6 +425,72 @@ __global__ void matrix_scan_kernel_ipt(const uint32_t* data, size_t n,
     atomicAdd(&block_count, local);
     __syncthreads();
     if (threadIdx.x == 0) atomicAdd(count, block_count);
+}
+
+/**
+ * @brief GPU-3 device-resident scalar reduce. Run the (already cross-checked) predicate kernels over a
+ * catalog column's VRAM bytes and return the SAME bit-encoding as matrix_cpu_reduce_pred / _all, so
+ * CPUMockEngine::execute_query's DEVICE path == its CPU path. Forward-declared in compute_mock.cpp (which
+ * is included before this header in the nvcc TU) and called from scan_tiered_column* when tier()==DEVICE.
+ * Unfiltered (!has_filter) synthesizes an always-true predicate (GE min) to mirror matrix_cpu_reduce_all.
+ * ponytail: an always-true pred drops NaN rows that reduce_all would count — fine for real numeric data
+ * (no NaN in the cross-check); add dedicated unfiltered kernels only if NaN COUNT ever matters.
+ */
+inline uint64_t matrix_gpu_reduce_dev_u32(const void* d_data, size_t n,
+                                          MatrixPredicate pred, MatrixAggOp op, bool has_filter) {
+    const MatrixCmp c = has_filter ? pred.cmp : MatrixCmp::GE;
+    const uint32_t  a = has_filter ? pred.a   : 0u;            // GE 0 == every u32
+    const uint32_t  b = has_filter ? pred.b   : 0u;
+    const uint32_t* d = reinterpret_cast<const uint32_t*>(d_data);
+    unsigned long long* d_out = nullptr; CUDA_CHECK(cudaMalloc(&d_out, sizeof(unsigned long long)));
+    constexpr int TPB = 256, BLOCKS = 1024;
+    if (op == AGG_SUM)      { CUDA_CHECK(cudaMemset(d_out, 0x00, sizeof(*d_out))); matrix_sum_kernel_pred_u32<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out); }
+    else if (op == AGG_MIN) { CUDA_CHECK(cudaMemset(d_out, 0xFF, sizeof(*d_out))); matrix_min_kernel_pred_u32<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out); }
+    else if (op == AGG_MAX) { CUDA_CHECK(cudaMemset(d_out, 0x00, sizeof(*d_out))); matrix_max_kernel_pred_u32<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out); }
+    else                    { CUDA_CHECK(cudaMemset(d_out, 0x00, sizeof(*d_out))); matrix_count_kernel_pred_u32<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out); }
+    CUDA_CHECK(cudaGetLastError());
+    unsigned long long h = 0; CUDA_CHECK(cudaMemcpy(&h, d_out, sizeof(h), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_out));
+    return h;
+}
+inline int64_t matrix_gpu_reduce_dev_i64(const void* d_data, size_t n,
+                                         MatrixPredicateI64 pred, MatrixAggOp op, bool has_filter) {
+    const MatrixCmp  c = has_filter ? pred.cmp : MatrixCmp::GE;
+    const long long  a = has_filter ? pred.a   : INT64_MIN;    // GE INT64_MIN == every i64
+    const long long  b = has_filter ? pred.b   : 0;
+    const long long* d = reinterpret_cast<const long long*>(d_data);
+    long long* d_out = nullptr; CUDA_CHECK(cudaMalloc(&d_out, sizeof(long long)));
+    long long init = (op == AGG_MIN) ? INT64_MAX : (op == AGG_MAX ? INT64_MIN : 0);   // sentinels aren't memset-able
+    CUDA_CHECK(cudaMemcpy(d_out, &init, sizeof(init), cudaMemcpyHostToDevice));
+    constexpr int TPB = 256, BLOCKS = 1024;
+    if (op == AGG_SUM)      matrix_sum_kernel_pred_i64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    else if (op == AGG_MIN) matrix_min_kernel_pred_i64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    else if (op == AGG_MAX) matrix_max_kernel_pred_i64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    else                    matrix_count_kernel_pred_i64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    CUDA_CHECK(cudaGetLastError());
+    long long h = 0; CUDA_CHECK(cudaMemcpy(&h, d_out, sizeof(h), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_out));
+    return static_cast<int64_t>(h);
+}
+inline double matrix_gpu_reduce_dev_f64(const void* d_data, size_t n,
+                                        MatrixPredicateF64 pred, MatrixAggOp op, bool has_filter) {
+    const double inf = std::numeric_limits<double>::infinity();
+    const MatrixCmp c = has_filter ? pred.cmp : MatrixCmp::GE;
+    const double    a = has_filter ? pred.a   : -inf;          // GE -inf == every non-NaN f64
+    const double    b = has_filter ? pred.b   : 0.0;
+    const double*   d = reinterpret_cast<const double*>(d_data);
+    double* d_out = nullptr; CUDA_CHECK(cudaMalloc(&d_out, sizeof(double)));
+    double init = (op == AGG_MIN) ? inf : (op == AGG_MAX ? -inf : 0.0);
+    CUDA_CHECK(cudaMemcpy(d_out, &init, sizeof(init), cudaMemcpyHostToDevice));
+    constexpr int TPB = 256, BLOCKS = 1024;
+    if (op == AGG_SUM)      matrix_sum_kernel_pred_f64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    else if (op == AGG_MIN) matrix_min_kernel_pred_f64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    else if (op == AGG_MAX) matrix_max_kernel_pred_f64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    else                    matrix_count_kernel_pred_f64<<<BLOCKS, TPB>>>(d, n, c, a, b, d_out);
+    CUDA_CHECK(cudaGetLastError());
+    double h = 0; CUDA_CHECK(cudaMemcpy(&h, d_out, sizeof(h), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(d_out));
+    return h;
 }
 
 /**
