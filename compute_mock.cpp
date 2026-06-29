@@ -1166,7 +1166,18 @@ public:
             const std::string ops = up(next());
             const MatrixType ty = column_type(vid);
             out.has_filter = true;
-            if (ops == "BETWEEN") {
+            if (string_dicts_.find(vid) != string_dicts_.end()) {
+                // Dict-encoded string column: compare by equality only (codes are first-appearance ids, not
+                // lexicographic, so ordered ops would be misleading). Encode the (optionally quoted) literal
+                // to its code; an absent literal maps to a no-row code so '=' matches nothing / '!=' all.
+                auto unquote = [](std::string s){ return (s.size() >= 2 && (s.front()=='\'' || s.front()=='"') && s.back()==s.front()) ? s.substr(1, s.size()-2) : s; };
+                if      (ops == "=")  out.cmp = MatrixCmp::EQ;
+                else if (ops == "!=") out.cmp = MatrixCmp::NE;
+                else return MatrixQueryStatus::ERR_PARSE;                       // ordered ops meaningless on string codes
+                const std::string lit = next();
+                if (lit.empty()) return MatrixQueryStatus::ERR_PARSE;
+                out.threshold = string_encode(vid, unquote(lit));
+            } else if (ops == "BETWEEN") {
                 out.cmp = MatrixCmp::BETWEEN;
                 if (!set_bound(ty, out, true, next())) return MatrixQueryStatus::ERR_PARSE;
                 if (up(next()) != "AND")               return MatrixQueryStatus::ERR_PARSE;

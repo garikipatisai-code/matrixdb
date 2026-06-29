@@ -19,6 +19,7 @@ int main() {
     for (size_t i = 0; i < N; ++i) { cats.push_back(names[i % 3]); rev.push_back(static_cast<uint32_t>(i % 100)); }
 
     eng.load_string_column_dict(1, cats);          // col 1 = category (string -> u32 codes, first-class)
+    eng.name_column(1, "category");                // name it so the text parser can resolve it
     eng.load_scan_column(2, rev.data(), rev.size()); // col 2 = revenue (aligned numeric value)
 
     // dict size + encode/decode round-trip + absent literal
@@ -69,6 +70,20 @@ int main() {
         for (uint32_t c = 0; c < 3; ++c) assert(g2[c] == oracle[eng2.string_decode(1, c)] && "restored GROUP BY == oracle");
         std::remove(path.c_str());
         std::printf("[dict persistence] ok\n");
+    }
+
+    // SQL-ish text query with a string literal: WHERE category == 'books' (EQ/NE on the dict-encoded column)
+    {
+        MatrixQuery qp; std::vector<uint64_t> r;
+        assert(eng.parse_query("SELECT COUNT(category) WHERE category = 'books'", qp) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(qp, r) == MatrixQueryStatus::OK && r[0] == books_oracle);
+        MatrixQuery qn; std::vector<uint64_t> rn;
+        assert(eng.parse_query("SELECT COUNT(category) WHERE category != 'books'", qn) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(qn, rn) == MatrixQueryStatus::OK && rn[0] == N - books_oracle);
+        MatrixQuery qz; std::vector<uint64_t> rz;   // absent literal -> matches nothing
+        assert(eng.parse_query("SELECT COUNT(category) WHERE category = 'absent'", qz) == MatrixQueryStatus::OK);
+        assert(eng.execute_query(qz, rz) == MatrixQueryStatus::OK && rz[0] == 0);
+        std::printf("[parse string literal] ok (= %llu, != %llu)\n", (unsigned long long)r[0], (unsigned long long)rn[0]);
     }
 
     std::printf("ALL STRING-DICT TESTS PASSED\n");
