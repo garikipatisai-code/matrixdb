@@ -478,6 +478,56 @@ inline double matrix_cpu_reduce_filtered_by_f64(const uint32_t* f, const MatrixP
     }
 }
 
+// --- Grouped cross-column reduce: GROUP BY `keys`, aggregate `values`, over rows where the u32 filter
+// predicate `fp` holds on a separate aligned column `f` ("SELECT agg(value) WHERE dim <pred> GROUP BY key").
+// Per-group out[] carries the same encoding/sentinels as matrix_cpu_group_reduce[_i64/_f64]. ---
+inline void matrix_cpu_group_reduce_filtered_by(const uint32_t* keys, const uint32_t* f, const MatrixPredicate& fp,
+                                                const uint32_t* values, size_t n, uint32_t num_groups, MatrixAggOp op, uint64_t* out) {
+    for (uint32_t g = 0; g < num_groups; ++g) out[g] = (op == AGG_MIN) ? UINT64_MAX : 0;
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t k = keys[i];
+        if (k >= num_groups || !matrix_pred_match(f[i], fp)) continue;
+        const uint32_t v = values[i];
+        switch (op) {
+            case AGG_SUM: out[k] += v; break;
+            case AGG_MIN: if (v < out[k]) out[k] = v; break;
+            case AGG_MAX: if (v > out[k]) out[k] = v; break;
+            case AGG_COUNT: default: out[k] += 1; break;
+        }
+    }
+}
+inline void matrix_cpu_group_reduce_filtered_by_i64(const uint32_t* keys, const uint32_t* f, const MatrixPredicate& fp,
+                                                    const int64_t* values, size_t n, uint32_t num_groups, MatrixAggOp op, int64_t* out) {
+    for (uint32_t g = 0; g < num_groups; ++g) out[g] = (op == AGG_MIN) ? INT64_MAX : (op == AGG_MAX ? INT64_MIN : 0);
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t k = keys[i];
+        if (k >= num_groups || !matrix_pred_match(f[i], fp)) continue;
+        const int64_t v = values[i];
+        switch (op) {
+            case AGG_SUM: out[k] += v; break;
+            case AGG_MIN: if (v < out[k]) out[k] = v; break;
+            case AGG_MAX: if (v > out[k]) out[k] = v; break;
+            case AGG_COUNT: default: out[k] += 1; break;
+        }
+    }
+}
+inline void matrix_cpu_group_reduce_filtered_by_f64(const uint32_t* keys, const uint32_t* f, const MatrixPredicate& fp,
+                                                    const double* values, size_t n, uint32_t num_groups, MatrixAggOp op, double* out) {
+    const double inf = std::numeric_limits<double>::infinity();
+    for (uint32_t g = 0; g < num_groups; ++g) out[g] = (op == AGG_MIN) ? inf : (op == AGG_MAX ? -inf : 0.0);
+    for (size_t i = 0; i < n; ++i) {
+        const uint32_t k = keys[i];
+        if (k >= num_groups || !matrix_pred_match(f[i], fp)) continue;
+        const double v = values[i];
+        switch (op) {
+            case AGG_SUM: out[k] += v; break;
+            case AGG_MIN: if (v < out[k]) out[k] = v; break;
+            case AGG_MAX: if (v > out[k]) out[k] = v; break;
+            case AGG_COUNT: default: out[k] += 1.0; break;
+        }
+    }
+}
+
 /**
  * @brief Stable counting-sort of a batch by owning page (the "bin in the batcher" step).
  * Fills `binned` with the queries grouped by page — order within a page preserved, so

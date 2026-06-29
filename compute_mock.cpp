@@ -1302,6 +1302,45 @@ private:
         return enc;
     }
 
+    // Grouped cross-column WHERE: GROUP BY key_col, aggregate value_col, over rows where the u32 filter_col
+    // satisfies the predicate. Borrows the distinct columns (key may == filter) to HOST, dispatches by the
+    // value type, writes num_groups encoded results. ponytail: CPU path; a GPU grouped cross-column kernel
+    // is the follow-up (the same-column grouped path already runs on the GPU).
+    void grouped_cross_filter(const MatrixQuery& q, std::vector<uint64_t>& out) {
+        std::vector<std::pair<uint64_t, MemorySpace>> borrowed;
+        auto borrow = [&](uint64_t id) {
+            for (auto& b : borrowed) if (b.first == id) return;   // distinct columns only (key may == filter)
+            TieredColumn& c = *catalog_.at(id);
+            const MemorySpace home = c.tier();
+            borrowed.push_back({id, home});
+            tier_mgr_.record_access(id, c.size_bytes());
+            if (home != MemorySpace::HOST) { ++cold_borrows_; c.migrate_to(MemorySpace::HOST); }
+        };
+        borrow(q.value_col); borrow(q.filter_col); borrow(q.key_col);   // all HOST-resident after this
+        const uint32_t* keys = reinterpret_cast<const uint32_t*>(catalog_.at(q.key_col)->host_ptr());
+        const uint32_t* f    = reinterpret_cast<const uint32_t*>(catalog_.at(q.filter_col)->host_ptr());
+        TieredColumn& vc = *catalog_.at(q.value_col);
+        const size_t n = catalog_.at(q.key_col)->size_bytes() / sizeof(uint32_t);
+        const MatrixPredicate p{q.cmp, q.threshold, q.upper};
+        const uint32_t G = q.num_groups;
+        out.assign(G, 0);
+        const MatrixType vty = column_type(q.value_col);
+        if (vty == MatrixType::I64) {
+            std::vector<int64_t> tmp(G);
+            matrix_cpu_group_reduce_filtered_by_i64(keys, f, p, reinterpret_cast<const int64_t*>(vc.host_ptr()), n, G, q.agg, tmp.data());
+            for (uint32_t g = 0; g < G; ++g) out[g] = static_cast<uint64_t>(tmp[g]);
+        } else if (vty == MatrixType::F64) {
+            std::vector<double> tmp(G);
+            matrix_cpu_group_reduce_filtered_by_f64(keys, f, p, reinterpret_cast<const double*>(vc.host_ptr()), n, G, q.agg, tmp.data());
+            for (uint32_t g = 0; g < G; ++g) out[g] = matrix_bit_cast<uint64_t>(tmp[g]);
+        } else {
+            matrix_cpu_group_reduce_filtered_by(keys, f, p, reinterpret_cast<const uint32_t*>(vc.host_ptr()), n, G, q.agg, out.data());
+        }
+        for (auto it = borrowed.rbegin(); it != borrowed.rend(); ++it)   // return each distinct borrow to its home
+            if (it->second != MemorySpace::HOST) catalog_.at(it->first)->migrate_to(it->second);
+        maybe_rebalance();
+    }
+
     MatrixQueryStatus execute_query_impl(const MatrixQuery& q, std::vector<uint64_t>& out) {
         out.clear();
         if (!catalog_has(q.value_col)) return MatrixQueryStatus::ERR_UNKNOWN_COLUMN;
@@ -1311,6 +1350,18 @@ private:
             if (!catalog_has(q.filter_col) || column_type(q.filter_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
             if (column_rows(q.filter_col) != column_rows(q.value_col)) return MatrixQueryStatus::ERR_INVALID_GROUP;   // misaligned columns
             out.assign(1, scalar_cross_filter(q));
+            return MatrixQueryStatus::OK;
+        }
+        // Grouped cross-column WHERE (v1): GROUP BY a u32 key, aggregate value_col, filter on a different
+        // u32 column. Same validation as the typed grouped paths (key u32, distinct, bounded, aligned).
+        if (q.grouped && q.has_filter && q.filter_col != 0 && q.filter_col != q.value_col) {
+            if (!catalog_has(q.key_col) || q.key_col == q.value_col || q.num_groups == 0) return MatrixQueryStatus::ERR_INVALID_GROUP;
+            if (column_type(q.key_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
+            if (!catalog_has(q.filter_col) || column_type(q.filter_col) != MatrixType::U32) return MatrixQueryStatus::ERR_UNSUPPORTED_TYPE;
+            if (q.num_groups > max_query_groups_) return MatrixQueryStatus::ERR_TOO_MANY_GROUPS;
+            if (column_rows(q.key_col) != column_rows(q.value_col) || column_rows(q.filter_col) != column_rows(q.value_col))
+                return MatrixQueryStatus::ERR_INVALID_GROUP;   // misaligned columns
+            grouped_cross_filter(q, out);
             return MatrixQueryStatus::OK;
         }
         if (column_type(q.value_col) == MatrixType::I64) {

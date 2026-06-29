@@ -151,6 +151,25 @@ int main() {
         std::printf("[cross-column typed] ok (i64=%lld, f64=%g)\n", (long long)s64, sf);
     }
 
+    // grouped cross-column WHERE: GROUP BY one column, filter on ANOTHER, aggregate a third
+    {
+        std::vector<uint32_t> active(N);
+        for (size_t i = 0; i < N; ++i) active[i] = (i % 2 == 0) ? 1u : 0u;   // half the rows active
+        eng.load_scan_column(5, active.data(), N); eng.name_column(5, "active");
+        std::unordered_map<std::string, uint64_t> oracle_active;             // per-category SUM(revenue) over active rows
+        for (size_t i = 0; i < N; ++i) if (active[i] == 1) oracle_active[cats[i]] += rev[i];
+        MatrixQuery q; std::vector<uint64_t> g;
+        assert(eng.parse_query("SELECT SUM(revenue) WHERE active = 1 GROUP BY category", q) == MatrixQueryStatus::OK);
+        assert(q.grouped && q.value_col == eng.column_id("revenue") && q.filter_col == eng.column_id("active")
+               && q.key_col == eng.column_id("category") && "three distinct columns resolved");
+        const uint32_t G = eng.string_dict_size(1);
+        assert(eng.execute_query(q, g) == MatrixQueryStatus::OK && g.size() == G);
+        for (uint32_t c = 0; c < G; ++c) assert(g[c] == oracle_active[eng.string_decode(1, c)] && "grouped cross-column SUM == oracle");
+        std::printf("[grouped cross-column WHERE] ok (active SUM: books=%llu games=%llu music=%llu)\n",
+                    (unsigned long long)g[eng.string_encode(1, "books")], (unsigned long long)g[eng.string_encode(1, "games")],
+                    (unsigned long long)g[eng.string_encode(1, "music")]);
+    }
+
     std::printf("ALL STRING-DICT TESTS PASSED\n");
     return 0;
 }

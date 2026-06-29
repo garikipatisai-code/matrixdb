@@ -12,9 +12,9 @@ So AVG / HAVING / top-N / COUNT(DISTINCT) **already parse** — the real gaps ar
 
 ## Genuine gaps (recommended order)
 
-1. **Cross-column WHERE** — `SELECT SUM(revenue) WHERE region = 'US'` (filter one column, aggregate another). The single biggest real-SQL gap and the natural complement to dict-encoded strings (filter by a string/dim column, aggregate a measure). **← first increment, implemented now (scalar; u32 filter column, value u32/i64/f64).**
-   - Mechanism: `MatrixQuery.filter_col` (0 = filter the value column, preserving today's behavior). A new fused reducer `matrix_cpu_reduce_filtered_by[_i64/_f64](f, pred, a, n, op)` aggregates `a[i]` over rows where the u32 predicate holds on `f[i]`. The parser relaxes "filter col must == select col": any **u32** column may be the filter, and its bound is parsed by *its* type/dict (so a string filter literal Just Works).
-   - **Deferred (next increments):** grouped cross-column (`GROUP BY dim WHERE other <pred> agg(measure)`); a non-u32 filter column (i64/f64 ranges); value-column NULL-awareness on the cross path; the GPU cross-column kernel.
+1. **Cross-column WHERE** — `SELECT SUM(revenue) WHERE region = 'US'` (filter one column, aggregate another). The single biggest real-SQL gap and the natural complement to dict-encoded strings. **← DONE (scalar + grouped; u32 filter column, value u32/i64/f64).**
+   - Mechanism: `MatrixQuery.filter_col` (0 = filter the value column, preserving today's behavior). Fused reducers `matrix_cpu_reduce_filtered_by[_i64/_f64]` (scalar) and `matrix_cpu_group_reduce_filtered_by[_i64/_f64]` (grouped) aggregate the value over rows where the u32 predicate holds on a separate aligned column. The parser relaxes "filter col must == select col": any **u32** column may be the filter, its bound parsed by *its* type/dict (so a string filter literal Just Works), incl. `GROUP BY key WHERE other <pred>`.
+   - **Deferred (next increments):** a non-u32 filter column (i64/f64 ranges); value-column NULL-awareness on the cross path; the GPU cross-column kernel (the same-column scalar/grouped paths already run on the GPU).
 
 2. **Multi-aggregate SELECT** — `SELECT COUNT(*), SUM(x), AVG(y) [WHERE …] [GROUP BY k]`. Returns a result *row* (one value per aggregate; per group when grouped). Build: parse a comma-separated agg-list sharing the WHERE+GROUP BY, run each as its own reduce over the (now possibly cross-column) filter, assemble columns. No new reducer once cross-column WHERE exists.
 
