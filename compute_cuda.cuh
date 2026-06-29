@@ -138,6 +138,7 @@ __global__ void matrix_max_kernel_u32(const uint32_t* data, size_t n,
     __syncthreads();
     if (threadIdx.x == 0) atomicMax(out, blk);
 }
+// Vectorized uint32 scan: each thread loads 4 values per instruction via uint4
 // (LDG.128 = 16 bytes/load). This is the standard memory-bound fix across DL/DB/HPC
 // kernels — more bytes in flight per thread => deeper memory-level parallelism =>
 // closer to peak DRAM bandwidth than the scalar 4-byte load. Requires n % 4 == 0 and

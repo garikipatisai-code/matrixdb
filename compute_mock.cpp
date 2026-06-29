@@ -797,7 +797,7 @@ public:
         if (has_filter) matrix_cpu_group_reduce_f64_pred(keys, vals, n, num_groups, op, pred, tmp.data(), nulls);
         else            matrix_cpu_group_reduce_f64(keys, vals, n, num_groups, op, tmp.data(), nulls);
         out.resize(num_groups);
-        for (uint32_t g = 0; g < num_groups; ++g) out[g] = std::bit_cast<uint64_t>(tmp[g]);
+        for (uint32_t g = 0; g < num_groups; ++g) out[g] = matrix_bit_cast<uint64_t>(tmp[g]);
         if (vh != MemorySpace::HOST) vc.migrate_to(vh);
         if (kh != MemorySpace::HOST) kc.migrate_to(kh);
     }
@@ -864,12 +864,12 @@ public:
         const MatrixType ty = column_type(q.value_col);
         std::vector<double> out(sv.size());
         for (size_t i = 0; i < sv.size(); ++i) {
-            const double sum = (ty == MatrixType::F64) ? std::bit_cast<double>(sv[i])
+            const double sum = (ty == MatrixType::F64) ? matrix_bit_cast<double>(sv[i])
                              : (ty == MatrixType::I64) ? static_cast<double>(static_cast<int64_t>(sv[i]))
                                                        : static_cast<double>(sv[i]);            // U32
             // COUNT is encoded like the column: F64 columns return it as double-bits (execute_query bit_casts
             // the whole F64 result), U32/I64 return a plain integer count.
-            const double count = (ty == MatrixType::F64) ? std::bit_cast<double>(cv[i])
+            const double count = (ty == MatrixType::F64) ? matrix_bit_cast<double>(cv[i])
                                                          : static_cast<double>(cv[i]);
             out[i] = (count != 0.0) ? sum / count : std::numeric_limits<double>::quiet_NaN();
         }
@@ -1124,7 +1124,7 @@ private:
                 return MatrixQueryStatus::OK;
             }
             if (null_masks_.count(q.value_col)) { out.assign(1, scalar_aggregate_nullable(q)); return MatrixQueryStatus::OK; }
-            out.assign(1, std::bit_cast<uint64_t>(
+            out.assign(1, matrix_bit_cast<uint64_t>(
                 scan_tiered_column_f64(q.value_col, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, q.agg, q.has_filter)));
             return MatrixQueryStatus::OK;
         }
@@ -1312,7 +1312,7 @@ private:
             const double r = q.has_filter
                 ? matrix_cpu_reduce_pred_f64(v, nn, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, op, nulls)
                 : matrix_cpu_reduce_all_f64_nullable(v, nn, op, nulls);
-            result = std::bit_cast<uint64_t>(r);
+            result = matrix_bit_cast<uint64_t>(r);
         } else {
             const auto* v = reinterpret_cast<const uint32_t*>(col.host_ptr());
             const size_t nn = col.size_bytes() / sizeof(uint32_t);

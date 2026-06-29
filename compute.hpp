@@ -3,7 +3,19 @@
 #include "types.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
+
+// memcpy-based bit_cast (the well-defined type-pun): identical to std::bit_cast but works under C++17
+// too. The engine packs typed results (double/int64) into a uint64 out vector via this; std::bit_cast
+// would force C++20 on every build, but the GPU/CPU pipeline (main.cpp) compiles under nvcc -std=c++17.
+template <typename To, typename From>
+inline To matrix_bit_cast(const From& src) {
+    static_assert(sizeof(To) == sizeof(From), "matrix_bit_cast requires equal sizes");
+    To dst;
+    std::memcpy(&dst, &src, sizeof(To));
+    return dst;
+}
 
 /**
  * @brief Pure virtual interface defining the compute engine's entry point.

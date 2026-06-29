@@ -45,6 +45,7 @@ int main() {
     assert(col.checksum() == want && "checksum invariant HOST->DEVICE->HOST");
 
     std::printf("PASS: VRAM-promoted column is GPU-scannable and byte-intact "
-                "(gpu_count=%llu cpu_count=%llu)\n", gpu_count, cpu_count);
+                "(gpu_count=%llu cpu_count=%llu)\n",
+                static_cast<unsigned long long>(gpu_count), static_cast<unsigned long long>(cpu_count));
     return 0;
 }
