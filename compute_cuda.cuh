@@ -138,6 +138,89 @@ __global__ void matrix_max_kernel_u32(const uint32_t* data, size_t n,
     __syncthreads();
     if (threadIdx.x == 0) atomicMax(out, blk);
 }
+
+// === GPU-4 (predicates) + GPU-2 (grouped) — ADDITIVE; the GPU-1 threshold kernels above are untouched. ===
+// Device predicate mirroring matrix_pred_match (compute.hpp) so a GPU WHERE matches the CPU's exactly.
+__device__ __forceinline__ bool matrix_pred_match_dev(uint32_t v, MatrixCmp c, uint32_t a, uint32_t b) {
+    switch (c) {
+        case MatrixCmp::GE:      return v >= a;
+        case MatrixCmp::LT:      return v <  a;
+        case MatrixCmp::LE:      return v <= a;
+        case MatrixCmp::EQ:      return v == a;
+        case MatrixCmp::NE:      return v != a;
+        case MatrixCmp::BETWEEN: return v >= a && v <= b;
+        case MatrixCmp::GT:
+        default:                 return v >  a;
+    }
+}
+// GPU-4: predicate-filtered scalar reductions — the general sibling of the GPU-1 threshold kernels.
+// Each == matrix_cpu_reduce_pred(host, n, {cmp,a,b}, op). Sentinels: COUNT/SUM 0, MIN UINT64_MAX, MAX 0
+// (caller pre-inits `out` to the same: cudaMemset 0x00 for COUNT/SUM/MAX, 0xFF for MIN).
+__global__ void matrix_count_kernel_pred_u32(const uint32_t* data, size_t n, MatrixCmp c, uint32_t a, uint32_t b, unsigned long long* out) {
+    __shared__ unsigned long long blk; if (threadIdx.x == 0) blk = 0; __syncthreads();
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_dev(data[i], c, a, b)) ++local;
+    atomicAdd(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, blk);
+}
+__global__ void matrix_sum_kernel_pred_u32(const uint32_t* data, size_t n, MatrixCmp c, uint32_t a, uint32_t b, unsigned long long* out) {
+    __shared__ unsigned long long blk; if (threadIdx.x == 0) blk = 0; __syncthreads();
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_dev(data[i], c, a, b)) local += data[i];
+    atomicAdd(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicAdd(out, blk);
+}
+__global__ void matrix_min_kernel_pred_u32(const uint32_t* data, size_t n, MatrixCmp c, uint32_t a, uint32_t b, unsigned long long* out) {
+    __shared__ unsigned long long blk; if (threadIdx.x == 0) blk = 0xFFFFFFFFFFFFFFFFull; __syncthreads();
+    unsigned long long local = 0xFFFFFFFFFFFFFFFFull;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_dev(data[i], c, a, b) && data[i] < local) local = data[i];
+    atomicMin(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicMin(out, blk);
+}
+__global__ void matrix_max_kernel_pred_u32(const uint32_t* data, size_t n, MatrixCmp c, uint32_t a, uint32_t b, unsigned long long* out) {
+    __shared__ unsigned long long blk; if (threadIdx.x == 0) blk = 0; __syncthreads();
+    unsigned long long local = 0;
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride)
+        if (matrix_pred_match_dev(data[i], c, a, b) && data[i] > local) local = data[i];
+    atomicMax(&blk, local); __syncthreads();
+    if (threadIdx.x == 0) atomicMax(out, blk);
+}
+// GPU-2: grouped reduction — one atomic per row into its dense group slot out[k] (k = keys[i], k < num_groups;
+// out-of-range keys ignored, matching the CPU). Each == matrix_cpu_group_reduce(keys, vals, n, num_groups, op).
+// Caller pre-inits out[num_groups] per op via cudaMemset: COUNT/SUM/MAX -> 0x00, MIN -> 0xFF (UINT64_MAX).
+// ponytail: simple global-atomic per row (correct first); a per-block shared-memory privatized histogram is
+// the contention-reduction follow-up for high group counts.
+__global__ void matrix_group_count_kernel(const uint32_t* keys, size_t n, uint32_t num_groups, unsigned long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups) atomicAdd(&out[k], 1ull);
+    }
+}
+__global__ void matrix_group_sum_kernel(const uint32_t* keys, const uint32_t* vals, size_t n, uint32_t num_groups, unsigned long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups) atomicAdd(&out[k], (unsigned long long)vals[i]);
+    }
+}
+__global__ void matrix_group_min_kernel(const uint32_t* keys, const uint32_t* vals, size_t n, uint32_t num_groups, unsigned long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups) atomicMin(&out[k], (unsigned long long)vals[i]);
+    }
+}
+__global__ void matrix_group_max_kernel(const uint32_t* keys, const uint32_t* vals, size_t n, uint32_t num_groups, unsigned long long* out) {
+    const size_t stride = (size_t)gridDim.x * blockDim.x;
+    for (size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += stride) {
+        const uint32_t k = keys[i]; if (k < num_groups) atomicMax(&out[k], (unsigned long long)vals[i]);
+    }
+}
 // Vectorized uint32 scan: each thread loads 4 values per instruction via uint4
 // (LDG.128 = 16 bytes/load). This is the standard memory-bound fix across DL/DB/HPC
 // kernels — more bytes in flight per thread => deeper memory-level parallelism =>

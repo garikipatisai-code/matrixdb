@@ -69,7 +69,9 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_version.cpp",
            "test_logging.cpp",
            "test_migration_gpu.cpp",
-           "test_gpu_agg.cu"]
+           "test_gpu_agg.cu",
+           "test_gpu_pred.cu",
+           "test_gpu_grouped.cu"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -434,6 +436,20 @@ cells += [
        "gate for GPU-1: green here means the GPU SUM/MIN/MAX can land on `main`."),
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA test_gpu_agg.cu -o test_gpu_agg && ./test_gpu_agg"),
+    md("## 4d. GPU-4 predicate cross-backend proof (needs T4 GPU)\n"
+       "\n"
+       "The GPU predicate-filtered reductions (GE/LT/LE/EQ/NE/BETWEEN, not just `value > threshold`) must "
+       "equal `matrix_cpu_reduce_pred` over the SAME bytes — for every MatrixCmp op x {COUNT,SUM,MIN,MAX} "
+       "plus an empty-match case. Merge gate for GPU-4 (GPU WHERE matches the CPU's exactly)."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_pred.cu -o test_gpu_pred && ./test_gpu_pred"),
+    md("## 4e. GPU-2 grouped cross-backend proof (needs T4 GPU)\n"
+       "\n"
+       "The GPU per-group reduction (one atomic per row into its dense group slot) must equal "
+       "`matrix_cpu_group_reduce` for {COUNT,SUM,MIN,MAX}; the dataset includes out-of-range keys to verify "
+       "both backends ignore them. Merge gate for GPU-2 (GROUP BY on the GPU)."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_grouped.cu -o test_gpu_grouped && ./test_gpu_grouped"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
