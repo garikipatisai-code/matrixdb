@@ -540,6 +540,23 @@ public:
                   || std::fwrite(col.host_ptr(), 1, col.size_bytes(), f) == col.size_bytes());  // raw bytes
             if (home != MemorySpace::HOST) col.migrate_to(home);
         }
+        // Trailing section: the string dictionaries (code -> string) for dict-encoded columns, so a restored
+        // string column decodes (its codes ride the normal column path above). Backward-compatible — old
+        // snapshots simply lack this section and load_catalog's read is EOF-tolerant.
+        if (ok) {
+            const uint64_t ndicts = string_dicts_.size();
+            ok = std::fwrite(&ndicts, sizeof ndicts, 1, f) == 1;
+            for (auto& kv : string_dicts_) {
+                if (!ok) break;
+                const uint64_t did = kv.first, nstr = kv.second.size();
+                ok = std::fwrite(&did, sizeof did, 1, f) == 1 && std::fwrite(&nstr, sizeof nstr, 1, f) == 1;
+                for (const std::string& s : kv.second) {
+                    if (!ok) break;
+                    const uint32_t len = static_cast<uint32_t>(s.size());
+                    ok = std::fwrite(&len, sizeof len, 1, f) == 1 && (len == 0 || std::fwrite(s.data(), 1, len, f) == len);
+                }
+            }
+        }
         std::fclose(f);
         if (!ok) { std::fprintf(stderr, "save_catalog: short write %s\n", path.c_str()); std::abort(); }
     }
@@ -574,6 +591,29 @@ public:
                 ok = false;   // unknown element type -> bad/corrupt snapshot, fail loud below
             }
             if (ok && namelen > 0) name_column(id, nm);   // restore the column's name (DM-2b)
+        }
+        // Trailing string-dictionaries section (EOF-tolerant: a missing section = an old snapshot, fine).
+        if (ok) {
+            uint64_t ndicts = 0;
+            if (std::fread(&ndicts, sizeof ndicts, 1, f) == 1) {   // present -> new format
+                for (uint64_t di = 0; ok && di < ndicts; ++di) {
+                    uint64_t did = 0, nstr = 0;
+                    ok = std::fread(&did, sizeof did, 1, f) == 1 && std::fread(&nstr, sizeof nstr, 1, f) == 1;
+                    if (!ok || nstr > (1ull << 32)) { ok = false; break; }   // sane bound — corrupt guard
+                    std::vector<std::string> dict; dict.reserve(static_cast<size_t>(nstr));
+                    std::unordered_map<std::string, uint32_t> enc;
+                    for (uint64_t si = 0; ok && si < nstr; ++si) {
+                        uint32_t len = 0;
+                        ok = std::fread(&len, sizeof len, 1, f) == 1;
+                        if (!ok || len > (1u << 20)) { ok = false; break; }
+                        std::string s(static_cast<size_t>(len), '\0');
+                        if (len > 0) { ok = std::fread(s.data(), 1, len, f) == len; if (!ok) break; }
+                        enc.emplace(s, static_cast<uint32_t>(dict.size()));
+                        dict.push_back(std::move(s));
+                    }
+                    if (ok) { string_dicts_[did] = std::move(dict); string_encoders_[did] = std::move(enc); }
+                }
+            }
         }
         std::fclose(f);
         if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }

@@ -55,6 +55,22 @@ int main() {
     assert(eng.count_distinct(1) == eng.string_dict_size(1) && "COUNT(DISTINCT) == dict size");
     std::printf("[COUNT DISTINCT string] ok (%llu)\n", (unsigned long long)eng.count_distinct(1));
 
+    // persistence: the dictionary survives save_catalog/load_catalog (codes ride the normal column path)
+    {
+        const std::string path = "/tmp/matrixdb_strdict_test.catalog";
+        eng.save_catalog(path);
+        CPUMockEngine eng2;
+        eng2.load_catalog(path);
+        assert(eng2.string_dict_size(1) == 3 && "dict size survives restart");
+        for (uint32_t c = 0; c < 3; ++c) assert(eng2.string_decode(1, c) == eng.string_decode(1, c) && "decode survives restart");
+        MatrixQuery q2; q2.value_col = 2; q2.agg = AGG_SUM; q2.grouped = true; q2.key_col = 1; q2.num_groups = eng2.string_dict_size(1);
+        std::vector<uint64_t> g2;
+        assert(eng2.execute_query(q2, g2) == MatrixQueryStatus::OK && g2.size() == 3);
+        for (uint32_t c = 0; c < 3; ++c) assert(g2[c] == oracle[eng2.string_decode(1, c)] && "restored GROUP BY == oracle");
+        std::remove(path.c_str());
+        std::printf("[dict persistence] ok\n");
+    }
+
     std::printf("ALL STRING-DICT TESTS PASSED\n");
     return 0;
 }
