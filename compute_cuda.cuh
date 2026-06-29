@@ -268,10 +268,11 @@ __device__ __forceinline__ double atomicMaxDouble(double* addr, double val) {
     } while (assumed != old);
     return __longlong_as_double(old);
 }
-// Native atomicAdd(double*) exists only on arch >= 6.0; nvcc without an explicit -arch can default below
-// that (so even on a T4 the overload is absent at compile time). Provide the standard CAS fallback for
-// arch < 600 (and the host pass) so the double SUM/COUNT kernels compile regardless of the target arch.
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 600
+// Native atomicAdd(double*) exists on arch >= 6.0 and in the host pass; nvcc without an explicit -arch
+// can default the device pass below 6.0, where the overload is absent. Provide the CAS fallback ONLY in
+// that device pass (defined(__CUDA_ARCH__) && < 600) — NOT the host pass, where the native one is already
+// declared (defining it there is the redefinition Colab caught).
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 600
 __device__ __forceinline__ double atomicAdd(double* address, double val) {
     unsigned long long* p = (unsigned long long*)address;
     unsigned long long old = *p, assumed;
