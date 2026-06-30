@@ -126,6 +126,21 @@ int main() {
         assert(has(s, "4\n"));                                          // COUNT(*) == 4
         assert(has(s, "Error:"));                                       // bad lines errored, session continued
         std::cout << "[cli join] ok\n";
+
+        // aggregates over the join: scalar + grouped by the right dimension (decoded labels)
+        std::ostringstream oa; std::istringstream ia(
+            "SELECT SUM(ord_amt) JOIN ord_region = reg_key\n"                       // 10+900+20+950 = 1880
+            "SELECT SUM(ord_amt) JOIN ord_region = reg_key GROUP BY reg_name\n"     // north 30, south 900, east 950
+            "SELECT COUNT(ord_amt) JOIN ord_region = reg_key GROUP BY reg_name\n"   // north 2, south 1, east 1
+            "SELECT MAX(ord_amt) JOIN ord_region = reg_key\n"                       // 950
+            "SELECT AVG(ord_amt) JOIN ord_region = reg_key\n"                       // AVG over a join -> Error
+            ".quit\n");
+        matrix_repl(ia, oa, je); const std::string a = oa.str();
+        assert(has(a, "1880") && has(a, "950"));
+        assert(has(a, "north │ 30") && has(a, "south │ 900") && has(a, "east │ 950"));   // grouped SUM, decoded labels
+        assert(has(a, "north │ 2"));                                                      // grouped COUNT
+        assert(has(a, "Error:"));                                                         // AVG unsupported over a join
+        std::cout << "[cli join-agg] ok\n";
     }
 
     // --- .timing prints per-query elapsed; # lines are comments (skipped, no error) ---

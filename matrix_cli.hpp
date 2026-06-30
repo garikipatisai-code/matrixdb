@@ -13,6 +13,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+#include <map>
+#include <limits>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -61,6 +63,29 @@ inline std::string decode_proj(CPUMockEngine& eng, uint64_t col, uint64_t v) {
     if (eng.string_dict_size(col) > 0) return eng.string_decode(col, static_cast<uint32_t>(v));
     return decode_num(eng, col, v);
 }
+// Reduce gathered (encoded) values by an aggregate, formatted by the column's type. No engine API reduces an
+// arbitrary row subset, so the join-aggregate path reduces here. COUNT ignores type; SUM/MIN/MAX are typed
+// (u32 unsigned, i64 signed via two's-complement, f64 via bit_cast). Empty -> 0.
+inline std::string reduce_vals(CPUMockEngine& eng, uint64_t col, MatrixAggOp agg, const std::vector<uint64_t>& vals) {
+    if (agg == AGG_COUNT) return std::to_string(vals.size());
+    const MatrixType ty = eng.column_type(col);
+    if (ty == MatrixType::F64) {
+        double acc = (agg == AGG_SUM) ? 0.0 : (agg == AGG_MIN ? std::numeric_limits<double>::max() : std::numeric_limits<double>::lowest());
+        for (uint64_t v : vals) { const double d = matrix_bit_cast<double>(v);
+            if (agg == AGG_SUM) acc += d; else if (agg == AGG_MIN) acc = d < acc ? d : acc; else acc = d > acc ? d : acc; }
+        std::ostringstream o; o << (vals.empty() ? 0.0 : acc); return o.str();
+    }
+    if (ty == MatrixType::I64) {
+        int64_t acc = (agg == AGG_SUM) ? 0 : (agg == AGG_MIN ? std::numeric_limits<int64_t>::max() : std::numeric_limits<int64_t>::min());
+        for (uint64_t v : vals) { const int64_t s = static_cast<int64_t>(v);
+            if (agg == AGG_SUM) acc += s; else if (agg == AGG_MIN) acc = s < acc ? s : acc; else acc = s > acc ? s : acc; }
+        return std::to_string(vals.empty() ? int64_t{0} : acc);
+    }
+    uint64_t acc = (agg == AGG_SUM) ? 0 : (agg == AGG_MIN ? std::numeric_limits<uint64_t>::max() : 0);   // u32
+    for (uint64_t v : vals) { const uint64_t u = v & 0xffffffffULL;
+        if (agg == AGG_SUM) acc += u; else if (agg == AGG_MIN) acc = u < acc ? u : acc; else acc = u > acc ? u : acc; }
+    return std::to_string(vals.empty() ? uint64_t{0} : acc);
+}
 
 }  // namespace matrixcli_detail
 
@@ -81,26 +106,59 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         if (eng.string_dict_size(lkey) > 0 || eng.string_dict_size(rkey) > 0) { out << "Error: cannot join on string-dictionary keys (independent code spaces)\n"; return; }
         const MatrixType kt = eng.column_type(lkey);
         if (kt != eng.column_type(rkey) || kt == MatrixType::F64) { out << "Error: join keys must be matching u32 or i64 columns\n"; return; }
-        uint64_t limit = 0;                                 // optional LIMIT n
-        if (ji + 4 < tk.size()) {
-            if (ji + 6 != tk.size() || upper(tk[ji + 4]) != "LIMIT") { out << "Error: could not parse join (trailing tokens)\n"; return; }
-            limit = std::strtoull(tk[ji + 5].c_str(), nullptr, 10);
-        }
+        const size_t ntail = tk.size() - (ji + 4);          // # tokens after rkey (>=0; ji+3 < size guaranteed above)
         std::string sel; for (size_t i = 1; i < ji; ++i) { if (i > 1) sel += ' '; sel += tk[i]; }   // the SELECT list
+
         if (upper(sel).find("COUNT") != std::string::npos && sel.find('*') != std::string::npos) {  // COUNT(*) cardinality
             out << eng.hash_join_count(lkey, rkey) << "\n"; return;
+        }
+        const size_t lp = sel.find('(');
+        if (lp != std::string::npos) {                      // aggregate over the join: AGG(lcol) [GROUP BY rcol]
+            const size_t rp = sel.find(')');
+            if (rp == std::string::npos || rp < lp) { out << "Error: could not parse join aggregate (SELECT AGG(col) JOIN ...)\n"; return; }
+            const std::string aggname = upper(trim(sel.substr(0, lp)));
+            MatrixAggOp agg;
+            if      (aggname == "COUNT") agg = AGG_COUNT;  else if (aggname == "SUM") agg = AGG_SUM;
+            else if (aggname == "MIN")   agg = AGG_MIN;    else if (aggname == "MAX") agg = AGG_MAX;
+            else { out << "Error: join aggregate supports COUNT/SUM/MIN/MAX (not " << aggname << ")\n"; return; }
+            const uint64_t lcol = eng.column_id(trim(sel.substr(lp + 1, rp - lp - 1)));
+            if (lcol == 0) { out << "Error: unknown aggregate column in join\n"; return; }
+            uint64_t gcol = 0;                              // optional GROUP BY <right dimension>
+            if (ntail > 0) {
+                if (ntail != 3 || upper(tk[ji + 4]) != "GROUP" || upper(tk[ji + 5]) != "BY") { out << "Error: could not parse join GROUP BY (... GROUP BY rcol)\n"; return; }
+                gcol = eng.column_id(tk[ji + 6]);
+                if (gcol == 0) { out << "Error: unknown GROUP BY column in join\n"; return; }
+            }
+            const auto pr = (kt == MatrixType::I64) ? eng.hash_join_i64(lkey, rkey) : eng.hash_join(lkey, rkey);
+            std::vector<uint64_t> lrows, rrows; lrows.reserve(pr.size()); rrows.reserve(pr.size());
+            for (const auto& p : pr) { lrows.push_back(p.first); rrows.push_back(p.second); }
+            const std::vector<uint64_t> lv = eng.gather(lcol, lrows);
+            if (gcol == 0) { out << reduce_vals(eng, lcol, agg, lv) << "\n"; return; }   // scalar over the whole join
+            const std::vector<uint64_t> gv = eng.gather(gcol, rrows);                    // grouped by the right dimension
+            std::map<uint64_t, std::vector<uint64_t>> buckets;
+            for (size_t i = 0; i < lv.size(); ++i) buckets[gv[i]].push_back(lv[i]);
+            for (const auto& kv : buckets) {
+                const std::string label = eng.string_dict_size(gcol) > 0 ? eng.string_decode(gcol, static_cast<uint32_t>(kv.first)) : std::to_string(kv.first);
+                out << label << " │ " << reduce_vals(eng, lcol, agg, kv.second) << "\n";
+            }
+            return;
+        }
+        uint64_t limit = 0;                                 // projection: SELECT lcol, rcol [LIMIT n]
+        if (ntail > 0) {
+            if (ntail != 2 || upper(tk[ji + 4]) != "LIMIT") { out << "Error: could not parse join (trailing tokens)\n"; return; }
+            limit = std::strtoull(tk[ji + 5].c_str(), nullptr, 10);
         }
         const size_t comma = sel.find(',');                 // projection: lcol (left) , rcol (right)
         if (comma == std::string::npos) { out << "Error: join projection needs two columns: SELECT lcol, rcol JOIN ...\n"; return; }
         const uint64_t lcol = eng.column_id(trim(sel.substr(0, comma))), rcol = eng.column_id(trim(sel.substr(comma + 1)));
         if (lcol == 0 || rcol == 0) { out << "Error: unknown projected column in join\n"; return; }
-        const auto pairs = (kt == MatrixType::I64) ? eng.hash_join_i64(lkey, rkey) : eng.hash_join(lkey, rkey);
+        const auto pr = (kt == MatrixType::I64) ? eng.hash_join_i64(lkey, rkey) : eng.hash_join(lkey, rkey);
         const size_t cap = limit ? static_cast<size_t>(limit) : 100;
         std::vector<uint64_t> lrows, rrows;
-        for (size_t i = 0; i < pairs.size() && i < cap; ++i) { lrows.push_back(pairs[i].first); rrows.push_back(pairs[i].second); }
+        for (size_t i = 0; i < pr.size() && i < cap; ++i) { lrows.push_back(pr[i].first); rrows.push_back(pr[i].second); }
         const std::vector<uint64_t> lv = eng.gather(lcol, lrows), rv = eng.gather(rcol, rrows);  // one batched gather per side
         for (size_t i = 0; i < lv.size(); ++i) out << decode_proj(eng, lcol, lv[i]) << " │ " << decode_proj(eng, rcol, rv[i]) << "\n";
-        if (pairs.size() > cap) out << "… (" << pairs.size() << " matches, showing " << cap << ")\n";
+        if (pr.size() > cap) out << "… (" << pr.size() << " matches, showing " << cap << ")\n";
         return;
     }
     if (U.find("DISTINCT") != std::string::npos) {
@@ -228,7 +286,8 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
                    "[HAVING agg <op> v | ORDER BY agg DESC LIMIT n]\n"
                    "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
                    "SELECT col [WHERE col <op> v] [LIMIT n]\n"
-                   "joins:    SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]  |  SELECT COUNT(*) JOIN lkey = rkey\n";
+                   "joins:    SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]  |  SELECT COUNT(*) JOIN lkey = rkey\n"
+                   "          SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol]   (aggregate a left measure by a right dimension)\n";
         }
         else if (cmd == ".tables") {
             for (const std::string& t : eng.tables()) out << t << "\n";
