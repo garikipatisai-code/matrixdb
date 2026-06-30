@@ -175,6 +175,19 @@ int main() {
         std::cout << "[cli mode csv] ok\n";
     }
 
+    // --- .mode table: aligned padded columns (post-processed LIST output) ---
+    {
+        std::ostringstream ol; std::istringstream il("SELECT COUNT(amount), SUM(amount) GROUP BY region\n.quit\n");
+        matrix_repl(il, ol, eng);                                    // list (default)
+        std::ostringstream ot; std::istringstream it(".mode table\nSELECT COUNT(amount), SUM(amount) GROUP BY region\n.quit\n");
+        matrix_repl(it, ot, eng);                                    // table
+        const std::string L = ol.str(), T = ot.str();
+        assert(L != T);                                              // alignment changed the layout
+        assert(has(T, "books") && has(T, "30"));                     // data intact
+        assert(T.find("  ") != std::string::npos && L.find("  ") == std::string::npos);   // table pads (2+ spaces); list doesn't
+        std::cout << "[cli mode table] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;

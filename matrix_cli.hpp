@@ -92,9 +92,38 @@ inline AggResult reduce_agg(CPUMockEngine& eng, uint64_t col, MatrixAggOp agg, c
     return { std::to_string(acc), static_cast<double>(acc) };
 }
 
+// Re-align ` │ `-separated output into padded columns (the .mode table renderer). Operates on captured LIST
+// output: a line with the separator is a table row (split into fields), any other line (scalar value, a
+// `… (N rows)` note, an `Error:`) passes through literally. Width = max field byte-length (exact for ASCII;
+// ponytail: a multi-byte field value would over-pad — not handled in v1). All but the last column padded.
+inline void align_table(const std::string& text, std::ostream& out) {
+    const std::string SEP = " │ ";
+    std::vector<std::string> lines; { std::istringstream is(text); std::string ln; while (std::getline(is, ln)) lines.push_back(ln); }
+    std::vector<std::vector<std::string>> cells(lines.size());   // empty = literal pass-through line
+    std::vector<size_t> width;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find(SEP) == std::string::npos) continue;   // scalar / note / error -> literal
+        std::vector<std::string> f; size_t p = 0, q;
+        while ((q = lines[i].find(SEP, p)) != std::string::npos) { f.push_back(lines[i].substr(p, q - p)); p = q + SEP.size(); }
+        f.push_back(lines[i].substr(p));
+        for (size_t c = 0; c < f.size(); ++c) { if (c >= width.size()) width.push_back(0); width[c] = std::max(width[c], f[c].size()); }
+        cells[i] = std::move(f);
+    }
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (cells[i].empty()) { out << lines[i] << "\n"; continue; }
+        const auto& f = cells[i];
+        for (size_t c = 0; c < f.size(); ++c) {
+            if (c) out << SEP;
+            out << f[c];
+            if (c + 1 < f.size()) for (size_t pad = f[c].size(); pad < width[c]; ++pad) out << ' ';   // pad all but the last column
+        }
+        out << "\n";
+    }
+}
+
 }  // namespace matrixcli_detail
 
-enum class OutMode { LIST, CSV };   // .mode — LIST = human (│-separated), CSV = machine-readable (comma)
+enum class OutMode { LIST, CSV, TABLE };   // .mode — LIST = human (│), CSV = comma (pipeable), TABLE = aligned columns
 
 // Route a non-dot line to the right executor and format the result to `out`. Never throws; a query error
 // prints "Error: ..." and returns (the REPL continues).
@@ -306,11 +335,10 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
         const std::string line = trim(raw);
         if (line.empty() || line[0] == '#') continue;       // blank or # comment (lets scripts self-document)
         if (line[0] != '.') {
-            if (!timing) { matrix_cli_run_sql(line, out, eng, mode); continue; }
             const auto t0 = std::chrono::steady_clock::now();
-            matrix_cli_run_sql(line, out, eng, mode);
-            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
-            out << "(" << us << " µs)\n";
+            if (mode == OutMode::TABLE) { std::ostringstream buf; matrix_cli_run_sql(line, buf, eng, OutMode::LIST); align_table(buf.str(), out); }
+            else matrix_cli_run_sql(line, out, eng, mode);
+            if (timing) { const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(); out << "(" << us << " µs)\n"; }
             continue;
         }
 
@@ -319,7 +347,7 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
         if (cmd == ".quit" || cmd == ".exit") break;
         else if (cmd == ".help") {
             out << "commands: .load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader] | "
-                   ".save <file> | .open <file> | .timing on|off | .mode list|csv | .tables | .columns | .stats | .help | .quit\n"
+                   ".save <file> | .open <file> | .timing on|off | .mode list|csv|table | .tables | .columns | .stats | .help | .quit\n"
                    "queries:  SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] "
                    "[HAVING agg <op> v | ORDER BY agg DESC LIMIT n]\n"
                    "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
@@ -390,10 +418,11 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
             out << "timing " << (timing ? "on" : "off") << "\n";
         }
         else if (cmd == ".mode") {
-            if      (tk.size() >= 2 && tk[1] == "csv")  mode = OutMode::CSV;
-            else if (tk.size() >= 2 && tk[1] == "list") mode = OutMode::LIST;
-            else { out << "Error: usage: .mode list|csv\n"; continue; }
-            out << "mode " << (mode == OutMode::CSV ? "csv" : "list") << "\n";
+            if      (tk.size() >= 2 && tk[1] == "csv")   mode = OutMode::CSV;
+            else if (tk.size() >= 2 && tk[1] == "table") mode = OutMode::TABLE;
+            else if (tk.size() >= 2 && tk[1] == "list")  mode = OutMode::LIST;
+            else { out << "Error: usage: .mode list|csv|table\n"; continue; }
+            out << "mode " << (mode == OutMode::CSV ? "csv" : mode == OutMode::TABLE ? "table" : "list") << "\n";
         }
         else out << "Error: unknown command '" << cmd << "' (try .help)\n";
     }
