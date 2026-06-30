@@ -163,8 +163,9 @@ Commands: `.load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader]`, `.sav
 Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] [HAVING agg <op> v | ORDER BY agg DESC LIMIT n]`,
 multi-aggregate `SELECT agg(a), agg(b) …`, `SELECT COUNT(DISTINCT col)`, and projection
 `SELECT col [WHERE col <op> v] [LIMIT n]`. Joins: `SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]` (inner
-equi-join, one column per side — left before the comma, right after; u32/i64 keys) and `SELECT COUNT(*) JOIN
-lkey = rkey`. Malformed input prints a friendly `Error:` line — never crashes.
+equi-join, one column per side — left before the comma, right after; u32/i64 keys), `SELECT COUNT(*) JOIN
+lkey = rkey`, and aggregate-over-join `SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol]` (sum/count/min/max
+a left measure by a right dimension — the star query). Malformed input prints a friendly `Error:` line — never crashes.
 (`matrixdb>` is shown for clarity; the REPL reads plain lines.) A network/server mode and readline history
 are the remaining deferrals.
 
@@ -205,7 +206,7 @@ Each step was decided by a benchmark or a cross-check, not a guess. Notable find
 - **SQL grammar is the analytical subset people type, not full ANSI** — scalar + grouped aggregates,
   predicates (incl. **cross-column WHERE**), **multi-aggregate `SELECT`**, **projections**, and a REPL
   **inner equi-join** (`SELECT a, b JOIN lk = rk` + `COUNT(*)`, u32/i64 keys) are implemented; a cost-based
-  planner, outer/multi-key joins, and aggregates-over-a-join are roadmap items.
+  planner, outer/multi-key joins are roadmap items.
 - **Concurrent serving is reads-parallel, writes-serialized** (single-writer / many-readers via a
   `std::shared_mutex` — `ConcurrentServer`): analytical reads over HOST-resident columns run in parallel
   (verified race-free under ThreadSanitizer), writes serialize, and a read needing a tier borrow escalates

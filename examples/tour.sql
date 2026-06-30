@@ -20,9 +20,10 @@ SELECT SUM(amount) GROUP BY region ORDER BY SUM DESC LIMIT 2
 SELECT SUM(amount) GROUP BY region HAVING SUM > 700
 SELECT COUNT(DISTINCT region)
 
-# --- join each order to its region name, and the join cardinality ---
+# --- join each order to its region name, the join cardinality, and the star query (sum per dimension) ---
 SELECT amount, reg_name JOIN region = reg_key LIMIT 5
 SELECT COUNT(*) JOIN region = reg_key
+SELECT SUM(amount) JOIN region = reg_key GROUP BY reg_name
 
 # --- persistence + engine stats ---
 .stats
