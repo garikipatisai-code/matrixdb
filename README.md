@@ -154,11 +154,13 @@ games
 music
 ```
 
-Commands: `.load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader]`, `.tables`, `.columns`, `.stats`,
-`.help`, `.quit`. Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key]` and
+Commands: `.load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader]`, `.save <file>` / `.open <file>`
+(catalog snapshot, string dictionaries included), `.tables`, `.columns`, `.stats`, `.help`, `.quit`.
+Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] [HAVING agg <op> v | ORDER BY agg DESC LIMIT n]`,
+multi-aggregate `SELECT agg(a), agg(b) …`, `SELECT COUNT(DISTINCT col)`, and projection
 `SELECT col [WHERE col <op> v] [LIMIT n]`. Malformed input prints a friendly `Error:` line — never crashes.
-(`matrixdb>` is shown for clarity; the REPL itself reads plain lines.) Scope is the analytical subset above;
-HAVING / top-N / multi-aggregate `SELECT` / `.save` / a network mode are deferred (the executors exist).
+(`matrixdb>` is shown for clarity; the REPL reads plain lines.) A network/server mode and readline history
+are the remaining deferrals.
 
 ## Test on Google Colab (GPU)
 

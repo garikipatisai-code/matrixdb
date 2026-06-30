@@ -179,8 +179,10 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
         if (cmd == ".quit" || cmd == ".exit") break;
         else if (cmd == ".help") {
             out << "commands: .load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader] | "
-                   ".tables | .columns | .stats | .help | .quit\n"
-                   "queries:  SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key]  |  "
+                   ".save <file> | .open <file> | .tables | .columns | .stats | .help | .quit\n"
+                   "queries:  SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] "
+                   "[HAVING agg <op> v | ORDER BY agg DESC LIMIT n]\n"
+                   "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
                    "SELECT col [WHERE col <op> v] [LIMIT n]\n";
         }
         else if (cmd == ".tables") {
