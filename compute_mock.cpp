@@ -848,6 +848,37 @@ public:
         if (home != MemorySpace::HOST) col.migrate_to(home);
         return out;
     }
+
+    // Row indices where the u32 filter column satisfies the predicate (capped at `limit`, 0 = no cap) —
+    // the filter primitive behind projection. Borrow-and-return like the scans.
+    std::vector<uint64_t> matching_rows(uint64_t filter_col, const MatrixPredicate& pred, uint64_t limit) {
+        TieredColumn& fc = *catalog_.at(filter_col);
+        tier_mgr_.record_access(filter_col, fc.size_bytes());
+        const MemorySpace home = fc.tier();
+        if (home != MemorySpace::HOST) { ++cold_borrows_; fc.migrate_to(MemorySpace::HOST); }
+        const uint32_t* f = reinterpret_cast<const uint32_t*>(fc.host_ptr());
+        const size_t n = fc.size_bytes() / sizeof(uint32_t);
+        std::vector<uint64_t> rows;
+        for (size_t i = 0; i < n; ++i)
+            if (matrix_pred_match(f[i], pred)) { rows.push_back(i); if (limit && rows.size() >= limit) break; }
+        if (home != MemorySpace::HOST) fc.migrate_to(home);
+        return rows;
+    }
+    // Projection: the values of `col_id` for the rows matching an optional u32 filter (else all rows), capped
+    // at `limit` (0 = no cap) — the data behind SELECT col [WHERE fcol <pred>] [LIMIT n]. Values are encoded
+    // like gather (u32 zero-extended; i64/f64 as their 8-byte bit pattern). Composes matching_rows + gather.
+    std::vector<uint64_t> project(uint64_t col_id, bool has_filter, uint64_t filter_col, const MatrixPredicate& pred, uint64_t limit) {
+        std::vector<uint64_t> rows;
+        if (has_filter) {
+            rows = matching_rows(filter_col, pred, limit);
+        } else {
+            const size_t n = column_rows(col_id);
+            const size_t cap = (limit && static_cast<size_t>(limit) < n) ? static_cast<size_t>(limit) : n;
+            rows.reserve(cap);
+            for (size_t i = 0; i < cap; ++i) rows.push_back(i);
+        }
+        return gather(col_id, rows);
+    }
     // GROUP BY key WHERE <predicate> — same double borrow-and-return as grouped_aggregate_where.
     void grouped_aggregate_pred(uint64_t key_id, uint64_t value_id, uint32_t num_groups,
                                 MatrixAggOp op, const MatrixPredicate& pred, std::vector<uint64_t>& out) {
@@ -1112,6 +1143,42 @@ public:
             i = j + 1;
         }
         return results;
+    }
+
+    // Parse + run a PROJECTION query ("SELECT col [WHERE fcol op val [AND val]] [LIMIT n]") -> the values of
+    // `col` for the matching rows (encoded like gather). Distinct from the aggregate forms: a bare column,
+    // no AGG(...). The WHERE predicate reuses parse_query on a synthetic "SELECT COUNT(fcol) WHERE ..." so it
+    // inherits numeric + string-dict / ordered / BETWEEN filters; v1 filters on a u32 column. Empty {} if it
+    // isn't a well-formed projection. ponytail: O(n) row scan behind the filter; a sorted index is the upgrade.
+    std::vector<uint64_t> project_query(const std::string& sql) {
+        const std::vector<std::string> tk = matrixparse_tokenize(sql);
+        auto up = [](std::string s){ for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return s; };
+        if (tk.size() < 2 || up(tk[0]) != "SELECT") return {};
+        if (tk.size() >= 3 && tk[2] == "(") return {};               // an aggregate, not a projection
+        const uint64_t col_id = column_id(tk[1]);
+        if (col_id == 0) return {};
+        uint64_t limit = 0; size_t whereEnd = tk.size();             // [2, whereEnd) is the optional WHERE region
+        for (size_t i = 2; i < tk.size(); ++i) {
+            if (up(tk[i]) == "LIMIT") {
+                if (i + 2 != tk.size()) return {};                   // LIMIT must be the tail: LIMIT n
+                uint64_t nlim = 0; auto [p, ec] = std::from_chars(tk[i + 1].data(), tk[i + 1].data() + tk[i + 1].size(), nlim);
+                if (ec != std::errc{} || p != tk[i + 1].data() + tk[i + 1].size()) return {};
+                limit = nlim; whereEnd = i; break;
+            }
+        }
+        bool has_filter = false; uint64_t fcol_id = 0; MatrixPredicate pred{};
+        if (whereEnd > 2) {
+            if (up(tk[2]) != "WHERE" || tk.size() < 4) return {};
+            fcol_id = column_id(tk[3]);
+            if (fcol_id == 0 || column_type(fcol_id) != MatrixType::U32) return {};   // v1: u32 filter (incl. dict strings)
+            std::string agg = "SELECT COUNT ( " + tk[3] + " )";       // reuse parse_query's WHERE parsing
+            for (size_t i = 2; i < whereEnd; ++i) { agg += ' '; agg += tk[i]; }
+            MatrixQuery q;
+            if (parse_query(agg, q) != MatrixQueryStatus::OK || !q.has_filter) return {};
+            if (column_rows(fcol_id) != column_rows(col_id)) return {};   // misaligned filter / projection columns
+            has_filter = true; pred = MatrixPredicate{q.cmp, q.threshold, q.upper};
+        }
+        return project(col_id, has_filter, fcol_id, pred, limit);
     }
 
     // Parse + run a top-N grouped query string ("SELECT SUM(x) GROUP BY k ORDER BY SUM DESC LIMIT n").

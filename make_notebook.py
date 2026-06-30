@@ -52,6 +52,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_string_columns.cpp",
            "test_string_dict.cpp",
            "test_multi_agg.cpp",
+           "test_projection.cpp",
            "test_nullable.cpp",
            "test_top_groups.cpp",
            "test_having.cpp",
@@ -336,6 +337,12 @@ cells += [
        "per-type handling."),
     code("!clang++ -std=c++20 -O2 test_multi_agg.cpp -o /tmp/tma 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_multi_agg.cpp -o /tmp/tma; /tmp/tma"),
+    md("### Projection (row retrieval)\n"
+       "project_query returns the matching rows' values, not an aggregate (SELECT col [WHERE fcol op val] "
+       "[LIMIT n]) — composing a filter (matching_rows) with gather, and reusing parse_query for the WHERE "
+       "predicate (numeric + string-dict / ordered filters). The non-aggregate query shape."),
+    code("!clang++ -std=c++20 -O2 test_projection.cpp -o /tmp/tproj 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_projection.cpp -o /tmp/tproj; /tmp/tproj"),
     md("### Nullable columns\n"
        "set_column_nulls marks NULL rows; unfiltered scalar aggregates skip them (SQL NULL semantics) — "
        "COUNT counts non-null, SUM/MIN/MAX ignore nulls. A maskless column is unchanged."),

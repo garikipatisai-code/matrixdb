@@ -20,7 +20,10 @@ So AVG / HAVING / top-N / COUNT(DISTINCT) **already parse** — the real gaps ar
 
 3. **Unified `query(sql)` entry** — one SQL door that dispatches to plain/AVG/HAVING/top-N/DISTINCT by inspecting the parsed shape, instead of the caller picking `avg_query` vs `having_query` vs … Pure dispatch over verified methods; low risk, high ergonomics.
 
-4. **Projections** — `SELECT col [WHERE …] [LIMIT n]` (row retrieval, not aggregation). Different result shape (materialize rows); composes with `gather`. Larger; lowest priority.
+4. **Projections** — `SELECT col [WHERE fcol op val] [LIMIT n]` (row retrieval, not aggregation). **← DONE (`project_query`).** Composes `matching_rows` (filter → row indices) with `gather`, reusing `parse_query` for the WHERE predicate (numeric + string-dict / ordered / BETWEEN); v1 filters on a u32 column. The non-aggregate query shape.
+
+## Status (2026-06-29)
+Cross-column WHERE (scalar + grouped), multi-aggregate `SELECT` (`query_multi`), and projections (`project_query`) are all **DONE** + tested. The remaining item — a unified `query()` dispatch entry (#3) — is pure ergonomic sugar over the existing `parse_query`/`avg_query`/`having_query`/`top_query`/`query_multi`/`project_query` doors and is intentionally not built (low value, adds a result-variant type for little gain). The analytical SQL surface is comprehensive; what's beyond is the big-decision tracks (concurrency/MVCC, distributed, TLS) tracked in `PRODUCTION_READINESS.md`.
 
 ## Non-goals (unchanged)
 Joins-in-SQL (the `hash_join` primitive exists; SQL-level join planning is XL), full ANSI SQL, a cost-based optimizer. This roadmap is "the analytical subset people actually type," built as verified increments — not ANSI completeness.
