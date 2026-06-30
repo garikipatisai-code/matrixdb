@@ -16,6 +16,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "logging.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
            "matrix_cli.hpp", "matrixdb_cli.cpp",
+           "matrixdbd.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
            "test_migration.cpp", "test_live_tiering.cpp", "test_aggregations.cpp",
@@ -455,6 +456,13 @@ cells += [
          "|| g++ -std=c++20 -O2 test_cli.cpp -o /tmp/tcli; /tmp/tcli"),
     code("!clang++ -std=c++20 -O1 -fsanitize=address,undefined test_cli_fuzz.cpp -o /tmp/tfuzz 2>/dev/null "
          "|| g++ -std=c++20 -O1 test_cli_fuzz.cpp -o /tmp/tfuzz; /tmp/tfuzz   # 50k+ random lines, never crashes"),
+    md("### Network server (matrixdbd) — compile-check\n"
+       "`matrixdbd.cpp` is the network daemon (GET/PUT/QUERY/HEALTH/STATS over length-prefixed TCP, token "
+       "auth). It's HOST-ONLY to *run* (bind is blocked in the sandbox; the auth+serve path is socketpair-"
+       "tested in test_server_tcp.cpp), so here we just confirm it compiles. See the networked-serving design doc."),
+    code("!clang++ -std=c++20 -O2 -c matrixdbd.cpp -o /tmp/mdbd.o 2>/dev/null "
+         "&& echo 'matrixdbd: COMPILES (run on a real host: ./matrixdbd 7070 --token s3cret)' "
+         "|| echo 'matrixdbd: COMPILE FAILED'"),
     code("!clang++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb 2>/dev/null "
          "|| g++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb\n"
          "!printf 'amount,region\\n10,books\\n900,games\\n20,books\\n950,music\\n' > /tmp/demo.csv\n"

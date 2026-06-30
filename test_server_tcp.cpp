@@ -56,6 +56,23 @@ int main() {
       assert(!framed_read(fd[0]).empty() && "malformed request -> a (bad-request) response, no hang");
       ::close(fd[0]); ::close(fd[1]); }
 
+    // SE-1 over the wire (what matrix_serve_tcp_auth / matrixdbd rely on): a leading token frame
+    // authenticates the connection, then it serves as that principal until EOF.
+    Authenticator auth; auth.add_credential("s3cret", 1);
+    { int fd[2]; assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+      framed_write(fd[0], std::vector<uint8_t>{'s','3','c','r','e','t'});   // token frame -> principal 1
+      const std::vector<uint8_t> qb = matrix_serialize_request(q);
+      framed_write(fd[0], qb);                                              // one request, served as principal 1
+      ::shutdown(fd[0], SHUT_WR);                                           // EOF after it -> serve loop ends
+      assert(matrix_serve_conn_auth(eng, pol, auth, fd[1]) && "authenticated, then served");
+      assert(framed_read(fd[0]) == matrix_serve(eng, pol, 1, qb) && "wire serve == direct serve as principal 1");
+      ::close(fd[0]); ::close(fd[1]); }
+    { int fd[2]; assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);    // bad token -> serve nothing, reject
+      framed_write(fd[0], std::vector<uint8_t>{'n','o','p','e'});
+      ::shutdown(fd[0], SHUT_WR);
+      assert(!matrix_serve_conn_auth(eng, pol, auth, fd[1]) && "unauthenticated connection rejected");
+      ::close(fd[0]); ::close(fd[1]); }
+
     std::cout << "ALL TCP-TRANSPORT TESTS PASSED\n";
     return 0;
 }

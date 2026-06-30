@@ -111,3 +111,26 @@ inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint
         ::close(c);
     }
 }
+
+// Auth-aware accept loop (the realistic production entrypoint): each connection authenticates with a leading
+// token frame (matrix_serve_conn_auth) and then serves as its principal, gated by `policy`. HOST-ONLY — bind
+// is blocked in the build sandbox, so this loop is compile-verified here; the per-connection auth+serve path
+// it relies on (matrix_serve_conn_auth) is runtime-verified over a socketpair in test_server_tcp.cpp.
+// ponytail: one connection at a time (single-owner serve), matching matrix_serve_tcp; a concurrent
+// connection model (thread/pool over execute_query_shared) is the documented next increment, not built here.
+inline int matrix_serve_tcp_auth(CPUMockEngine& eng, const AccessPolicy& policy, const Authenticator& auth,
+                                 uint16_t port, unsigned recv_timeout_ms = 30000) {
+    const int srv = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (srv < 0) return -1;
+    int yes = 1; ::setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof yes);
+    sockaddr_in addr{}; addr.sin_family = AF_INET; addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(port);
+    if (::bind(srv, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0) { ::close(srv); return -1; }
+    if (::listen(srv, 16) != 0) { ::close(srv); return -1; }
+    for (;;) {
+        const int c = ::accept(srv, nullptr, nullptr);
+        if (c < 0) continue;
+        if (recv_timeout_ms) { matrix_set_recv_timeout(c, recv_timeout_ms); matrix_set_send_timeout(c, recv_timeout_ms); }  // NW-5
+        matrix_serve_conn_auth(eng, policy, auth, c);   // authenticate (token frame) then serve until the peer closes
+        ::close(c);
+    }
+}

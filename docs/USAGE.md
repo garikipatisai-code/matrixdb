@@ -138,6 +138,25 @@ fast; a low-selectivity *random* filter pays a branch-prediction tax. Use `.timi
 queries. (For the standalone CPU-vs-GPU scan-bandwidth thesis — a different, kernel-level benchmark — see
 `README.md`.)
 
+## Networked server (preview)
+
+Besides the local CLI, MatrixDB has a network daemon, **`matrixdbd`**, speaking a length-prefixed
+GET/PUT/QUERY/HEALTH/STATS protocol with token auth:
+
+```sh
+clang++ -std=c++20 -O2 matrixdbd.cpp -o matrixdbd     # or g++
+./matrixdbd 7070 --open mydata.db --token s3cret      # token auth, serving a saved catalog
+./matrixdbd 7070                                       # dev mode: no auth, empty catalog
+```
+
+Clients talk to it with `MatrixClient` (`client.hpp`): `authenticate(token)` then `get`/`put`/`query`.
+
+**Preview status:** the daemon compiles in CI and its per-connection auth + serve path is socketpair-tested,
+but it's **host-only to run** (loopback `bind` is blocked in the build sandbox) and serves **one connection at
+a time**. TLS and concurrent connections are *designed but not built* — for encryption today, terminate TLS at
+a reverse proxy (nginx/Caddy/stunnel) in front of `matrixdbd` on loopback. Full plan + wire-protocol spec:
+`docs/superpowers/specs/2026-06-30-matrixdb-networked-serving-design.md`.
+
 ## Verifying a build
 
 ```sh

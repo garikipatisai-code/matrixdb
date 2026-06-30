@@ -47,8 +47,16 @@ else
     demo="FAIL"; fail=$((fail + 1)); failed="$failed DEMO"
 fi
 
+# matrixdbd (network server) must compile — HOST-ONLY to run (bind is blocked in the sandbox), so this is a
+# compile-verify; the per-connection auth+serve path it relies on is runtime-tested in test_server_tcp.cpp.
+if "$CXX" -std=c++20 -O2 -c matrixdbd.cpp -o "$TMP/mdb_d.o" 2>"$TMP/mdb_d.err"; then
+    server="OK"
+else
+    server="FAIL"; fail=$((fail + 1)); failed="$failed MATRIXDBD"
+fi
+
 echo "-----------------------------------------"
-echo "tests passed: $pass   oracle: $oracle   demo: $demo"
+echo "tests passed: $pass   oracle: $oracle   demo: $demo   matrixdbd: $server"
 if [ "$fail" -eq 0 ]; then
     echo "ALL GREEN ($pass tests + oracle)"
     exit 0

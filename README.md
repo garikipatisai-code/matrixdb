@@ -81,8 +81,9 @@ analytical reduction kernels — scalar/grouped × u32/i64/f64 × filtered/unfil
 **Storage & I/O** — `kv_store.hpp` (point-op hash store), `cold_store.hpp` (SSD WAL), `column_io.hpp`
 (binary column persistence), `csv_ingest.hpp` (CSV ingest).
 
-**Serving & ops** — `server.hpp` (request protocol + auth/authz/audit), `server_tcp.hpp` (TCP adapter),
-`client.hpp` (client driver), `version.hpp`, `logging.hpp`.
+**Serving & ops** — `server.hpp` (request protocol + auth/authz/audit), `server_tcp.hpp` (TCP adapter +
+auth accept loop), `client.hpp` (client driver), `matrixdbd.cpp` (the network server daemon — preview,
+host-only to run), `version.hpp`, `logging.hpp`.
 
 **CLI** — `matrix_cli.hpp` (the testable `matrix_repl` shell: dot-commands + SQL router + decoded output),
 `matrixdb_cli.cpp` (the thin `matrixdb` main).
@@ -217,7 +218,11 @@ Each step was decided by a benchmark or a cross-check, not a guess. Notable find
   v1 limits (deferred): a COLD/DEVICE read escalates rather than running concurrently (wants epoch/snapshot
   reclamation); pure concurrent reads don't accrue tiering heat; the global lock can starve writers under
   sustained reads; GPU-engine concurrency and MVCC isolation are future.
-- **Transport is plaintext** (TLS wants a vetted library); **no encryption-at-rest** (won't hand-roll crypto).
+- **Transport is plaintext** (TLS wants a vetted library — see the networked-serving design doc for the
+  `IoChannel`/TLS seam and a reverse-proxy interim); **no encryption-at-rest** (won't hand-roll crypto). A
+  network daemon (`matrixdbd`) exists as a **preview**: it compiles in CI and the auth+serve path is
+  socketpair-tested, but `bind`/`accept` are host-only (blocked in the sandbox) and connections serve one at
+  a time — concurrency + TLS are designed, not yet built (`docs/superpowers/specs/2026-06-30-matrixdb-networked-serving-design.md`).
 - **Per-batch GPU sync (point-op path):** each `execute_batch` blocks on a `cudaStreamSynchronize`;
   double-buffering / async batches would hide it. HTAP head-of-line blocking between scans and point ops is
   already fixed (separate queues/threads, GPU separate streams).
