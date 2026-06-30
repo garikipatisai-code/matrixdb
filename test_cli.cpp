@@ -91,6 +91,19 @@ int main() {
         std::cout << "[cli distinct/having/topN] ok\n";
     }
 
+    // --- multi-aggregate SELECT (scalar one-row + grouped table; shared eng) ---
+    {
+        std::ostringstream o; std::istringstream i("SELECT COUNT(amount), SUM(amount)\n.quit\n");
+        matrix_repl(i, o, eng); const std::string s = o.str();
+        assert(has(s, "4") && has(s, "1880"));                                  // count 4, sum 1880 on a labeled row
+
+        std::ostringstream o2; std::istringstream i2("SELECT COUNT(amount), SUM(amount) GROUP BY region\n.quit\n");
+        matrix_repl(i2, o2, eng); const std::string g = o2.str();
+        assert(has(g, "books") && has(g, "games") && has(g, "music"));
+        assert(has(g, "books │ 2 │ 30"));                                       // books: count 2, sum 30
+        std::cout << "[cli multi-agg] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;

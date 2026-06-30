@@ -92,6 +92,47 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         for (size_t g = 0; g < a.size(); ++g) out << g << " │ " << a[g] << "\n";   // grouped: numeric group id (string-key decode deferred)
         return;
     }
+    // multi-aggregate: SELECT a, b, c [tail] -> N single-aggregate queries sharing the tail. Run each (keeping
+    // its parsed query for type-correct decoding + its label) and lay out scalar (one labeled row) or grouped
+    // (key │ a │ b │ ... per group). AVG is unsupported in the list (parser-side, like query_multi) -> Error.
+    if (line.find('(') != std::string::npos && line.find(',') != std::string::npos) {
+        const size_t listStart = U.find("SELECT") + 6;
+        size_t cut = std::string::npos;
+        for (const char* kw : {" WHERE", " GROUP", " ORDER"}) { const size_t p = U.find(kw); if (p != std::string::npos) cut = std::min(cut, p); }
+        const std::string list = cut == std::string::npos ? line.substr(listStart) : line.substr(listStart, cut - listStart);
+        const std::string tail = cut == std::string::npos ? std::string{} : line.substr(cut);
+        std::vector<MatrixQuery> qs; std::vector<std::vector<uint64_t>> rs; std::vector<std::string> labels;
+        for (size_t i = 0; i <= list.size();) {
+            const size_t j = list.find(',', i);
+            std::string term = trim(list.substr(i, (j == std::string::npos ? list.size() : j) - i));
+            if (!term.empty()) {
+                MatrixQuery q{}; std::vector<uint64_t> r;
+                if (eng.parse_query("SELECT " + term + tail, q) != MatrixQueryStatus::OK ||
+                    eng.execute_query(q, r) != MatrixQueryStatus::OK) { out << "Error: could not run multi-aggregate query\n"; return; }
+                qs.push_back(q); rs.push_back(std::move(r)); labels.push_back(term);
+            }
+            if (j == std::string::npos) break;
+            i = j + 1;
+        }
+        if (qs.empty()) { out << "Error: empty SELECT list\n"; return; }
+        if (!qs[0].grouped) {                               // one labeled row of scalar aggregates
+            for (size_t c = 0; c < labels.size(); ++c) out << (c ? " │ " : "") << labels[c];
+            out << "\n";
+            for (size_t c = 0; c < rs.size(); ++c) out << (c ? " │ " : "") << decode_agg(eng, qs[c], rs[c].empty() ? 0 : rs[c][0]);
+            out << "\n";
+            return;
+        }
+        const uint64_t key = qs[0].key_col;                 // grouped: key │ agg0 │ agg1 │ ... per group
+        out << "key";
+        for (const std::string& l : labels) out << " │ " << l;
+        out << "\n";
+        for (size_t g = 0; g < rs[0].size(); ++g) {
+            out << (eng.string_dict_size(key) > 0 ? eng.string_decode(key, static_cast<uint32_t>(g)) : std::to_string(g));
+            for (size_t c = 0; c < rs.size(); ++c) out << " │ " << decode_agg(eng, qs[c], rs[c][g]);
+            out << "\n";
+        }
+        return;
+    }
     if (line.find('(') != std::string::npos) {
         MatrixQuery q{};
         if (eng.parse_query(line, q) != MatrixQueryStatus::OK) { out << "Error: could not parse query\n"; return; }
