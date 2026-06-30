@@ -1,9 +1,11 @@
 #pragma once
 // matrixdb CLI/REPL shell — a testable line loop over streams. All logic lives here (pure over the two
 // streams), so test_cli.cpp drives it with std::istringstream / std::ostringstream and matrixdb_cli.cpp is a
-// thin main. Dot-commands (.load/.tables/.columns/.stats/.help/.quit) + a SQL router over the existing
-// engine (avg_query / parse_query+execute_query / project_query) with typed + string-decoded output.
-// No input ever throws: every engine status is checked and failures print a single "Error: ..." line.
+// thin main. Dot-commands: .load / .save / .open / .timing / .tables / .columns / .stats / .help / .quit.
+// SQL router over the existing engine: scalar + grouped aggregates, cross-column WHERE, multi-aggregate,
+// top-N (ORDER BY..LIMIT), HAVING, COUNT(DISTINCT), AVG, projection, and an inner equi-join — all with typed
+// + string-decoded output. Lines starting with '#' are comments. No input ever throws or aborts: every engine
+// status is checked, every abort-prone engine call is pre-guarded, and failures print a single "Error: ..." line.
 #include "compute_mock.cpp"
 #include <fstream>
 #include <istream>
