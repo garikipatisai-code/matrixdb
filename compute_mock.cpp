@@ -1006,6 +1006,88 @@ public:
         return st;
     }
 
+    // NW-2 concurrency: outcome of the lock-free read fast path (below).
+    enum class ReadOutcome { SERVED, NEEDS_EXCLUSIVE };
+
+    // Concurrent read fast-path: serve a QUERY with NO tier side effects (no borrow / heat / rebalance), so
+    // it is safe to run under a shared lock alongside other readers. Serves only fully-valid, all-HOST-
+    // resident, non-null-masked queries it can reduce directly over host_ptr() via the same matrix_cpu_*
+    // reducers as the exclusive path; anything else returns NEEDS_EXCLUSIVE and the caller re-runs it under
+    // the exclusive lock via execute_query (which borrows, validates, and reports proper error statuses).
+    // The SERVED==execute_query equivalence is asserted in test_concurrent_serving.cpp.
+    ReadOutcome execute_query_shared(const MatrixQuery& q, std::vector<uint64_t>& out) {
+        const auto t0 = std::chrono::steady_clock::now();
+        const ReadOutcome r = execute_query_shared_impl(q, out);
+        if (r == ReadOutcome::SERVED)
+            record_query_latency(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - t0).count()));   // NEEDS_EXCLUSIVE: the exclusive re-run records its own latency
+        return r;
+    }
+    // True iff `id` is a registered, HOST-resident column (so a shared-lock read touches only immutable bytes).
+    bool host_resident(uint64_t id) const {
+        auto it = catalog_.find(id);
+        return it != catalog_.end() && it->second->tier() == MemorySpace::HOST;
+    }
+    ReadOutcome execute_query_shared_impl(const MatrixQuery& q, std::vector<uint64_t>& out) {
+        out.clear();
+        if (!host_resident(q.value_col) || null_masks_.count(q.value_col)) return ReadOutcome::NEEDS_EXCLUSIVE;
+        const MatrixType vty = column_type(q.value_col);
+        const void* vp = catalog_.at(q.value_col)->host_ptr();
+        const size_t n = column_rows(q.value_col);
+
+        // scalar cross-column WHERE: filter on a different u32 column
+        if (!q.grouped && q.has_filter && q.filter_col != 0 && q.filter_col != q.value_col) {
+            if (!host_resident(q.filter_col) || column_type(q.filter_col) != MatrixType::U32) return ReadOutcome::NEEDS_EXCLUSIVE;
+            if (column_rows(q.filter_col) != n) return ReadOutcome::NEEDS_EXCLUSIVE;
+            const uint32_t* f = reinterpret_cast<const uint32_t*>(catalog_.at(q.filter_col)->host_ptr());
+            const MatrixPredicate p{q.cmp, q.threshold, q.upper};
+            if (vty == MatrixType::I64)      out.assign(1, static_cast<uint64_t>(matrix_cpu_reduce_filtered_by_i64(f, p, reinterpret_cast<const int64_t*>(vp), n, q.agg)));
+            else if (vty == MatrixType::F64) out.assign(1, matrix_bit_cast<uint64_t>(matrix_cpu_reduce_filtered_by_f64(f, p, reinterpret_cast<const double*>(vp), n, q.agg)));
+            else                             out.assign(1, matrix_cpu_reduce_filtered_by(f, p, reinterpret_cast<const uint32_t*>(vp), n, q.agg));
+            return ReadOutcome::SERVED;
+        }
+        if (q.grouped && q.has_filter && q.filter_col != 0 && q.filter_col != q.value_col)
+            return ReadOutcome::NEEDS_EXCLUSIVE;   // grouped cross-column: defer to the exclusive path
+
+        // grouped (key must be a registered, HOST, u32 column distinct from value, valid group count, aligned)
+        if (q.grouped) {
+            if (!host_resident(q.key_col) || q.key_col == q.value_col || q.num_groups == 0
+                || q.num_groups > max_query_groups_ || column_type(q.key_col) != MatrixType::U32
+                || column_rows(q.key_col) != n) return ReadOutcome::NEEDS_EXCLUSIVE;
+            const uint32_t* keys = reinterpret_cast<const uint32_t*>(catalog_.at(q.key_col)->host_ptr());
+            const uint32_t G = q.num_groups;
+            out.assign(G, 0);
+            if (vty == MatrixType::I64) {
+                std::vector<int64_t> tmp(G);
+                if (q.has_filter) matrix_cpu_group_reduce_i64_pred(keys, reinterpret_cast<const int64_t*>(vp), n, G, q.agg, MatrixPredicateI64{q.cmp, q.lo_i64, q.hi_i64}, tmp.data());
+                else              matrix_cpu_group_reduce_i64(keys, reinterpret_cast<const int64_t*>(vp), n, G, q.agg, tmp.data());
+                for (uint32_t g = 0; g < G; ++g) out[g] = static_cast<uint64_t>(tmp[g]);
+            } else if (vty == MatrixType::F64) {
+                std::vector<double> tmp(G);
+                if (q.has_filter) matrix_cpu_group_reduce_f64_pred(keys, reinterpret_cast<const double*>(vp), n, G, q.agg, MatrixPredicateF64{q.cmp, q.lo_f64, q.hi_f64}, tmp.data());
+                else              matrix_cpu_group_reduce_f64(keys, reinterpret_cast<const double*>(vp), n, G, q.agg, tmp.data());
+                for (uint32_t g = 0; g < G; ++g) out[g] = matrix_bit_cast<uint64_t>(tmp[g]);
+            } else {
+                if (q.has_filter) matrix_cpu_group_reduce_pred(keys, reinterpret_cast<const uint32_t*>(vp), n, G, q.agg, MatrixPredicate{q.cmp, q.threshold, q.upper}, out.data());
+                else              matrix_cpu_group_reduce(keys, reinterpret_cast<const uint32_t*>(vp), n, G, q.agg, out.data());
+            }
+            return ReadOutcome::SERVED;
+        }
+
+        // scalar (same-column or unfiltered)
+        if (vty == MatrixType::I64) {
+            const MatrixPredicateI64 p{q.cmp, q.lo_i64, q.hi_i64}; const int64_t* v = reinterpret_cast<const int64_t*>(vp);
+            out.assign(1, static_cast<uint64_t>(q.has_filter ? matrix_cpu_reduce_pred_i64(v, n, p, q.agg) : matrix_cpu_reduce_all_i64(v, n, q.agg)));
+        } else if (vty == MatrixType::F64) {
+            const MatrixPredicateF64 p{q.cmp, q.lo_f64, q.hi_f64}; const double* v = reinterpret_cast<const double*>(vp);
+            out.assign(1, matrix_bit_cast<uint64_t>(q.has_filter ? matrix_cpu_reduce_pred_f64(v, n, p, q.agg) : matrix_cpu_reduce_all_f64(v, n, q.agg)));
+        } else {
+            const MatrixPredicate p{q.cmp, q.threshold, q.upper}; const uint32_t* v = reinterpret_cast<const uint32_t*>(vp);
+            out.assign(1, q.has_filter ? matrix_cpu_reduce_pred(v, n, p, q.agg) : matrix_cpu_reduce_all(v, n, q.agg));
+        }
+        return ReadOutcome::SERVED;
+    }
+
     // Top-N groups by aggregate value (ORDER BY agg DESC LIMIT k): run a grouped query, then return the k
     // (group_id, value) pairs with the largest aggregate. The staple "top 10 X by Y" analytical query.
     // ponytail: sorts by the RAW uint64 aggregate — exact for U32-valued groups and COUNT (non-negative);
