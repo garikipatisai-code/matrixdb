@@ -5,6 +5,7 @@
 // engine (avg_query / parse_query+execute_query / project_query) with typed + string-decoded output.
 // No input ever throws: every engine status is checked and failures print a single "Error: ..." line.
 #include "compute_mock.cpp"
+#include <fstream>
 #include <istream>
 #include <ostream>
 #include <sstream>
@@ -154,6 +155,21 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
             eng.name_column(id, name);
             ++next_id;
             out << "loaded " << eng.column_rows(id) << " rows into \"" << name << "\" (" << type << ", col " << col << ")\n";
+        }
+        else if (cmd == ".save") {
+            // catalog snapshot (columns + names + string dictionaries). save_catalog abort()s on fopen
+            // failure, so pre-check writability — a REPL must never abort on user input.
+            if (tk.size() < 2) { out << "Error: usage: .save <file>\n"; continue; }
+            if (!std::ofstream(tk[1]).good()) { out << "Error: cannot write " << tk[1] << "\n"; continue; }
+            eng.save_catalog(tk[1]);
+            out << "saved catalog to " << tk[1] << "\n";
+        }
+        else if (cmd == ".open") {
+            if (tk.size() < 2) { out << "Error: usage: .open <file>\n"; continue; }
+            if (!std::ifstream(tk[1]).good()) { out << "Error: cannot open " << tk[1] << "\n"; continue; }
+            eng.load_catalog(tk[1]);   // ponytail: a *corrupt* snapshot still abort()s inside (CRC/short read); rare, pre-existing
+            for (const ColumnInfo& c : eng.catalog_columns()) if (c.id >= next_id) next_id = c.id + 1;  // don't collide with restored ids
+            out << "opened " << tk[1] << " (" << eng.catalog_columns().size() << " columns)\n";
         }
         else out << "Error: unknown command '" << cmd << "' (try .help)\n";
     }

@@ -62,6 +62,19 @@ int main() {
         std::cout << "[cli queries] ok\n";
     }
 
+    // --- persistence: .save then .open into a fresh engine round-trips; missing file errors (no abort) ---
+    {
+        std::istringstream in1(".load " + csv + " amount u32 col0 header\n.save /tmp/mdb_cli_v2.db\n.quit\n");
+        std::ostringstream o1; CPUMockEngine e1; matrix_repl(in1, o1, e1);
+        assert(has(o1.str(), "saved catalog"));
+        std::istringstream in2(".open /tmp/mdb_cli_v2.db\n.columns\nSELECT SUM(amount)\n.open /tmp/nope_x.db\n.quit\n");
+        std::ostringstream o2; CPUMockEngine e2; const int rc = matrix_repl(in2, o2, e2);
+        const std::string s = o2.str();
+        assert(rc == 0 && has(s, "amount") && has(s, "1880") && has(s, "Error:"));
+        std::remove("/tmp/mdb_cli_v2.db");
+        std::cout << "[cli persist] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;
