@@ -11,6 +11,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "server.hpp",
            "server_tcp.hpp",
            "client.hpp",
+           "concurrent_server.hpp",
            "version.hpp",
            "logging.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
@@ -69,6 +70,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_server_tcp.cpp",
            "test_recv_timeout.cpp",
            "test_client.cpp",
+           "test_concurrent_serving.cpp",
            "test_version.cpp",
            "test_logging.cpp",
            "test_migration_gpu.cpp",
@@ -434,6 +436,13 @@ cells += [
        "direct engine calls. (-pthread)"),
     code("!clang++ -std=c++20 -O2 -pthread test_client.cpp -o /tmp/tcl 2>/dev/null "
          "|| g++ -std=c++20 -O2 -pthread test_client.cpp -o /tmp/tcl; /tmp/tcl"),
+    md("### Concurrent serving (single-writer / many-readers)\n"
+       "ConcurrentServer takes a shared_mutex shared for reads / exclusive for writes; QUERY runs the "
+       "lock-free execute_query_shared fast path (no tier side effects) and escalates to the exclusive "
+       "matrix_serve path only when it needs a borrow. Verified under ThreadSanitizer: concurrent readers + "
+       "mixed read/write are race-free and oracle-correct. (Built with -pthread; also run under TSan.)"),
+    code("!clang++ -std=c++20 -O2 -pthread test_concurrent_serving.cpp -o /tmp/tconc 2>/dev/null "
+         "|| g++ -std=c++20 -O2 -pthread test_concurrent_serving.cpp -o /tmp/tconc; /tmp/tconc"),
     md("### Build version (BP-3)\n"
        "version.hpp carries the semver build version; the engine reports it (string + a packed "
        "major<<32|minor<<16|patch numeric form), and STATS exposes the packed version over the wire so a "

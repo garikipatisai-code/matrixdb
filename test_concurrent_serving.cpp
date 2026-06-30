@@ -2,7 +2,7 @@
 // all-HOST, non-null-masked query it serves the SAME result as execute_query with no tier side effects;
 // for anything it can't serve purely (here: a null-masked column) it returns NEEDS_EXCLUSIVE without
 // mutating. (Tasks 3+ add the concurrent-readers + ConcurrentServer tests.)
-#include "compute_mock.cpp"
+#include "concurrent_server.hpp"   // pulls in server.hpp -> compute_mock.cpp (CPUMockEngine + matrix_serve)
 #include <cassert>
 #include <cstdio>
 #include <cstdint>
@@ -76,6 +76,53 @@ int main() {
         for (auto& t : ts) t.join();
         assert(bad.load() == 0 && "concurrent readers all oracle-correct");
         std::printf("[concurrent readers] ok (8 threads x 200 queries)\n");
+    }
+
+    // ConcurrentServer: mixed concurrent reads + writes through the wire dispatch, correct + race-free (TSan),
+    // plus the escalation path (a query the fast path can't serve -> exclusive matrix_serve).
+    {
+        CPUMockEngine eng4;
+        const size_t M = 1u << 16;
+        std::vector<uint32_t> w(M); for (size_t i = 0; i < M; ++i) w[i] = static_cast<uint32_t>(i % 1000);
+        eng4.load_scan_column(1, w.data(), M);
+        const AccessPolicy pol = AccessPolicy::permissive();
+        ConcurrentServer srv(eng4, pol);
+        uint64_t qoracle = 0; for (uint32_t e : w) if (e > 500) qoracle += e;
+
+        MatrixRequest qreq; qreq.kind = ReqKind::QUERY;
+        qreq.query = MatrixQuery{.value_col = 1, .agg = AGG_SUM, .has_filter = true, .threshold = 500};
+        const std::vector<uint8_t> qbytes = matrix_serialize_request(qreq);
+
+        std::atomic<int> bad{0};
+        auto reader = [&] {
+            for (int r = 0; r < 200; ++r) {
+                MatrixResponse resp;
+                if (!matrix_deserialize_response(srv.serve(qbytes), resp) || resp.status != 0
+                    || resp.results.size() != 1 || resp.results[0] != qoracle) ++bad;
+            }
+        };
+        auto writer = [&] {
+            for (uint64_t k = 0; k < 500; ++k) {
+                MatrixRequest p; p.kind = ReqKind::PUT; p.key = k; p.value = k * 7;
+                MatrixResponse resp;
+                if (!matrix_deserialize_response(srv.serve(matrix_serialize_request(p)), resp) || resp.status != 0) ++bad;
+            }
+        };
+        std::vector<std::thread> ts;
+        for (int t = 0; t < 6; ++t) ts.emplace_back(reader);
+        ts.emplace_back(writer); ts.emplace_back(writer);
+        for (auto& t : ts) t.join();
+        assert(bad.load() == 0 && "ConcurrentServer mixed read/write all correct");
+        uint64_t v = 0; assert(eng4.kv_get(7, v) && v == 49 && "writes landed under exclusive lock");
+        std::printf("[ConcurrentServer mixed read/write] ok (6 readers + 2 writers)\n");
+
+        // escalation: a QUERY the shared fast path can't serve (unknown column) -> NEEDS_EXCLUSIVE -> the
+        // exclusive matrix_serve path -> proper ERR status (proves the escalation dispatch).
+        MatrixRequest ureq; ureq.kind = ReqKind::QUERY; ureq.query = MatrixQuery{.value_col = 999, .agg = AGG_COUNT};
+        MatrixResponse uresp;
+        assert(matrix_deserialize_response(srv.serve(matrix_serialize_request(ureq)), uresp));
+        assert(uresp.status == static_cast<uint32_t>(MatrixQueryStatus::ERR_UNKNOWN_COLUMN) && uresp.results.empty());
+        std::printf("[ConcurrentServer escalation -> exclusive] ok\n");
     }
 
     std::printf("ALL CONCURRENT-SERVING TESTS PASSED\n");
