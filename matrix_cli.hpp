@@ -94,11 +94,14 @@ inline AggResult reduce_agg(CPUMockEngine& eng, uint64_t col, MatrixAggOp agg, c
 
 }  // namespace matrixcli_detail
 
+enum class OutMode { LIST, CSV };   // .mode — LIST = human (│-separated), CSV = machine-readable (comma)
+
 // Route a non-dot line to the right executor and format the result to `out`. Never throws; a query error
 // prints "Error: ..." and returns (the REPL continues).
-inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMockEngine& eng) {
+inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMockEngine& eng, OutMode mode = OutMode::LIST) {
     using namespace matrixcli_detail;
     const std::string U = upper(line);
+    const std::string sep = (mode == OutMode::CSV) ? "," : " │ ";   // .mode csv -> machine-readable field separator
     // Routing, first match wins: JOIN -> COUNT(DISTINCT) -> HAVING -> AVG -> multi-aggregate -> single
     // aggregate (incl. top-N) -> projection. Every branch decodes results by type; a raw code is never printed.
     if (U.find(" JOIN ") != std::string::npos) {            // SELECT lcol, rcol JOIN lk = rk [LIMIT n] | SELECT COUNT(*) JOIN lk = rk
@@ -174,7 +177,7 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
                 std::stable_sort(grows.begin(), grows.end(), [](const GRow& a, const GRow& b){ return a.order > b.order; });
                 if (grows.size() > topn) grows.resize(topn);
             }
-            for (const auto& r : grows) out << r.label << " │ " << r.text << "\n";
+            for (const auto& r : grows) out << r.label << sep << r.text << "\n";
             return;
         }
         uint64_t limit = 0;                                 // projection: SELECT lcol, rcol [LIMIT n]
@@ -191,8 +194,8 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         std::vector<uint64_t> lrows, rrows;
         for (size_t i = 0; i < pr.size() && i < cap; ++i) { lrows.push_back(pr[i].first); rrows.push_back(pr[i].second); }
         const std::vector<uint64_t> lv = eng.gather(lcol, lrows), rv = eng.gather(rcol, rrows);  // one batched gather per side
-        for (size_t i = 0; i < lv.size(); ++i) out << decode_proj(eng, lcol, lv[i]) << " │ " << decode_proj(eng, rcol, rv[i]) << "\n";
-        if (pr.size() > cap) out << "… (" << pr.size() << " matches, showing " << cap << ")\n";
+        for (size_t i = 0; i < lv.size(); ++i) out << decode_proj(eng, lcol, lv[i]) << sep << decode_proj(eng, rcol, rv[i]) << "\n";
+        if (mode == OutMode::LIST && pr.size() > cap) out << "… (" << pr.size() << " matches, showing " << cap << ")\n";
         return;
     }
     if (U.find("DISTINCT") != std::string::npos) {
@@ -209,7 +212,7 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         for (const auto& gv : eng.having_query(line)) {     // (group, value) pairs that pass the HAVING test
             const std::string label = eng.string_dict_size(q.key_col) > 0
                 ? eng.string_decode(q.key_col, static_cast<uint32_t>(gv.first)) : std::to_string(gv.first);
-            out << label << " │ " << decode_agg(eng, q, gv.second) << "\n";
+            out << label << sep << decode_agg(eng, q, gv.second) << "\n";
         }
         return;
     }
@@ -217,7 +220,7 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         const std::vector<double> a = eng.avg_query(line);
         if (a.empty()) { out << "Error: could not run AVG query\n"; return; }
         if (a.size() == 1) { out << a[0] << "\n"; return; }
-        for (size_t g = 0; g < a.size(); ++g) out << g << " │ " << a[g] << "\n";   // grouped: numeric group id (string-key decode deferred)
+        for (size_t g = 0; g < a.size(); ++g) out << g << sep << a[g] << "\n";   // grouped: numeric group id (string-key decode deferred)
         return;
     }
     // multi-aggregate: SELECT a, b, c [tail] -> N single-aggregate queries sharing the tail. Run each (keeping
@@ -244,19 +247,19 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         }
         if (qs.empty()) { out << "Error: empty SELECT list\n"; return; }
         if (!qs[0].grouped) {                               // one labeled row of scalar aggregates
-            for (size_t c = 0; c < labels.size(); ++c) out << (c ? " │ " : "") << labels[c];
+            for (size_t c = 0; c < labels.size(); ++c) out << (c ? sep : "") << labels[c];
             out << "\n";
-            for (size_t c = 0; c < rs.size(); ++c) out << (c ? " │ " : "") << decode_agg(eng, qs[c], rs[c].empty() ? 0 : rs[c][0]);
+            for (size_t c = 0; c < rs.size(); ++c) out << (c ? sep : "") << decode_agg(eng, qs[c], rs[c].empty() ? 0 : rs[c][0]);
             out << "\n";
             return;
         }
         const uint64_t key = qs[0].key_col;                 // grouped: key │ agg0 │ agg1 │ ... per group
         out << "key";
-        for (const std::string& l : labels) out << " │ " << l;
+        for (const std::string& l : labels) out << sep << l;
         out << "\n";
         for (size_t g = 0; g < rs[0].size(); ++g) {
             out << (eng.string_dict_size(key) > 0 ? eng.string_decode(key, static_cast<uint32_t>(g)) : std::to_string(g));
-            for (size_t c = 0; c < rs.size(); ++c) out << " │ " << decode_agg(eng, qs[c], rs[c][g]);
+            for (size_t c = 0; c < rs.size(); ++c) out << sep << decode_agg(eng, qs[c], rs[c][g]);
             out << "\n";
         }
         return;
@@ -270,14 +273,14 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
             for (const auto& gv : eng.top_query(line)) {
                 const std::string label = eng.string_dict_size(q.key_col) > 0
                     ? eng.string_decode(q.key_col, static_cast<uint32_t>(gv.first)) : std::to_string(gv.first);
-                out << label << " │ " << decode_agg(eng, q, gv.second) << "\n";
+                out << label << sep << decode_agg(eng, q, gv.second) << "\n";
             }
             return;
         }
         if (!q.grouped) { out << (o.empty() ? "" : decode_agg(eng, q, o[0])) << "\n"; return; }
         for (uint32_t g = 0; g < o.size(); ++g) {
             const std::string label = eng.string_dict_size(q.key_col) > 0 ? eng.string_decode(q.key_col, g) : std::to_string(g);
-            out << label << " │ " << decode_agg(eng, q, o[g]) << "\n";
+            out << label << sep << decode_agg(eng, q, o[g]) << "\n";
         }
         return;
     }
@@ -288,7 +291,7 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
     const std::vector<uint64_t> o = eng.project_query(line);
     const size_t cap = 100;
     for (size_t i = 0; i < o.size() && i < cap; ++i) out << decode_proj(eng, pcol, o[i]) << "\n";
-    if (o.size() > cap) out << "… (" << o.size() << " rows, showing " << cap << ")\n";
+    if (mode == OutMode::LIST && o.size() > cap) out << "… (" << o.size() << " rows, showing " << cap << ")\n";
 }
 
 // The REPL: read lines from `in`, write results to `out`. CLI-local column-id counter starts at 1 (id 0 is
@@ -297,14 +300,15 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
     using namespace matrixcli_detail;
     uint64_t next_id = 1;
     bool timing = false;                                    // .timing on -> print per-query wall-time
+    OutMode mode = OutMode::LIST;                           // .mode list|csv -> output field separator
     std::string raw;
     while (std::getline(in, raw)) {
         const std::string line = trim(raw);
         if (line.empty() || line[0] == '#') continue;       // blank or # comment (lets scripts self-document)
         if (line[0] != '.') {
-            if (!timing) { matrix_cli_run_sql(line, out, eng); continue; }
+            if (!timing) { matrix_cli_run_sql(line, out, eng, mode); continue; }
             const auto t0 = std::chrono::steady_clock::now();
-            matrix_cli_run_sql(line, out, eng);
+            matrix_cli_run_sql(line, out, eng, mode);
             const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
             out << "(" << us << " µs)\n";
             continue;
@@ -315,7 +319,7 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
         if (cmd == ".quit" || cmd == ".exit") break;
         else if (cmd == ".help") {
             out << "commands: .load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader] | "
-                   ".save <file> | .open <file> | .timing on|off | .tables | .columns | .stats | .help | .quit\n"
+                   ".save <file> | .open <file> | .timing on|off | .mode list|csv | .tables | .columns | .stats | .help | .quit\n"
                    "queries:  SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] "
                    "[HAVING agg <op> v | ORDER BY agg DESC LIMIT n]\n"
                    "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
@@ -384,6 +388,12 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
         else if (cmd == ".timing") {
             timing = !(tk.size() >= 2 && tk[1] == "off");   // ".timing"/".timing on" -> on; ".timing off" -> off
             out << "timing " << (timing ? "on" : "off") << "\n";
+        }
+        else if (cmd == ".mode") {
+            if      (tk.size() >= 2 && tk[1] == "csv")  mode = OutMode::CSV;
+            else if (tk.size() >= 2 && tk[1] == "list") mode = OutMode::LIST;
+            else { out << "Error: usage: .mode list|csv\n"; continue; }
+            out << "mode " << (mode == OutMode::CSV ? "csv" : "list") << "\n";
         }
         else out << "Error: unknown command '" << cmd << "' (try .help)\n";
     }

@@ -164,6 +164,17 @@ int main() {
         std::cout << "[cli timing/comments] ok\n";
     }
 
+    // --- .mode csv emits a machine-readable separator; .mode list restores the human format ---
+    {
+        std::ostringstream o; std::istringstream i(
+            ".mode csv\nSELECT SUM(amount) GROUP BY region\n"
+            ".mode list\nSELECT SUM(amount) GROUP BY region\n.quit\n");
+        matrix_repl(i, o, eng); const std::string s = o.str();
+        assert(has(s, "books,30") && has(s, "music,950"));     // csv rows (region SUM: books 30, music 950)
+        assert(has(s, "books │ 30"));                          // list rows restored
+        std::cout << "[cli mode csv] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;
