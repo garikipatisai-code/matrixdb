@@ -51,6 +51,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_tables.cpp",
            "test_string_columns.cpp",
            "test_string_dict.cpp",
+           "test_multi_agg.cpp",
            "test_nullable.cpp",
            "test_top_groups.cpp",
            "test_having.cpp",
@@ -328,6 +329,13 @@ cells += [
        "and COUNT(DISTINCT) all run through the existing engine (and ride tiering/snapshot/GPU for free)."),
     code("!clang++ -std=c++20 -O2 test_string_dict.cpp -o /tmp/tsdict 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_string_dict.cpp -o /tmp/tsdict; /tmp/tsdict"),
+    md("### Multi-aggregate SELECT\n"
+       "query_multi runs a comma-separated aggregate list in one call (SELECT COUNT(a), SUM(b), MIN(c) "
+       "[WHERE ...] [GROUP BY k]) — one result column per aggregate — by splitting the list and delegating "
+       "each term to the full parser+executor, so it inherits WHERE (incl. cross-column), GROUP BY, and "
+       "per-type handling."),
+    code("!clang++ -std=c++20 -O2 test_multi_agg.cpp -o /tmp/tma 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_multi_agg.cpp -o /tmp/tma; /tmp/tma"),
     md("### Nullable columns\n"
        "set_column_nulls marks NULL rows; unfiltered scalar aggregates skip them (SQL NULL semantics) — "
        "COUNT counts non-null, SUM/MIN/MAX ignore nulls. A maskless column is unchanged."),

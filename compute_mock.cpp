@@ -1074,6 +1074,46 @@ public:
         return average(q);
     }
 
+    // Parse + run a MULTI-aggregate query ("SELECT COUNT(a), SUM(b), MIN(c) [WHERE ...] [GROUP BY k]") ->
+    // one result column per aggregate (scalar: size 1; grouped: size num_groups), each encoded like
+    // execute_query for that aggregate's value type. Splits the comma-separated SELECT list and delegates
+    // each "SELECT agg(col) <shared tail>" to the full parser+executor, so it inherits WHERE (incl.
+    // cross-column / string filters), GROUP BY, and per-type handling for free. Empty {} on any parse/exec
+    // error. ponytail: COUNT/SUM/MIN/MAX only (AVG via avg_query); the SELECT list is literal-free, so the
+    // first WHERE/GROUP/ORDER keyword is the tail boundary and the list splits cleanly on commas.
+    std::vector<std::vector<uint64_t>> query_multi(const std::string& sql) {
+        size_t b = 0; while (b < sql.size() && std::isspace(static_cast<unsigned char>(sql[b]))) ++b;
+        std::string up = sql.substr(b);
+        for (char& c : up) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        if (up.rfind("SELECT", 0) != 0) return {};
+        size_t tail = std::string::npos;                            // first of WHERE/GROUP/ORDER (the tail)
+        for (const char* kw : {" WHERE", " GROUP", " ORDER"}) {
+            const size_t p = up.find(kw, 6);
+            if (p != std::string::npos) tail = std::min(tail, b + p);
+        }
+        const size_t listEnd = (tail == std::string::npos) ? sql.size() : tail;
+        const std::string list = sql.substr(b + 6, listEnd - (b + 6));   // the comma-separated agg list
+        const std::string rest = (tail == std::string::npos) ? std::string{} : sql.substr(tail); // " WHERE ..." etc.
+        std::vector<std::vector<uint64_t>> results;
+        for (size_t i = 0; i <= list.size(); ) {
+            const size_t j = list.find(',', i);
+            std::string term = list.substr(i, (j == std::string::npos ? list.size() : j) - i);
+            size_t t0 = 0, t1 = term.size();                        // trim
+            while (t0 < t1 && std::isspace(static_cast<unsigned char>(term[t0]))) ++t0;
+            while (t1 > t0 && std::isspace(static_cast<unsigned char>(term[t1 - 1]))) --t1;
+            term = term.substr(t0, t1 - t0);
+            if (!term.empty()) {
+                MatrixQuery q; std::vector<uint64_t> r;
+                if (parse_query("SELECT " + term + rest, q) != MatrixQueryStatus::OK) return {};
+                if (execute_query(q, r) != MatrixQueryStatus::OK) return {};
+                results.push_back(std::move(r));
+            }
+            if (j == std::string::npos) break;
+            i = j + 1;
+        }
+        return results;
+    }
+
     // Parse + run a top-N grouped query string ("SELECT SUM(x) GROUP BY k ORDER BY SUM DESC LIMIT n").
     // Returns the (group, value) pairs by value desc; empty on parse error or a query without GROUP BY + LIMIT.
     std::vector<std::pair<uint64_t, uint64_t>> top_query(const std::string& sql) {
