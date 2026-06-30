@@ -75,6 +75,22 @@ int main() {
         std::cout << "[cli persist] ok\n";
     }
 
+    // --- COUNT(DISTINCT), HAVING, top-N (each in a clean session for precise asserts; shared eng) ---
+    {
+        std::ostringstream o; std::istringstream i("SELECT COUNT(DISTINCT region)\n.quit\n");
+        matrix_repl(i, o, eng); assert(has(o.str(), "3"));                       // 3 distinct regions
+
+        std::ostringstream o2; std::istringstream i2("SELECT SUM(amount) GROUP BY region HAVING SUM > 100\n.quit\n");
+        matrix_repl(i2, o2, eng); const std::string h = o2.str();
+        assert(has(h, "games") && has(h, "music") && !has(h, "books"));         // books(30) fails HAVING
+
+        std::ostringstream o3; std::istringstream i3("SELECT SUM(amount) GROUP BY region ORDER BY SUM DESC LIMIT 2\n.quit\n");
+        matrix_repl(i3, o3, eng); const std::string t = o3.str();
+        assert(has(t, "music") && has(t, "games") && !has(t, "books"));         // top 2 by value desc
+        assert(t.substr(0, t.find('\n')).find("music") != std::string::npos);   // largest first (music 950)
+        std::cout << "[cli distinct/having/topN] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;

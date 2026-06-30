@@ -64,8 +64,28 @@ inline std::string decode_proj(CPUMockEngine& eng, uint64_t col, uint64_t v) {
 // prints "Error: ..." and returns (the REPL continues).
 inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMockEngine& eng) {
     using namespace matrixcli_detail;
-    // 1. AVG -> avg_query (doubles). 2. other aggregate (has '(') -> parse+execute. 3. else -> projection.
-    if (upper(line).find("AVG(") != std::string::npos) {
+    const std::string U = upper(line);
+    // Routing, first match wins: COUNT(DISTINCT) -> HAVING -> AVG -> multi-aggregate -> single aggregate
+    // (incl. top-N) -> projection. Every branch decodes results by type; a raw code is never printed.
+    if (U.find("DISTINCT") != std::string::npos) {
+        uint64_t n = 0;
+        if (eng.distinct_query(line, n)) out << n << "\n";
+        else out << "Error: could not run COUNT(DISTINCT) query\n";
+        return;
+    }
+    if (U.find("HAVING") != std::string::npos) {            // SELECT agg(x) GROUP BY k HAVING agg <cmp> v
+        MatrixQuery q{};
+        if (eng.parse_query(line.substr(0, U.find("HAVING")), q) != MatrixQueryStatus::OK) {
+            out << "Error: could not parse HAVING query\n"; return;
+        }
+        for (const auto& gv : eng.having_query(line)) {     // (group, value) pairs that pass the HAVING test
+            const std::string label = eng.string_dict_size(q.key_col) > 0
+                ? eng.string_decode(q.key_col, static_cast<uint32_t>(gv.first)) : std::to_string(gv.first);
+            out << label << " │ " << decode_agg(eng, q, gv.second) << "\n";
+        }
+        return;
+    }
+    if (U.find("AVG(") != std::string::npos) {
         const std::vector<double> a = eng.avg_query(line);
         if (a.empty()) { out << "Error: could not run AVG query\n"; return; }
         if (a.size() == 1) { out << a[0] << "\n"; return; }
@@ -77,6 +97,14 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
         if (eng.parse_query(line, q) != MatrixQueryStatus::OK) { out << "Error: could not parse query\n"; return; }
         std::vector<uint64_t> o;
         if (eng.execute_query(q, o) != MatrixQueryStatus::OK) { out << "Error: query rejected\n"; return; }
+        if (q.grouped && q.limit > 0) {                     // top-N: ORDER BY agg DESC LIMIT n -> sorted (group,value)
+            for (const auto& gv : eng.top_query(line)) {
+                const std::string label = eng.string_dict_size(q.key_col) > 0
+                    ? eng.string_decode(q.key_col, static_cast<uint32_t>(gv.first)) : std::to_string(gv.first);
+                out << label << " │ " << decode_agg(eng, q, gv.second) << "\n";
+            }
+            return;
+        }
         if (!q.grouped) { out << (o.empty() ? "" : decode_agg(eng, q, o[0])) << "\n"; return; }
         for (uint32_t g = 0; g < o.size(); ++g) {
             const std::string label = eng.string_dict_size(q.key_col) > 0 ? eng.string_decode(q.key_col, g) : std::to_string(g);
