@@ -158,7 +158,9 @@ Commands: `.load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader]`, `.sav
 (catalog snapshot, string dictionaries included), `.tables`, `.columns`, `.stats`, `.help`, `.quit`.
 Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] [HAVING agg <op> v | ORDER BY agg DESC LIMIT n]`,
 multi-aggregate `SELECT agg(a), agg(b) …`, `SELECT COUNT(DISTINCT col)`, and projection
-`SELECT col [WHERE col <op> v] [LIMIT n]`. Malformed input prints a friendly `Error:` line — never crashes.
+`SELECT col [WHERE col <op> v] [LIMIT n]`. Joins: `SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]` (inner
+equi-join, one column per side — left before the comma, right after; u32/i64 keys) and `SELECT COUNT(*) JOIN
+lkey = rkey`. Malformed input prints a friendly `Error:` line — never crashes.
 (`matrixdb>` is shown for clarity; the REPL reads plain lines.) A network/server mode and readline history
 are the remaining deferrals.
 
@@ -197,9 +199,9 @@ Each step was decided by a benchmark or a cross-check, not a guess. Notable find
 - **Cross-column WHERE is scalar-only** for now; grouped cross-column (`GROUP BY dim WHERE other …`) and a
   non-`u32` filter column are the next SQL increments (see `docs/superpowers/specs/…-richer-sql-grammar-design.md`).
 - **SQL grammar is the analytical subset people type, not full ANSI** — scalar + grouped aggregates,
-  predicates (incl. **cross-column WHERE**), **multi-aggregate `SELECT`**, and **projections** are
-  implemented; SQL-level joins and a cost-based planner are roadmap items (the `hash_join` + `gather`
-  primitives exist).
+  predicates (incl. **cross-column WHERE**), **multi-aggregate `SELECT`**, **projections**, and a REPL
+  **inner equi-join** (`SELECT a, b JOIN lk = rk` + `COUNT(*)`, u32/i64 keys) are implemented; a cost-based
+  planner, outer/multi-key joins, and aggregates-over-a-join are roadmap items.
 - **Concurrent serving is reads-parallel, writes-serialized** (single-writer / many-readers via a
   `std::shared_mutex` — `ConcurrentServer`): analytical reads over HOST-resident columns run in parallel
   (verified race-free under ThreadSanitizer), writes serialize, and a read needing a tier borrow escalates
