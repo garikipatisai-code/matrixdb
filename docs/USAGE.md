@@ -120,9 +120,23 @@ corrupt or incompatible file produces an `Error:`, never a crash.
 - **No network/TLS in the CLI.** It's a local/single-node tool. (The engine has a GET/PUT/QUERY/STATS server
   protocol + TCP transport + auth, but TLS and a hardened public listener are out of scope here.)
 
-**Performance (measured, see `README.md` / the bench harness):** resident-column scan/aggregate ≈ **10 GB/s
-on CPU**, ≈ **240 GB/s on a Tesla T4 GPU** (~24×); sub-microsecond ingestion handoff (~64 ns); point ops
-≈ 19M ops/s on CPU. Use `.timing on` to see per-query wall-time for your own data and queries.
+**Performance (measured CLI path — reproduce with `./bench_cli.py`).** 8,000,000 rows × 2 `u32` columns
+(71 MB CSV), single thread, warm (min of repeated runs). Absolute numbers are hardware-dependent (measured on
+an Apple-Silicon dev machine); the *shape* is the point, and all of it scales linearly with row count
+(verified 2M ↔ 8M):
+
+| Operation | Time | Notes |
+|---|---|---|
+| Load (CSV → 2 columns) | ~640 ms | ~225 MB/s CSV parse, ~25M values/s; one full file pass per column |
+| `SELECT SUM(amount)` — full scan | ~0.6 ms | memory-bandwidth-bound (~50 GB/s here) |
+| `SELECT SUM(amount) GROUP BY region` — 10 groups | ~7.6 ms | scatter into group buckets (~1B rows/s) |
+| `SELECT COUNT(DISTINCT region)` | ~25 ms | hash set over all rows |
+| `SELECT SUM(amount) WHERE amount > x` — 50/50 predicate | ~40 ms | **branch-misprediction-bound** on a random predicate; a selective or clustered predicate is far cheaper |
+
+Takeaways: ingestion is CSV-parse-bound (~225 MB/s); unfiltered scans/aggregates are memory-bound and very
+fast; a low-selectivity *random* filter pays a branch-prediction tax. Use `.timing on` to measure your own
+queries. (For the standalone CPU-vs-GPU scan-bandwidth thesis — a different, kernel-level benchmark — see
+`README.md`.)
 
 ## Verifying a build
 
