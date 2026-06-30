@@ -44,6 +44,33 @@ inline bool matrix_read_csv_column(const std::string& path, size_t col_index, bo
     return true;
 }
 
+// String sibling of matrix_read_csv_column: keeps the col_index-th field verbatim (no numeric parse), for
+// dictionary-encoded string columns. Graceful false on open failure / short row; tolerates CRLF + a header.
+inline bool matrix_read_csv_column_str(const std::string& path, size_t col_index, bool has_header,
+                                       char delim, std::vector<std::string>& out) {
+    out.clear();
+    std::ifstream in(path);
+    if (!in) return false;
+    std::string line;
+    bool first = true;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();   // tolerate CRLF
+        if (has_header && first) { first = false; continue; }
+        first = false;
+        size_t start = 0, field = 0;
+        while (field < col_index) {
+            size_t comma = line.find(delim, start);
+            if (comma == std::string::npos) { out.clear(); return false; }   // short row
+            start = comma + 1;
+            ++field;
+        }
+        size_t end = line.find(delim, start);
+        if (end == std::string::npos) end = line.size();
+        out.emplace_back(line.substr(start, end - start));
+    }
+    return true;
+}
+
 // int64 sibling of matrix_read_csv_column (DM-3g). Parses the col_index-th field as a signed 64-bit
 // integer via std::from_chars (rejects trailing junk / overflow). Graceful false on any error.
 inline bool matrix_read_csv_column_i64(const std::string& path, size_t col_index, bool has_header,

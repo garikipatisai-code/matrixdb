@@ -57,5 +57,18 @@ static void test_engine_typed_csv() {
     std::cout << "[engine typed csv] ok\n";
 }
 
-int main() { test_csv_i64(); test_csv_f64(); test_engine_typed_csv();
+// String CSV ingest: load_string_column_from_csv -> dictionary-encoded, queryable column.
+static void test_engine_str_csv() {
+    CPUMockEngine eng;
+    std::string ps = wr("mdb_eng_str.csv", "books\ngames\nbooks\nmusic\ngames\nbooks\n");  // 3 distinct / 6 rows
+    assert(eng.load_string_column_from_csv(7, ps, 0));
+    assert(eng.string_dict_size(7) == 3 && eng.count_distinct(7) == 3);
+    assert(eng.column_rows(7) == 6);
+    assert(eng.string_decode(7, 0) == "books" && eng.string_decode(7, 2) == "music");  // sorted => code order lexicographic
+    std::string pb = wr("mdb_eng_str_bad.csv", "a,b\nx\n");   // want col 1 but data row has no col 1 -> short row
+    assert(!eng.load_string_column_from_csv(8, pb, 1, true));
+    std::cout << "[engine str csv] ok\n";
+}
+
+int main() { test_csv_i64(); test_csv_f64(); test_engine_typed_csv(); test_engine_str_csv();
     std::cout << "ALL TYPED-CSV TESTS PASSED\n"; return 0; }

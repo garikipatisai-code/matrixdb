@@ -516,6 +516,17 @@ public:
         return true;
     }
 
+    // String sibling: ingest a string column straight from CSV, dictionary-encoded (see
+    // load_string_column_dict). Same graceful contract: malformed CSV / open failure → false, no catalog
+    // entry, no crash. Completes "strings are first-class, ingestable from CSV".
+    bool load_string_column_from_csv(uint64_t id, const std::string& path, size_t col_index,
+                                     bool has_header = false, char delim = ',') {
+        std::vector<std::string> data;
+        if (!matrix_read_csv_column_str(path, col_index, has_header, delim, data)) return false;
+        load_string_column_dict(id, data);
+        return true;
+    }
+
     // Snapshot every catalog column to `path`: [u32 magic][u64 num_cols] then per column
     // [u64 id][u64 count][count×u32]. Borrows COLD columns to HOST to read, returns them.
     // Fail-loud on I/O error (never leave a half-written snapshot mistaken for valid).
