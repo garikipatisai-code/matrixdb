@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cassert>
 #include <cctype>
@@ -435,7 +436,7 @@ public:
         return EngineStats{ cold_borrows_, rebalances_, migrations_, catalog_.size(),
                             tier_mgr_.resident_bytes(MemorySpace::HOST),
                             tier_mgr_.resident_bytes(MemorySpace::COLD),
-                            query_count_, total_query_ns_, max_query_ns_ };
+                            query_count_.load(), total_query_ns_.load(), max_query_ns_.load() };
     }
 
     // OB-3 health/readiness probe: a ready verdict + the gauges behind it. `ready` is false when any
@@ -448,18 +449,23 @@ public:
 
     // OB-2b: the per-query latency histogram — log2 buckets, bucket b counts queries with latency in
     // ~[2^(b-1), 2^b) ns. Sums to stats().query_count.
-    std::array<uint64_t, 40> query_latency_histogram() const { return latency_hist_; }
+    std::array<uint64_t, 40> query_latency_histogram() const {   // 40 == LAT_BUCKETS (not visible in return-type position)
+        std::array<uint64_t, LAT_BUCKETS> h{};
+        for (int b = 0; b < LAT_BUCKETS; ++b) h[static_cast<size_t>(b)] = latency_hist_[static_cast<size_t>(b)].load(std::memory_order_relaxed);
+        return h;
+    }
     // Estimate the p-th percentile (0..1) query latency in ns from the histogram (bucket-granular —
     // returns ~the bucket's upper bound). p50/p99 are the real ops latency metrics (vs mean/max).
     uint64_t query_latency_percentile_ns(double p) const {
-        if (query_count_ == 0) return 0;
-        const uint64_t target = static_cast<uint64_t>(p * static_cast<double>(query_count_));
+        const uint64_t qc = query_count_.load(std::memory_order_relaxed);
+        if (qc == 0) return 0;
+        const uint64_t target = static_cast<uint64_t>(p * static_cast<double>(qc));
         uint64_t cum = 0;
         for (int b = 0; b < LAT_BUCKETS; ++b) {
-            cum += latency_hist_[static_cast<size_t>(b)];
+            cum += latency_hist_[static_cast<size_t>(b)].load(std::memory_order_relaxed);
             if (cum >= target) return (b == 0) ? 0ull : (1ull << b);
         }
-        return max_query_ns_;
+        return max_query_ns_.load(std::memory_order_relaxed);
     }
 
     // Persist a catalog column (any type) to `path` via the typed file format (borrows to HOST, returns it).
@@ -996,9 +1002,7 @@ public:
         const MatrixQueryStatus st = execute_query_impl(q, out);
         const uint64_t ns = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
-        ++query_count_; total_query_ns_ += ns; if (ns > max_query_ns_) max_query_ns_ = ns;
-        // OB-2b: bucket by floor(log2(ns+1)) (log-scale latency histogram) for percentile estimation.
-        { uint64_t x = ns + 1, b = 0; while (x > 1 && b < LAT_BUCKETS - 1) { x >>= 1; ++b; } ++latency_hist_[b]; }
+        record_query_latency(ns);   // atomic read-path stats; shared with execute_query_shared
         return st;
     }
 
@@ -1836,11 +1840,26 @@ private:
     uint64_t cold_borrows_ = 0;    // observability: COLD->HOST borrows
     uint64_t rebalances_ = 0;      // observability: rebalance passes
     uint64_t migrations_ = 0;      // observability: migration decisions executed
-    uint64_t query_count_ = 0;     // observability: execute_query calls served (OK and ERR)
-    uint64_t total_query_ns_ = 0;  // observability: summed execute_query wall-time (ns)
-    uint64_t max_query_ns_ = 0;    // observability: slowest single execute_query (ns)
+    // Record one query's latency into the (atomic) read-path stats. Shared by execute_query and
+    // execute_query_shared, so it is safe under concurrent readers (relaxed atomics; single-threaded
+    // values are unchanged). OB-2b: bucket by floor(log2(ns+1)) for percentile estimation.
+    void record_query_latency(uint64_t ns) {
+        query_count_.fetch_add(1, std::memory_order_relaxed);
+        total_query_ns_.fetch_add(ns, std::memory_order_relaxed);
+        for (uint64_t cur = max_query_ns_.load(std::memory_order_relaxed);
+             ns > cur && !max_query_ns_.compare_exchange_weak(cur, ns, std::memory_order_relaxed); ) {}
+        uint64_t x = ns + 1, b = 0; while (x > 1 && b < LAT_BUCKETS - 1) { x >>= 1; ++b; }
+        latency_hist_[b].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Read-path stats: bumped by every execute_query / execute_query_shared, so atomic for concurrent
+    // readers (relaxed — heuristics; values are identical single-threaded). All other counters are
+    // exclusive-path-only and stay plain.
+    std::atomic<uint64_t> query_count_{0};     // observability: execute_query calls served (OK and ERR)
+    std::atomic<uint64_t> total_query_ns_{0};  // observability: summed execute_query wall-time (ns)
+    std::atomic<uint64_t> max_query_ns_{0};    // observability: slowest single execute_query (ns)
     static constexpr int LAT_BUCKETS = 40;                  // log2 latency buckets (OB-2b); 2^39 ns ≈ 9 min
-    std::array<uint64_t, LAT_BUCKETS> latency_hist_{};      // per-query latency histogram (bucket = floor(log2(ns+1)))
+    std::array<std::atomic<uint64_t>, LAT_BUCKETS> latency_hist_{};   // per-query latency histogram (bucket = floor(log2(ns+1)))
     std::vector<DatabaseQuery> binned_;                // scratch: batch sorted by page
     std::array<uint32_t, MATRIX_PAGE_COUNT + 1> offsets_{}; // CSR page offsets
     std::vector<uint32_t> scan_column_;                // resident analytical column
