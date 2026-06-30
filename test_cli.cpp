@@ -125,6 +125,14 @@ int main() {
         std::cout << "[cli join] ok\n";
     }
 
+    // --- .timing prints per-query elapsed; # lines are comments (skipped, no error) ---
+    {
+        std::ostringstream o; std::istringstream i("# a comment\n.timing on\nSELECT SUM(amount)\n.quit\n");
+        matrix_repl(i, o, eng); const std::string s = o.str();
+        assert(has(s, "1880") && has(s, "µs)") && !has(s, "Error:"));
+        std::cout << "[cli timing/comments] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;

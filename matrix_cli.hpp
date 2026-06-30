@@ -14,6 +14,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 
 namespace matrixcli_detail {
 
@@ -201,18 +202,26 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
 inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) {
     using namespace matrixcli_detail;
     uint64_t next_id = 1;
+    bool timing = false;                                    // .timing on -> print per-query wall-time
     std::string raw;
     while (std::getline(in, raw)) {
         const std::string line = trim(raw);
-        if (line.empty()) continue;
-        if (line[0] != '.') { matrix_cli_run_sql(line, out, eng); continue; }
+        if (line.empty() || line[0] == '#') continue;       // blank or # comment (lets scripts self-document)
+        if (line[0] != '.') {
+            if (!timing) { matrix_cli_run_sql(line, out, eng); continue; }
+            const auto t0 = std::chrono::steady_clock::now();
+            matrix_cli_run_sql(line, out, eng);
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count();
+            out << "(" << us << " µs)\n";
+            continue;
+        }
 
         const std::vector<std::string> tk = split_ws(line);
         const std::string& cmd = tk[0];
         if (cmd == ".quit" || cmd == ".exit") break;
         else if (cmd == ".help") {
             out << "commands: .load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader] | "
-                   ".save <file> | .open <file> | .tables | .columns | .stats | .help | .quit\n"
+                   ".save <file> | .open <file> | .timing on|off | .tables | .columns | .stats | .help | .quit\n"
                    "queries:  SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] "
                    "[HAVING agg <op> v | ORDER BY agg DESC LIMIT n]\n"
                    "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
@@ -275,6 +284,10 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
             eng.load_catalog(tk[1]);   // ponytail: a *corrupt* snapshot still abort()s inside (CRC/short read); rare, pre-existing
             for (const ColumnInfo& c : eng.catalog_columns()) if (c.id >= next_id) next_id = c.id + 1;  // don't collide with restored ids
             out << "opened " << tk[1] << " (" << eng.catalog_columns().size() << " columns)\n";
+        }
+        else if (cmd == ".timing") {
+            timing = !(tk.size() >= 2 && tk[1] == "off");   // ".timing"/".timing on" -> on; ".timing off" -> off
+            out << "timing " << (timing ? "on" : "off") << "\n";
         }
         else out << "Error: unknown command '" << cmd << "' (try .help)\n";
     }
