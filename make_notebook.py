@@ -73,6 +73,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_client.cpp",
            "test_concurrent_serving.cpp",
            "test_cli.cpp",
+           "test_cli_fuzz.cpp",
            "test_version.cpp",
            "test_logging.cpp",
            "test_migration_gpu.cpp",
@@ -452,6 +453,8 @@ cells += [
        "thin `main`. Below: run the test, then build `matrixdb` and pipe a real `.load`+query session through it."),
     code("!clang++ -std=c++20 -O2 test_cli.cpp -o /tmp/tcli 2>/dev/null "
          "|| g++ -std=c++20 -O2 test_cli.cpp -o /tmp/tcli; /tmp/tcli"),
+    code("!clang++ -std=c++20 -O1 -fsanitize=address,undefined test_cli_fuzz.cpp -o /tmp/tfuzz 2>/dev/null "
+         "|| g++ -std=c++20 -O1 test_cli_fuzz.cpp -o /tmp/tfuzz; /tmp/tfuzz   # 50k+ random lines, never crashes"),
     code("!clang++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb 2>/dev/null "
          "|| g++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb\n"
          "!printf 'amount,region\\n10,books\\n900,games\\n20,books\\n950,music\\n' > /tmp/demo.csv\n"

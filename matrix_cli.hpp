@@ -255,8 +255,8 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
     // multi-aggregate: SELECT a, b, c [tail] -> N single-aggregate queries sharing the tail. Run each (keeping
     // its parsed query for type-correct decoding + its label) and lay out scalar (one labeled row) or grouped
     // (key │ a │ b │ ... per group). AVG is unsupported in the list (parser-side, like query_multi) -> Error.
-    if (line.find('(') != std::string::npos && line.find(',') != std::string::npos) {
-        const size_t listStart = U.find("SELECT") + 6;
+    if (U.rfind("SELECT", 0) == 0 && line.find('(') != std::string::npos && line.find(',') != std::string::npos) {
+        const size_t listStart = 6;   // line is trimmed and starts with SELECT, so the agg list begins at index 6
         size_t cut = std::string::npos;
         for (const char* kw : {" WHERE", " GROUP", " ORDER"}) { const size_t p = U.find(kw); if (p != std::string::npos) cut = std::min(cut, p); }
         const std::string list = cut == std::string::npos ? line.substr(listStart) : line.substr(listStart, cut - listStart);
@@ -383,7 +383,7 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
             for (size_t i = 4; i < tk.size(); ++i) {
                 if (tk[i] == "noheader") header = false;
                 else if (tk[i] == "header") header = true;
-                else if (tk[i].rfind("col", 0) == 0) col = static_cast<size_t>(std::stoul(tk[i].substr(3)));
+                else if (tk[i].rfind("col", 0) == 0) { const std::string d = tk[i].substr(3); std::from_chars(d.data(), d.data() + d.size(), col); }   // non-throwing; bad/empty/overflow -> col unchanged (0)
             }
             const uint64_t id = next_id;
             bool ok = false;
