@@ -104,6 +104,27 @@ int main() {
         std::cout << "[cli multi-agg] ok\n";
     }
 
+    // --- SQL join: orders (region-idx + amount) join regions (key + name) ---
+    {
+        CPUMockEngine je;
+        std::vector<uint32_t> oreg{0,1,0,2}, oamt{10,900,20,950}, rkey{0,1,2};
+        je.load_scan_column(1, oreg.data(), oreg.size()); je.name_column(1, "ord_region");
+        je.load_scan_column(2, oamt.data(), oamt.size()); je.name_column(2, "ord_amt");
+        je.load_scan_column(3, rkey.data(), rkey.size()); je.name_column(3, "reg_key");
+        je.load_string_column_dict(4, {"north","south","east"}); je.name_column(4, "reg_name");
+        std::ostringstream o; std::istringstream i(
+            "SELECT ord_amt, reg_name JOIN ord_region = reg_key\n"     // 4 joined rows, region name decoded
+            "SELECT COUNT(*) JOIN ord_region = reg_key\n"              // cardinality 4
+            "SELECT ord_amt, reg_name JOIN ord_region = reg_name\n"    // dict-string key -> Error
+            "SELECT ord_amt JOIN ord_region = reg_key\n"               // one projected column -> Error
+            ".quit\n");
+        matrix_repl(i, o, je); const std::string s = o.str();
+        assert(has(s, "10 │ north") && has(s, "900 │ south") && has(s, "20 │ north") && has(s, "950 │ east"));
+        assert(has(s, "4\n"));                                          // COUNT(*) == 4
+        assert(has(s, "Error:"));                                       // bad lines errored, session continued
+        std::cout << "[cli join] ok\n";
+    }
+
     std::remove(csv.c_str());
     std::cout << "ALL CLI TESTS PASSED\n";
     return 0;

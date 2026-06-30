@@ -13,6 +13,7 @@
 #include <vector>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 
 namespace matrixcli_detail {
 
@@ -65,8 +66,40 @@ inline std::string decode_proj(CPUMockEngine& eng, uint64_t col, uint64_t v) {
 inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMockEngine& eng) {
     using namespace matrixcli_detail;
     const std::string U = upper(line);
-    // Routing, first match wins: COUNT(DISTINCT) -> HAVING -> AVG -> multi-aggregate -> single aggregate
-    // (incl. top-N) -> projection. Every branch decodes results by type; a raw code is never printed.
+    // Routing, first match wins: JOIN -> COUNT(DISTINCT) -> HAVING -> AVG -> multi-aggregate -> single
+    // aggregate (incl. top-N) -> projection. Every branch decodes results by type; a raw code is never printed.
+    if (U.find(" JOIN ") != std::string::npos) {            // SELECT lcol, rcol JOIN lk = rk [LIMIT n] | SELECT COUNT(*) JOIN lk = rk
+        const std::vector<std::string> tk = split_ws(line);
+        size_t ji = tk.size();
+        for (size_t i = 0; i < tk.size(); ++i) if (upper(tk[i]) == "JOIN") { ji = i; break; }
+        if (ji + 3 >= tk.size() || tk[ji + 2] != "=") { out << "Error: could not parse join (SELECT a, b JOIN lk = rk [LIMIT n])\n"; return; }
+        const uint64_t lkey = eng.column_id(tk[ji + 1]), rkey = eng.column_id(tk[ji + 3]);
+        if (lkey == 0 || rkey == 0) { out << "Error: unknown column in join\n"; return; }
+        if (eng.string_dict_size(lkey) > 0 || eng.string_dict_size(rkey) > 0) { out << "Error: cannot join on string-dictionary keys (independent code spaces)\n"; return; }
+        const MatrixType kt = eng.column_type(lkey);
+        if (kt != eng.column_type(rkey) || kt == MatrixType::F64) { out << "Error: join keys must be matching u32 or i64 columns\n"; return; }
+        uint64_t limit = 0;                                 // optional LIMIT n
+        if (ji + 4 < tk.size()) {
+            if (ji + 6 != tk.size() || upper(tk[ji + 4]) != "LIMIT") { out << "Error: could not parse join (trailing tokens)\n"; return; }
+            limit = std::strtoull(tk[ji + 5].c_str(), nullptr, 10);
+        }
+        std::string sel; for (size_t i = 1; i < ji; ++i) { if (i > 1) sel += ' '; sel += tk[i]; }   // the SELECT list
+        if (upper(sel).find("COUNT") != std::string::npos && sel.find('*') != std::string::npos) {  // COUNT(*) cardinality
+            out << eng.hash_join_count(lkey, rkey) << "\n"; return;
+        }
+        const size_t comma = sel.find(',');                 // projection: lcol (left) , rcol (right)
+        if (comma == std::string::npos) { out << "Error: join projection needs two columns: SELECT lcol, rcol JOIN ...\n"; return; }
+        const uint64_t lcol = eng.column_id(trim(sel.substr(0, comma))), rcol = eng.column_id(trim(sel.substr(comma + 1)));
+        if (lcol == 0 || rcol == 0) { out << "Error: unknown projected column in join\n"; return; }
+        const auto pairs = (kt == MatrixType::I64) ? eng.hash_join_i64(lkey, rkey) : eng.hash_join(lkey, rkey);
+        const size_t cap = limit ? static_cast<size_t>(limit) : 100;
+        std::vector<uint64_t> lrows, rrows;
+        for (size_t i = 0; i < pairs.size() && i < cap; ++i) { lrows.push_back(pairs[i].first); rrows.push_back(pairs[i].second); }
+        const std::vector<uint64_t> lv = eng.gather(lcol, lrows), rv = eng.gather(rcol, rrows);  // one batched gather per side
+        for (size_t i = 0; i < lv.size(); ++i) out << decode_proj(eng, lcol, lv[i]) << " │ " << decode_proj(eng, rcol, rv[i]) << "\n";
+        if (pairs.size() > cap) out << "… (" << pairs.size() << " matches, showing " << cap << ")\n";
+        return;
+    }
     if (U.find("DISTINCT") != std::string::npos) {
         uint64_t n = 0;
         if (eng.distinct_query(line, n)) out << n << "\n";
@@ -183,7 +216,8 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
                    "queries:  SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] "
                    "[HAVING agg <op> v | ORDER BY agg DESC LIMIT n]\n"
                    "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
-                   "SELECT col [WHERE col <op> v] [LIMIT n]\n";
+                   "SELECT col [WHERE col <op> v] [LIMIT n]\n"
+                   "joins:    SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]  |  SELECT COUNT(*) JOIN lkey = rkey\n";
         }
         else if (cmd == ".tables") {
             for (const std::string& t : eng.tables()) out << t << "\n";
