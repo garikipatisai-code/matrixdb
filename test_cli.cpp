@@ -62,15 +62,18 @@ int main() {
         std::cout << "[cli queries] ok\n";
     }
 
-    // --- persistence: .save then .open into a fresh engine round-trips; missing file errors (no abort) ---
+    // --- persistence: .save then .open into a FRESH engine round-trips (incl. the string dictionary);
+    //     .open into a non-empty session errors instead of aborting ---
     {
-        std::istringstream in1(".load " + csv + " amount u32 col0 header\n.save /tmp/mdb_cli_v2.db\n.quit\n");
+        std::istringstream in1(".load " + csv + " amount u32 col0 header\n.load " + csv + " region str col1 header\n.save /tmp/mdb_cli_v2.db\n.quit\n");
         std::ostringstream o1; CPUMockEngine e1; matrix_repl(in1, o1, e1);
         assert(has(o1.str(), "saved catalog"));
-        std::istringstream in2(".open /tmp/mdb_cli_v2.db\n.columns\nSELECT SUM(amount)\n.open /tmp/nope_x.db\n.quit\n");
+        std::istringstream in2(".open /tmp/mdb_cli_v2.db\n.columns\nSELECT SUM(amount)\nSELECT region\n.open /tmp/again.db\n.quit\n");
         std::ostringstream o2; CPUMockEngine e2; const int rc = matrix_repl(in2, o2, e2);
         const std::string s = o2.str();
-        assert(rc == 0 && has(s, "amount") && has(s, "1880") && has(s, "Error:"));
+        assert(rc == 0 && has(s, "amount") && has(s, "region") && has(s, "str"));   // .columns: str column restored
+        assert(has(s, "1880") && has(s, "books"));                                  // SUM + decoded dictionary projection
+        assert(has(s, "Error:"));                                                   // 2nd .open (non-empty) refused, not aborted
         std::remove("/tmp/mdb_cli_v2.db");
         std::cout << "[cli persist] ok\n";
     }

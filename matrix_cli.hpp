@@ -280,6 +280,7 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
         }
         else if (cmd == ".open") {
             if (tk.size() < 2) { out << "Error: usage: .open <file>\n"; continue; }
+            if (!eng.catalog_columns().empty()) { out << "Error: .open needs a fresh session (existing columns would collide) — start a new matrixdb\n"; continue; }
             if (!std::ifstream(tk[1]).good()) { out << "Error: cannot open " << tk[1] << "\n"; continue; }
             eng.load_catalog(tk[1]);   // ponytail: a *corrupt* snapshot still abort()s inside (CRC/short read); rare, pre-existing
             for (const ColumnInfo& c : eng.catalog_columns()) if (c.id >= next_id) next_id = c.id + 1;  // don't collide with restored ids

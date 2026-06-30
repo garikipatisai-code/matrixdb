@@ -39,8 +39,16 @@ else
     oracle="FAIL"; fail=$((fail + 1)); failed="$failed ORACLE"
 fi
 
+# CLI demo smoke: the shipped example tour must run end-to-end and report the known SUM(amount)=2575.
+if "$CXX" -std=c++20 -O2 matrixdb_cli.cpp -o "$TMP/mdb_cli" 2>"$TMP/mdb_cli.err" \
+   && "$TMP/mdb_cli" -f examples/tour.sql 2>/dev/null | grep -q "2575"; then
+    demo="OK"; rm -f examples/tour.db
+else
+    demo="FAIL"; fail=$((fail + 1)); failed="$failed DEMO"
+fi
+
 echo "-----------------------------------------"
-echo "tests passed: $pass   oracle: $oracle"
+echo "tests passed: $pass   oracle: $oracle   demo: $demo"
 if [ "$fail" -eq 0 ]; then
     echo "ALL GREEN ($pass tests + oracle)"
     exit 0
