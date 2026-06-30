@@ -159,8 +159,8 @@ music
 ```
 
 Commands: `.load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader]`, `.save <file>` / `.open <file>`
-(catalog snapshot, string dictionaries included), `.timing on|off`, `.mode list|csv` (machine-readable
-output), `.tables`, `.columns`, `.stats`, `.help`, `.quit`.
+(catalog snapshot, string dictionaries included), `.timing on|off`, `.mode list|csv|table` (human ` │ ` /
+machine-readable CSV / aligned columns), `.tables`, `.columns`, `.stats`, `.help`, `.quit`.
 Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] [HAVING agg <op> v | ORDER BY agg DESC LIMIT n]`,
 multi-aggregate `SELECT agg(a), agg(b) …`, `SELECT COUNT(DISTINCT col)`, and projection
 `SELECT col [WHERE col <op> v] [LIMIT n]`. Joins: `SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]` (inner
