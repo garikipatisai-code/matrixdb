@@ -199,6 +199,33 @@ Raw ideas the findings suggest. Not committed — just captured while fresh.
    is a clean, fast, verifiable columnar-scan primitive. Stripped of the DB framing it's
    a drop-in accelerator for any filter/aggregate workload.
 
+## From engine to product: the CLI
+
+The engine was complete but only reachable from C++ tests. Four increments turned it into a tool you run:
+
+1. **A REPL is just a function over two streams.** `matrix_repl(std::istream&, std::ostream&, CPUMockEngine&)`
+   holds all the logic — line loop, dot-commands, SQL router, decoded output — so `test_cli.cpp` drives it
+   with `std::istringstream`/`ostringstream` and `matrixdb_cli.cpp` is a 12-line `main`. The product is
+   unit-tested end-to-end without a pty, a socket, or a subprocess. The decision that paid off: never put
+   logic in `main`.
+2. **Decode by meaning, not by storage.** A `COUNT` is always an integer even on an `f64` column; a `SUM` is
+   typed; a dictionary code is a string only in a *key* or *projection* position, never as an aggregate
+   value. The router carries the parsed query so it decodes each result correctly — the difference between a
+   tool and a hex dump.
+3. **A REPL must never abort.** The engine's `save_catalog`/`load_catalog` and CSV readers `abort()`/
+   `assert()` on bad input — fine for a programmer, fatal for a prompt. The CLI pre-checks every footgun
+   (file readability before `.open`/`.save`; a non-empty-catalog guard before `.open`, since `load_catalog`
+   wants a fresh engine) and turns every engine error status into one `Error:` line. The bundled
+   `examples/tour.sql` crashing at `.open` is exactly what surfaced the last of these.
+4. **Honest joins on a flat catalog.** There are no SQL tables, so a join relates two key columns and
+   projects one per side (positional left/right). Dictionary-string keys are *rejected*: two dictionaries
+   have independent code spaces, so joining their codes is silently wrong — better a clear error than a
+   plausible lie.
+
+The lesson across all four: shipping a capability as a *product* is a different engineering problem than
+building it — mostly about the boundary (testable seams, typed output, never crashing, honest limits), not
+the algorithm.
+
 ---
 
 *Living document — append as the engine matures. Numbers are snapshots; the lessons are

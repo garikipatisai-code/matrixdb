@@ -140,6 +140,10 @@ printf 'amount,region\n10,books\n900,games\n20,books\n950,music\n' > demo.csv
 ./matrixdb -f session.sql           # run a file of commands/queries, exit
 ```
 
+**Try the bundled tour** (from the repo root): `./matrixdb -f examples/tour.sql` — loads two CSVs and walks
+every form (aggregates, `WHERE`, multi-aggregate, top-N, `HAVING`, `COUNT(DISTINCT)`, a join, `.save`).
+`.timing on` prints per-query wall-time.
+
 ```text
 matrixdb> .load demo.csv amount u32 col0 header
 loaded 4 rows into "amount" (u32, col 0)

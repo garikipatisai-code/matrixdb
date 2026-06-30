@@ -457,7 +457,9 @@ cells += [
          "!printf 'amount,region\\n10,books\\n900,games\\n20,books\\n950,music\\n' > /tmp/demo.csv\n"
          "!printf '.load /tmp/demo.csv amount u32 col0 header\\n"
          ".load /tmp/demo.csv region str col1 header\\n.columns\\n"
-         "SELECT SUM(amount) GROUP BY region\\nSELECT AVG(amount)\\n"
+         "SELECT COUNT(amount), SUM(amount) GROUP BY region\\n"
+         "SELECT SUM(amount) GROUP BY region ORDER BY SUM DESC LIMIT 2\\n"
+         "SELECT COUNT(DISTINCT region)\\nSELECT AVG(amount)\\n"
          "SELECT region WHERE amount > 100\\n.quit\\n' | /tmp/matrixdb"),
     md("### Build version (BP-3)\n"
        "version.hpp carries the semver build version; the engine reports it (string + a packed "
