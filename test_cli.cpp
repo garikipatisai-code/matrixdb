@@ -75,6 +75,13 @@ int main() {
         assert(has(s, "1880") && has(s, "books"));                                  // SUM + decoded dictionary projection
         assert(has(s, "Error:"));                                                   // 2nd .open (non-empty) refused, not aborted
         std::remove("/tmp/mdb_cli_v2.db");
+        {   // a corrupt / non-snapshot file -> friendly Error, NOT a process abort (fail-soft load_catalog)
+            const char* bad = "/tmp/mdb_bad.db"; { std::ofstream(bad) << "not a matrixdb snapshot at all"; }
+            std::istringstream in3(std::string(".open ") + bad + "\n.quit\n");
+            std::ostringstream o3; CPUMockEngine e3; const int rc3 = matrix_repl(in3, o3, e3);
+            assert(rc3 == 0 && has(o3.str(), "Error:"));
+            std::remove(bad);
+        }
         std::cout << "[cli persist] ok\n";
     }
 

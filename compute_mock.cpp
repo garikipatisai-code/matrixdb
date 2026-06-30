@@ -527,12 +527,14 @@ public:
         return true;
     }
 
-    // Snapshot every catalog column to `path`: [u32 magic][u64 num_cols] then per column
-    // [u64 id][u64 count][count×u32]. Borrows COLD columns to HOST to read, returns them.
-    // Fail-loud on I/O error (never leave a half-written snapshot mistaken for valid).
-    void save_catalog(const std::string& path) {
-        FILE* f = std::fopen(path.c_str(), "wb");
-        if (!f) { std::fprintf(stderr, "save_catalog: open failed %s\n", path.c_str()); std::abort(); }
+    // Snapshot every catalog column to `path`, ATOMICALLY: write to path.tmp then rename onto path
+    // (POSIX-atomic on one filesystem), so a crash mid-write leaves the prior snapshot intact — never a
+    // half-written file at `path`. Returns false (no abort) on any I/O error so the caller/CLI can report it.
+    // Borrows COLD columns to HOST to read, returns them. (magic 'MCA2' doubles as the format version.)
+    bool save_catalog(const std::string& path) {
+        const std::string tmp = path + ".tmp";
+        FILE* f = std::fopen(tmp.c_str(), "wb");
+        if (!f) { std::fprintf(stderr, "save_catalog: open failed %s\n", tmp.c_str()); return false; }
         const uint32_t magic = MATRIX_CATALOG_MAGIC;
         const uint64_t ncols = catalog_.size();
         bool ok = std::fwrite(&magic, sizeof magic, 1, f) == 1
@@ -574,12 +576,17 @@ public:
             }
         }
         std::fclose(f);
-        if (!ok) { std::fprintf(stderr, "save_catalog: short write %s\n", path.c_str()); std::abort(); }
+        if (!ok) { std::remove(tmp.c_str()); std::fprintf(stderr, "save_catalog: short write %s\n", tmp.c_str()); return false; }
+        if (std::rename(tmp.c_str(), path.c_str()) != 0) { std::remove(tmp.c_str()); std::fprintf(stderr, "save_catalog: rename -> %s failed\n", path.c_str()); return false; }
+        return true;
     }
     // Restore a snapshot into the catalog (columns land in HOST; the TierManager re-tiers under load).
-    void load_catalog(const std::string& path) {
+    // Returns false (no abort) on a missing / corrupt / wrong-magic / short snapshot, so a caller/CLI can
+    // report it instead of the process dying. (Intended for a fresh engine; a mid-load failure may leave
+    // partial columns — callers open into an empty catalog.)
+    bool load_catalog(const std::string& path) {
         FILE* f = std::fopen(path.c_str(), "rb");
-        if (!f) { std::fprintf(stderr, "load_catalog: open failed %s\n", path.c_str()); std::abort(); }
+        if (!f) { std::fprintf(stderr, "load_catalog: open failed %s\n", path.c_str()); return false; }
         uint32_t magic = 0; uint64_t ncols = 0;
         bool ok = std::fread(&magic, sizeof magic, 1, f) == 1 && magic == MATRIX_CATALOG_MAGIC
                && std::fread(&ncols, sizeof ncols, 1, f) == 1;
@@ -632,7 +639,8 @@ public:
             }
         }
         std::fclose(f);
-        if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); std::abort(); }
+        if (!ok) { std::fprintf(stderr, "load_catalog: bad/short snapshot %s\n", path.c_str()); return false; }
+        return true;
     }
 
     // Back up the whole durable state under one path prefix: <prefix>.catalog (tiered analytical columns,
