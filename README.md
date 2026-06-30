@@ -129,7 +129,8 @@ SAN=1 ./run_tests.sh   # same, under AddressSanitizer + UBSan (catches UB/OOB; s
 ## Use it (CLI / REPL)
 
 `matrixdb` is an interactive shell over the engine — load CSV columns, run SQL at a prompt, see decoded
-results. Build it and pipe it a session (diagnostics go to stderr, so stdout stays clean for piping):
+results. **Full user guide: [`docs/USAGE.md`](docs/USAGE.md).** Build it and pipe it a session (diagnostics go
+to stderr, so stdout stays clean for piping):
 
 ```sh
 clang++ -std=c++20 -O2 matrixdb_cli.cpp -o matrixdb     # g++ works too
