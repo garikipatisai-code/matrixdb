@@ -9,6 +9,7 @@
 #include <vector>
 #include <atomic>
 #include <thread>
+#include <chrono>
 
 static const MatrixAggOp OPS[] = {AGG_COUNT, AGG_SUM, AGG_MIN, AGG_MAX};
 
@@ -123,6 +124,29 @@ int main() {
         assert(matrix_deserialize_response(srv.serve(matrix_serialize_request(ureq)), uresp));
         assert(uresp.status == static_cast<uint32_t>(MatrixQueryStatus::ERR_UNKNOWN_COLUMN) && uresp.results.empty());
         std::printf("[ConcurrentServer escalation -> exclusive] ok\n");
+    }
+
+    // Throughput (informational, not asserted — timing is environment-dependent): the same total read work
+    // spread across N threads vs 1, over a HOST column. Demonstrates the single-writer/many-readers win.
+    {
+        CPUMockEngine eng5;
+        const size_t BIG = 1u << 20;
+        std::vector<uint32_t> w(BIG); for (size_t i = 0; i < BIG; ++i) w[i] = static_cast<uint32_t>(i % 1000);
+        eng5.load_scan_column(1, w.data(), BIG);
+        auto run = [&](int threads, int per) {
+            auto job = [&] { for (int r = 0; r < per; ++r) { std::vector<uint64_t> o;
+                eng5.execute_query_shared(MatrixQuery{.value_col = 1, .agg = AGG_SUM, .has_filter = true, .threshold = 500}, o); } };
+            const auto t0 = std::chrono::steady_clock::now();
+            std::vector<std::thread> ts; for (int t = 0; t < threads; ++t) ts.emplace_back(job);
+            for (auto& t : ts) t.join();
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+        };
+        const unsigned hc = std::thread::hardware_concurrency() ? std::thread::hardware_concurrency() : 4u;
+        const int total = 48;
+        const long t1 = run(1, total);
+        const long tN = run(static_cast<int>(hc), total / static_cast<int>(hc));
+        std::printf("[throughput] 1 thread = %ld ms; %u threads (same total work) = %ld ms (%.1fx)\n",
+                    t1, hc, tN, tN ? static_cast<double>(t1) / static_cast<double>(tN) : 0.0);
     }
 
     std::printf("ALL CONCURRENT-SERVING TESTS PASSED\n");

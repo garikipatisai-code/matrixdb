@@ -157,10 +157,17 @@ Each step was decided by a benchmark or a cross-check, not a guess. Notable find
 ## Known limits / deferred (marked `// ponytail:` at each site)
 - **Cross-column WHERE is scalar-only** for now; grouped cross-column (`GROUP BY dim WHERE other …`) and a
   non-`u32` filter column are the next SQL increments (see `docs/superpowers/specs/…-richer-sql-grammar-design.md`).
-- **SQL grammar is the analytical subset people type, not full ANSI** — multi-aggregate `SELECT`, projections
-  (returning rows), and SQL-level joins are roadmap items (the `hash_join` + `gather` primitives exist).
-- **Concurrency is single-owner by design** — the lock-free page-ownership model trades concurrent writers /
-  MVCC isolation for zero store atomics; that's a deliberate architecture choice, not a gap.
+- **SQL grammar is the analytical subset people type, not full ANSI** — scalar + grouped aggregates,
+  predicates (incl. **cross-column WHERE**), **multi-aggregate `SELECT`**, and **projections** are
+  implemented; SQL-level joins and a cost-based planner are roadmap items (the `hash_join` + `gather`
+  primitives exist).
+- **Concurrent serving is reads-parallel, writes-serialized** (single-writer / many-readers via a
+  `std::shared_mutex` — `ConcurrentServer`): analytical reads over HOST-resident columns run in parallel
+  (verified race-free under ThreadSanitizer), writes serialize, and a read needing a tier borrow escalates
+  to the exclusive lock. The lock-free single-owner *write* model (zero store atomics) is preserved.
+  v1 limits (deferred): a COLD/DEVICE read escalates rather than running concurrently (wants epoch/snapshot
+  reclamation); pure concurrent reads don't accrue tiering heat; the global lock can starve writers under
+  sustained reads; GPU-engine concurrency and MVCC isolation are future.
 - **Transport is plaintext** (TLS wants a vetted library); **no encryption-at-rest** (won't hand-roll crypto).
 - **Per-batch GPU sync (point-op path):** each `execute_batch` blocks on a `cudaStreamSynchronize`;
   double-buffering / async batches would hide it. HTAP head-of-line blocking between scans and point ops is
