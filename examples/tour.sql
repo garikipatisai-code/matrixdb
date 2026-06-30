@@ -24,6 +24,7 @@ SELECT COUNT(DISTINCT region)
 SELECT amount, reg_name JOIN region = reg_key LIMIT 5
 SELECT COUNT(*) JOIN region = reg_key
 SELECT SUM(amount) JOIN region = reg_key GROUP BY reg_name
+SELECT SUM(amount) JOIN region = reg_key GROUP BY reg_name ORDER BY SUM DESC LIMIT 2
 
 # --- persistence + engine stats ---
 .stats

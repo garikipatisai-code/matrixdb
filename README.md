@@ -164,8 +164,9 @@ Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key] [H
 multi-aggregate `SELECT agg(a), agg(b) …`, `SELECT COUNT(DISTINCT col)`, and projection
 `SELECT col [WHERE col <op> v] [LIMIT n]`. Joins: `SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]` (inner
 equi-join, one column per side — left before the comma, right after; u32/i64 keys), `SELECT COUNT(*) JOIN
-lkey = rkey`, and aggregate-over-join `SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol]` (sum/count/min/max
-a left measure by a right dimension — the star query). Malformed input prints a friendly `Error:` line — never crashes.
+lkey = rkey`, and aggregate-over-join `SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol [HAVING agg <op> v |
+ORDER BY agg DESC LIMIT n]]` (sum/count/min/max a left measure by a right dimension, then filter or rank —
+the star query). Malformed input prints a friendly `Error:` line — never crashes.
 (`matrixdb>` is shown for clarity; the REPL reads plain lines.) A network/server mode and readline history
 are the remaining deferrals.
 
