@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <limits>
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
@@ -63,28 +64,32 @@ inline std::string decode_proj(CPUMockEngine& eng, uint64_t col, uint64_t v) {
     if (eng.string_dict_size(col) > 0) return eng.string_decode(col, static_cast<uint32_t>(v));
     return decode_num(eng, col, v);
 }
-// Reduce gathered (encoded) values by an aggregate, formatted by the column's type. No engine API reduces an
-// arbitrary row subset, so the join-aggregate path reduces here. COUNT ignores type; SUM/MIN/MAX are typed
-// (u32 unsigned, i64 signed via two's-complement, f64 via bit_cast). Empty -> 0.
-inline std::string reduce_vals(CPUMockEngine& eng, uint64_t col, MatrixAggOp agg, const std::vector<uint64_t>& vals) {
-    if (agg == AGG_COUNT) return std::to_string(vals.size());
+struct AggResult { std::string text; double order; };       // formatted value + a numeric sort/compare key
+// Reduce gathered (encoded) values by an aggregate. text = type-correct display (u32 unsigned / i64 signed /
+// f64); order = the same value as double for HAVING/ORDER BY. COUNT ignores type; SUM/MIN/MAX are typed. Empty -> 0.
+// ponytail: `order` is lossy above 2^53 for huge i64/u64 — fine for ranking/thresholding what a CLI prints.
+inline AggResult reduce_agg(CPUMockEngine& eng, uint64_t col, MatrixAggOp agg, const std::vector<uint64_t>& vals) {
+    if (agg == AGG_COUNT) return { std::to_string(vals.size()), static_cast<double>(vals.size()) };
     const MatrixType ty = eng.column_type(col);
     if (ty == MatrixType::F64) {
         double acc = (agg == AGG_SUM) ? 0.0 : (agg == AGG_MIN ? std::numeric_limits<double>::max() : std::numeric_limits<double>::lowest());
         for (uint64_t v : vals) { const double d = matrix_bit_cast<double>(v);
             if (agg == AGG_SUM) acc += d; else if (agg == AGG_MIN) acc = d < acc ? d : acc; else acc = d > acc ? d : acc; }
-        std::ostringstream o; o << (vals.empty() ? 0.0 : acc); return o.str();
+        if (vals.empty()) acc = 0.0;
+        std::ostringstream o; o << acc; return { o.str(), acc };
     }
     if (ty == MatrixType::I64) {
         int64_t acc = (agg == AGG_SUM) ? 0 : (agg == AGG_MIN ? std::numeric_limits<int64_t>::max() : std::numeric_limits<int64_t>::min());
         for (uint64_t v : vals) { const int64_t s = static_cast<int64_t>(v);
             if (agg == AGG_SUM) acc += s; else if (agg == AGG_MIN) acc = s < acc ? s : acc; else acc = s > acc ? s : acc; }
-        return std::to_string(vals.empty() ? int64_t{0} : acc);
+        if (vals.empty()) acc = 0;
+        return { std::to_string(acc), static_cast<double>(acc) };
     }
     uint64_t acc = (agg == AGG_SUM) ? 0 : (agg == AGG_MIN ? std::numeric_limits<uint64_t>::max() : 0);   // u32
     for (uint64_t v : vals) { const uint64_t u = v & 0xffffffffULL;
         if (agg == AGG_SUM) acc += u; else if (agg == AGG_MIN) acc = u < acc ? u : acc; else acc = u > acc ? u : acc; }
-    return std::to_string(vals.empty() ? uint64_t{0} : acc);
+    if (vals.empty()) acc = 0;
+    return { std::to_string(acc), static_cast<double>(acc) };
 }
 
 }  // namespace matrixcli_detail
@@ -123,24 +128,53 @@ inline void matrix_cli_run_sql(const std::string& line, std::ostream& out, CPUMo
             else { out << "Error: join aggregate supports COUNT/SUM/MIN/MAX (not " << aggname << ")\n"; return; }
             const uint64_t lcol = eng.column_id(trim(sel.substr(lp + 1, rp - lp - 1)));
             if (lcol == 0) { out << "Error: unknown aggregate column in join\n"; return; }
-            uint64_t gcol = 0;                              // optional GROUP BY <right dimension>
+            uint64_t gcol = 0;                              // GROUP BY <right dimension> [HAVING .. | ORDER BY .. LIMIT ..]
+            enum { POST_NONE, POST_HAVING, POST_TOPN } post = POST_NONE;
+            std::string hop; double hthr = 0; size_t topn = 0;
             if (ntail > 0) {
-                if (ntail != 3 || upper(tk[ji + 4]) != "GROUP" || upper(tk[ji + 5]) != "BY") { out << "Error: could not parse join GROUP BY (... GROUP BY rcol)\n"; return; }
+                if (ntail < 3 || upper(tk[ji + 4]) != "GROUP" || upper(tk[ji + 5]) != "BY") { out << "Error: could not parse join GROUP BY (... GROUP BY rcol)\n"; return; }
                 gcol = eng.column_id(tk[ji + 6]);
                 if (gcol == 0) { out << "Error: unknown GROUP BY column in join\n"; return; }
+                if (ntail == 3) { /* plain grouped */ }
+                else if (ntail == 7 && upper(tk[ji + 7]) == "HAVING") {
+                    hop = tk[ji + 9]; hthr = std::strtod(tk[ji + 10].c_str(), nullptr); post = POST_HAVING;
+                    if (hop != ">" && hop != ">=" && hop != "<" && hop != "<=" && hop != "=" && hop != "!=") { out << "Error: bad HAVING comparison (use > >= < <= = !=)\n"; return; }
+                }
+                else if (ntail == 9 && upper(tk[ji + 7]) == "ORDER" && upper(tk[ji + 8]) == "BY" && upper(tk[ji + 11]) == "LIMIT") {
+                    topn = static_cast<size_t>(std::strtoull(tk[ji + 12].c_str(), nullptr, 10)); post = POST_TOPN;
+                }
+                else { out << "Error: could not parse join GROUP BY clause (HAVING agg <cmp> v | ORDER BY agg DESC LIMIT n)\n"; return; }
             }
             const auto pr = (kt == MatrixType::I64) ? eng.hash_join_i64(lkey, rkey) : eng.hash_join(lkey, rkey);
             std::vector<uint64_t> lrows, rrows; lrows.reserve(pr.size()); rrows.reserve(pr.size());
             for (const auto& p : pr) { lrows.push_back(p.first); rrows.push_back(p.second); }
             const std::vector<uint64_t> lv = eng.gather(lcol, lrows);
-            if (gcol == 0) { out << reduce_vals(eng, lcol, agg, lv) << "\n"; return; }   // scalar over the whole join
-            const std::vector<uint64_t> gv = eng.gather(gcol, rrows);                    // grouped by the right dimension
+            if (gcol == 0) { out << reduce_agg(eng, lcol, agg, lv).text << "\n"; return; }   // scalar over the whole join
+            const std::vector<uint64_t> gv = eng.gather(gcol, rrows);                        // grouped by the right dimension
             std::map<uint64_t, std::vector<uint64_t>> buckets;
             for (size_t i = 0; i < lv.size(); ++i) buckets[gv[i]].push_back(lv[i]);
+            struct GRow { std::string label, text; double order; };
+            std::vector<GRow> grows;
             for (const auto& kv : buckets) {
                 const std::string label = eng.string_dict_size(gcol) > 0 ? eng.string_decode(gcol, static_cast<uint32_t>(kv.first)) : std::to_string(kv.first);
-                out << label << " │ " << reduce_vals(eng, lcol, agg, kv.second) << "\n";
+                const AggResult ar = reduce_agg(eng, lcol, agg, kv.second);
+                grows.push_back({ label, ar.text, ar.order });
             }
+            if (post == POST_HAVING) {                       // keep groups whose aggregate satisfies the comparison
+                std::vector<GRow> kept;
+                for (const auto& r : grows) {
+                    const double x = r.order; bool ok = false;
+                    if      (hop == ">")  ok = x >  hthr; else if (hop == ">=") ok = x >= hthr;
+                    else if (hop == "<")  ok = x <  hthr; else if (hop == "<=") ok = x <= hthr;
+                    else if (hop == "=")  ok = x == hthr; else                  ok = x != hthr;
+                    if (ok) kept.push_back(r);
+                }
+                grows.swap(kept);
+            } else if (post == POST_TOPN) {                  // rank by aggregate desc, keep the first n
+                std::stable_sort(grows.begin(), grows.end(), [](const GRow& a, const GRow& b){ return a.order > b.order; });
+                if (grows.size() > topn) grows.resize(topn);
+            }
+            for (const auto& r : grows) out << r.label << " │ " << r.text << "\n";
             return;
         }
         uint64_t limit = 0;                                 // projection: SELECT lcol, rcol [LIMIT n]
@@ -287,7 +321,7 @@ inline int matrix_repl(std::istream& in, std::ostream& out, CPUMockEngine& eng) 
                    "          SELECT agg(a), agg(b) [...]  |  SELECT COUNT(DISTINCT col)  |  "
                    "SELECT col [WHERE col <op> v] [LIMIT n]\n"
                    "joins:    SELECT lcol, rcol JOIN lkey = rkey [LIMIT n]  |  SELECT COUNT(*) JOIN lkey = rkey\n"
-                   "          SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol]   (aggregate a left measure by a right dimension)\n";
+                   "          SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol [HAVING agg <op> v | ORDER BY agg DESC LIMIT n]]\n";
         }
         else if (cmd == ".tables") {
             for (const std::string& t : eng.tables()) out << t << "\n";

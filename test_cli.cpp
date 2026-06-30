@@ -141,6 +141,19 @@ int main() {
         assert(has(a, "north │ 2"));                                                      // grouped COUNT
         assert(has(a, "Error:"));                                                         // AVG unsupported over a join
         std::cout << "[cli join-agg] ok\n";
+
+        // HAVING + top-N on the join-aggregate (post-process the per-dimension results)
+        std::ostringstream oh; std::istringstream ih(
+            "SELECT SUM(ord_amt) JOIN ord_region = reg_key GROUP BY reg_name HAVING SUM > 100\n"          // south 900, east 950
+            "SELECT SUM(ord_amt) JOIN ord_region = reg_key GROUP BY reg_name ORDER BY SUM DESC LIMIT 2\n" // east(950), south(900)
+            "SELECT SUM(ord_amt) JOIN ord_region = reg_key GROUP BY reg_name ORDER BY SUM DESC LIMIT 1\n" // east only
+            "SELECT SUM(ord_amt) JOIN ord_region = reg_key GROUP BY reg_name HAVING\n"                    // malformed -> Error
+            ".quit\n");
+        matrix_repl(ih, oh, je); const std::string hh = oh.str();
+        assert(has(hh, "south │ 900") && has(hh, "east │ 950") && !has(hh, "north │ 30"));   // HAVING filtered north(30)
+        assert(hh.substr(0, hh.find('\n')).find("east") != std::string::npos);               // top-N: largest (east 950) first
+        assert(has(hh, "Error:"));                                                           // malformed tail, session continued
+        std::cout << "[cli join-agg having/topN] ok\n";
     }
 
     // --- .timing prints per-query elapsed; # lines are comments (skipped, no error) ---
