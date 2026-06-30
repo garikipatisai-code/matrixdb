@@ -15,6 +15,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "version.hpp",
            "logging.hpp",
            "compute_mock.cpp", "compute_cuda.cuh", "main.cpp",
+           "matrix_cli.hpp", "matrixdb_cli.cpp",
            "test_scan_coverage.cpp", "test_cost_model.cpp", "test_kv_store.cpp",
            "test_tier_manager.cpp", "test_cold_store.cpp", "test_engine_restart.cpp",
            "test_migration.cpp", "test_live_tiering.cpp", "test_aggregations.cpp",
@@ -71,6 +72,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_recv_timeout.cpp",
            "test_client.cpp",
            "test_concurrent_serving.cpp",
+           "test_cli.cpp",
            "test_version.cpp",
            "test_logging.cpp",
            "test_migration_gpu.cpp",
@@ -443,6 +445,20 @@ cells += [
        "mixed read/write are race-free and oracle-correct. (Built with -pthread; also run under TSan.)"),
     code("!clang++ -std=c++20 -O2 -pthread test_concurrent_serving.cpp -o /tmp/tconc 2>/dev/null "
          "|| g++ -std=c++20 -O2 -pthread test_concurrent_serving.cpp -o /tmp/tconc; /tmp/tconc"),
+    md("### CLI / REPL (the engine as a usable tool)\n"
+       "`matrix_cli.hpp` is a testable shell over streams (`matrix_repl(in, out, eng)`): dot-commands "
+       "(`.load`/`.tables`/`.columns`/`.stats`/`.help`) + a SQL router (scalar/grouped/AVG/projection) with "
+       "typed + string-decoded output. `test_cli.cpp` drives it over string streams; `matrixdb_cli.cpp` is the "
+       "thin `main`. Below: run the test, then build `matrixdb` and pipe a real `.load`+query session through it."),
+    code("!clang++ -std=c++20 -O2 test_cli.cpp -o /tmp/tcli 2>/dev/null "
+         "|| g++ -std=c++20 -O2 test_cli.cpp -o /tmp/tcli; /tmp/tcli"),
+    code("!clang++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb 2>/dev/null "
+         "|| g++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb\n"
+         "!printf 'amount,region\\n10,books\\n900,games\\n20,books\\n950,music\\n' > /tmp/demo.csv\n"
+         "!printf '.load /tmp/demo.csv amount u32 col0 header\\n"
+         ".load /tmp/demo.csv region str col1 header\\n.columns\\n"
+         "SELECT SUM(amount) GROUP BY region\\nSELECT AVG(amount)\\n"
+         "SELECT region WHERE amount > 100\\n.quit\\n' | /tmp/matrixdb"),
     md("### Build version (BP-3)\n"
        "version.hpp carries the semver build version; the engine reports it (string + a packed "
        "major<<32|minor<<16|patch numeric form), and STATS exposes the packed version over the wire so a "

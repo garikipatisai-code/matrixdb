@@ -126,7 +126,7 @@ public:
             cold_store_->replay([this](uint64_t k, uint64_t v){ kv_.put(k, v); }); // post-checkpoint records on top
             kv_.for_each([this](uint64_t k, uint64_t v){ key_index_[k] = v; });     // rebuild the ordered index from recovered state
         }
-        std::cout << "CPUMockEngine initialized (page-ownership, "
+        std::cerr << "CPUMockEngine initialized (page-ownership, "
                   << MATRIX_PAGE_COUNT << " pages, "
                   << MATRIX_SCAN_COLUMN_SIZE << "-value scan column"
                   << (cold_store_ ? ", WAL durability ON" : "") << ")." << std::endl;
@@ -1636,7 +1636,7 @@ public:
             Log::emit(LogLevel::ERROR, std::to_string(store_overflows_)
                       + " point-op writes dropped — KVStore full (Inc 3 adds SSD spill).");
         }
-        std::cout << "CPUMockEngine shutdown cleanly." << std::endl;
+        std::cerr << "CPUMockEngine shutdown cleanly." << std::endl;
     }
 
     void execute_batch(DatabaseQuery* batch_array, size_t count) override {

@@ -61,7 +61,7 @@ A real analytical engine, not just a count-scan demo — the CPU surface is feat
 - **Ops:** health/readiness probe, query-latency + tiering metrics, structured leveled logging, admission
   control (group-count cap), graceful shutdown, semver build version.
 
-Verified by **61 CPU tests + the pipeline oracle** (`run_tests.sh`), clean under ASan/UBSan and TSan; the
+Verified by **65 CPU tests + the pipeline oracle** (`run_tests.sh`), clean under ASan/UBSan and TSan; the
 GPU cross-checks run on a Colab T4 via the notebook.
 
 ## Files
@@ -84,8 +84,11 @@ analytical reduction kernels — scalar/grouped × u32/i64/f64 × filtered/unfil
 **Serving & ops** — `server.hpp` (request protocol + auth/authz/audit), `server_tcp.hpp` (TCP adapter),
 `client.hpp` (client driver), `version.hpp`, `logging.hpp`.
 
+**CLI** — `matrix_cli.hpp` (the testable `matrix_repl` shell: dot-commands + SQL router + decoded output),
+`matrixdb_cli.cpp` (the thin `matrixdb` main).
+
 **Harness** — `main.cpp` (orchestration + benchmarks + oracle asserts), `run_tests.sh` (CI gate),
-`test_*.cpp` (61 CPU tests, run by `run_tests.sh`), `test_gpu_*.cu` (GPU cross-check gates), `make_notebook.py` (regenerates
+`test_*.cpp` (65 CPU tests, run by `run_tests.sh`), `test_gpu_*.cu` (GPU cross-check gates), `make_notebook.py` (regenerates
 `matrixdb_colab.ipynb` from the real source — run after edits).
 
 **Docs** — `FINDINGS.md` (engineering journal), `PRODUCTION_READINESS.md` (per-increment gap register),
@@ -122,6 +125,40 @@ clang++ -std=c++20 -O3 -mcpu=apple-m1 main.cpp -o matrixdb_proto   # Apple Silic
 ./run_tests.sh   # CI gate: compile + run every CPU test + the pipeline oracle (exit non-zero on any failure)
 SAN=1 ./run_tests.sh   # same, under AddressSanitizer + UBSan (catches UB/OOB; slower)
 ```
+
+## Use it (CLI / REPL)
+
+`matrixdb` is an interactive shell over the engine — load CSV columns, run SQL at a prompt, see decoded
+results. Build it and pipe it a session (diagnostics go to stderr, so stdout stays clean for piping):
+
+```sh
+clang++ -std=c++20 -O2 matrixdb_cli.cpp -o matrixdb     # g++ works too
+printf 'amount,region\n10,books\n900,games\n20,books\n950,music\n' > demo.csv
+
+./matrixdb                          # interactive REPL on stdin
+./matrixdb -c "SELECT AVG(amount)"  # run one line, exit
+./matrixdb -f session.sql           # run a file of commands/queries, exit
+```
+
+```text
+matrixdb> .load demo.csv amount u32 col0 header
+loaded 4 rows into "amount" (u32, col 0)
+matrixdb> .load demo.csv region str col1 header     # strings are dictionary-encoded
+loaded 4 rows into "region" (str, col 1)
+matrixdb> SELECT SUM(amount) GROUP BY region        # grouped, decoded string labels
+books │ 30
+games │ 900
+music │ 950
+matrixdb> SELECT region WHERE amount > 100           # projection, decoded
+games
+music
+```
+
+Commands: `.load <csv> <name> <u32|i64|f64|str> [colN] [header|noheader]`, `.tables`, `.columns`, `.stats`,
+`.help`, `.quit`. Queries: `SELECT COUNT|SUM|MIN|MAX|AVG(col) [WHERE col <op> v] [GROUP BY key]` and
+`SELECT col [WHERE col <op> v] [LIMIT n]`. Malformed input prints a friendly `Error:` line — never crashes.
+(`matrixdb>` is shown for clarity; the REPL itself reads plain lines.) Scope is the analytical subset above;
+HAVING / top-N / multi-aggregate `SELECT` / `.save` / a network mode are deferred (the executors exist).
 
 ## Test on Google Colab (GPU)
 
