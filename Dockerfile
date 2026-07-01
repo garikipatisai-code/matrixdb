@@ -23,7 +23,8 @@ RUN ./build_all.sh
 # built binaries are copied in from the build stage above.
 FROM debian:12-slim AS runtime
 
-RUN useradd -m -u 10001 matrixdb
+RUN useradd -m -u 10001 matrixdb \
+    && mkdir -p /data && chown matrixdb:matrixdb /data
 
 COPY --from=build /src/matrixdb /src/matrixdbd /usr/local/bin/
 
