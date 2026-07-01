@@ -97,27 +97,51 @@ The one open question gating Leg 1 (package MatrixDB) / Leg 2 (Java/Spring Boot 
 does §3.5's ~12–19× in-process GPU scan win survive a real TCP + serialization hop to a JVM
 client, or does that hop eat it alive? A standalone `spike/spike_server.cpp` (loopback TCP,
 length-prefixed frames, the real `CUDAGPUEngine`/`CPUMockEngine`) driven by a raw-socket
-`spike/SpikeClient.java`, measured on the same Colab T4 host for both engines:
-- GPU: scan round-trip median **0.64 ms** (fixed tax 88.8 µs, 13.9%) — matches the in-process
-  GPU baseline (§3.5, ~0.4–0.7 ms) almost exactly.
-- CPU: scan round-trip median **24.2 ms** (fixed tax 64.6 µs, 0.3%) — slower than the
-  in-process ~8 ms baseline, consistent with Colab's shared vCPU being noisier than the
-  original benchmarking host, not a network artifact (its own tax is negligible).
-- **Via-network GPU speedup: 37.9×** — clears the spec's ≳10× PASS bar with room to spare,
-  and even exceeds the in-process 12–25× range (because CPU degraded more than GPU crossing
-  hosts, not because the network helped).
-- GPU tax fraction (13.9%) nominally exceeds the spec's <10% guideline, but mechanically:
-  fixed ~89 µs measured against an already-sub-millisecond scan is naturally a larger
-  fraction. Per the spec's own "judgment call near the boundary" clause: this is the compute
-  getting fast enough that a fixed cost becomes visible, not the network dominating — the
-  37.9× win holds while including that tax.
-- **Verdict: PASS.** Proceed to Leg 1/Leg 2 per
-  `docs/superpowers/specs/2026-06-30-network-gpu-spike-design.md`.
-- Side-finding, not yet fixed: the Nagle + delayed-ACK stall the spike hit and fixed
+`spike/SpikeClient.java`, measured on Colab T4 across two independent runs (different shared-VM
+allocations each time):
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| CPU scan round_trip | 24.2 ms | 13.2 ms |
+| CPU scan server_seconds (compute only) | not captured | 13.0 ms |
+| GPU scan round_trip | 0.64 ms | 0.76 ms |
+| GPU scan server_seconds (compute only) | not captured | 0.58 ms |
+| via-network speedup (round_trip) | 37.9× | 17.3× |
+| via-network speedup (server_seconds) | — | 22.3× |
+| GPU tax_fraction | 13.9% | 12.5% |
+
+Run 1's round-trip-only numbers drew a fair challenge: CPU degraded ~3× vs its 8 ms in-process
+baseline while GPU matched its baseline almost exactly — an asymmetry generic "shared host is
+noisy" shouldn't produce evenly. The mechanism: `CPUMockEngine::execute_scan` is a single-core
+hot loop over 16M elements; `CUDAGPUEngine::execute_scan` mostly blocks on
+`cudaStreamSynchronize`, off-CPU. A CPU-hungry JVM client sharing Colab's ~2 vCPUs contends
+directly with the CPU engine's scan but barely touches the GPU engine's, so CPU is far more
+exposed to whatever else that VM allocation was doing.
+
+Run 2 added `server_seconds` — compute time timed purely server-side around `execute_scan()`,
+already embedded in the wire response but never surfaced by the first analysis pass (a real
+gap: the field was designed in and then not used). It settles the question: CPU's
+`server_seconds` (13.0 ms) tracks its `round_trip` (13.2 ms) almost exactly, so run 2's slowdown
+vs the 8 ms in-process baseline is genuine compute-time variance from that VM allocation, not a
+measurement artifact. And the **compute-only speedup, 22.3×, lands squarely inside the
+independently-measured in-process range (12–25×, §3.3/§3.5)** — strong cross-validation that
+nothing in this network harness is biased against CPU; it's the same physics, re-measured
+through a different path and landing back where the unrelated, no-network benchmark already
+put it.
+
+- **Verdict: PASS**, on both metrics, across both runs — round-trip speedup (37.9×, 17.3×) and
+  compute-only speedup (22.3×) all clear the spec's ≳10× bar with room to spare.
+- GPU tax_fraction is consistently 12–14% across both runs — repeatable, not noise: once
+  compute drops under ~1 ms, a fixed ~90 µs per-request network+framing cost is a real, if
+  non-dominant, fraction of it. Doesn't sink the verdict (the win holds well past the tax
+  either way), but it's a concrete argument for request pipelining/batching in the Leg 2
+  client design once GPU compute gets this fast.
+- Side-finding, not yet fixed: the Nagle + delayed-ACK stall this spike hit and fixed
   (`TCP_NODELAY` on the accepted socket, once the response is split across two `send()`
   calls) also exists, unfixed, in production `matrixdbd`'s `server_tcp.hpp`
   (`matrix_serve_conn`, used by both `matrix_serve_tcp` and `matrix_serve_tcp_auth`) — worth
   folding into Leg 1 hardening regardless.
+- **Proceed to Leg 1/Leg 2** per `docs/superpowers/specs/2026-06-30-network-gpu-spike-design.md`.
 
 ---
 
