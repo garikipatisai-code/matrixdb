@@ -268,9 +268,11 @@ in the current env (CPU, no network) vs needs real infra.
 | QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected **[ASan+UBSan: whole CPU suite clean (`SAN=1 ./run_tests.sh`); TSan: the threaded SPSC pipeline (main) clean]** | P1 | S | yes |
 | QA-4 | No fuzzing / property-based testing | Edge cases unexplored **[FIXED — QA-4: test_fuzz.cpp, 64k seeded random+mutated inputs, crash-safe under ASan/UBSan]** | P2 | M | yes |
 | QA-5 | No stress / chaos / failure-injection testing | Behavior under load & failure unknown **[stress/load FIXED — QA-5: test_stress.cpp (sustained queries + tiering churn + append + join at scale, oracle-checked); failure-injection FIXED — QA-5: test_fault_injection.cpp (engine-level corrupt-WAL recovery)]** | P2 | L | partial |
-| QA-6 | CUDA path has no automated test — host-syntax probe + manual runs only | GPU regressions only caught by hand | P1 | M | needs GPU CI |
+| QA-6 | CUDA path has no automated test — host-syntax probe + manual runs only | GPU regressions only caught by hand **[partial — BP-4 CI added a real `nvcc` compile-check; kernel execution still needs a GPU runner]** | P1 | M | needs GPU CI |
 
-*QA-1 partial (local CI gate landed): `run_tests.sh` — one command that auto-discovers every `test_*.cpp` (skips the nvcc-only `test_migration_gpu.cpp`), compiles each under `-std=c++20 -O2 -Wall -Wextra`, runs it, then builds `main.cpp` and asserts the pipeline oracle (`83886070`); exits 0 only if ALL pass, non-zero (= failure count) otherwise. Portable (plain `-O3`, no `-mcpu`; `CXX` override; clang++→g++ fallback). Codifies the per-increment gate I'd been running by hand into a repeatable build verification. Verified ALL GREEN (34 tests + oracle, exit 0) and non-vacuous (a deliberately-failing throwaway test → `FAIL` + exit 1). This is the LOCAL CI gate; full CI/CD with the CUDA path on GPU runners remains QA-6 (needs GPU CI). The CPU suite is now 34 tests (QA-2 substantially improved from "a few oracle checks").*
+*QA-1 partial (local CI gate landed): `run_tests.sh` — one command that auto-discovers every `test_*.cpp` (skips the nvcc-only `test_migration_gpu.cpp`), compiles each under `-std=c++20 -O2 -Wall -Wextra`, runs it, then builds `main.cpp` and asserts the pipeline oracle (`83886070`); exits 0 only if ALL pass, non-zero (= failure count) otherwise. Portable (plain `-O3`, no `-mcpu`; `CXX` override; clang++→g++ fallback). Codifies the per-increment gate I'd been running by hand into a repeatable build verification. Verified ALL GREEN (34 tests + oracle, exit 0) and non-vacuous (a deliberately-failing throwaway test → `FAIL` + exit 1). This is the LOCAL CI gate; full CI/CD with the CUDA path on GPU runners remains QA-6 (needs GPU CI). The CPU suite is now 34 tests (QA-2 substantially improved from "a few oracle checks"). BP-4 (2026-06-30) automated this same gate in CI (`.github/workflows/ci.yml`) on Linux x86 + macOS
+ARM on every push to `main`, plus a real `nvcc` compile-check and a `docker build`/`run` smoke test —
+see BP-4's own note in §9 for specifics; QA-6 (GPU kernel execution in CI) remains open.*
 
 *QA-5 failure-injection landed (engine-level corrupt-WAL recovery): test_fault_injection.cpp injects WAL corruption and proves a fresh `CPUMockEngine` degrades gracefully — (1) a **torn tail** (a partial record appended, simulating a crash mid-write) → all committed writes before it recover and the engine stays usable; (2) an **early flipped payload byte** → the CRC catches it, replay stops at that record (recovering nothing past it), no crash, and the engine is fully usable afterward (new writes commit). This is the integration-level complement to test_cold_store's ColdStore-unit corruption tests — it verifies the database SURVIVES a corrupt log, the load-bearing durability guarantee. Clean under ASan+UBSan (the replay buffer handles adversarial length fields via the `≤ MATRIX_WAL_MAX_RECORD` guard). 58-test suite + oracle green. Remaining QA-5: fault injection on the catalog-snapshot / column-file readers (they already `abort()` fail-loud on our own corrupt format — a graceful-vs-abort policy call), randomized chaos scheduling.*
 
@@ -281,11 +283,30 @@ in the current env (CPU, no network) vs needs real infra.
 | BP-1 | Build is manual `clang++`/`nvcc` one-liners; cmake not even installed | Not reproducible; no real build system in use **[FIXED — BP-1: build_all.sh]** | P1 | S | yes |
 | BP-2 | No packaging (container/binary/release artifact) | Nothing to deploy **[partial — BP-2: Dockerfile]** | P1 | M | partial |
 | BP-3 | No versioning / release process | Can't ship or roll back **[partial — BP-3: build version + wire-exposed]** | P2 | S | yes |
-| BP-4 | No multi-platform build matrix (Apple ARM / Linux x86 / CUDA) | "Works on my Mac" only | P1 | M | needs CI |
+| BP-4 | No multi-platform build matrix (Apple ARM / Linux x86 / CUDA) | "Works on my Mac" only **[FIXED — BP-4: .github/workflows/ci.yml]** | P1 | M | partial |
 
 *BP-3 partial (build versioning, CPU): `version.hpp` carries the semver build version (`MATRIXDB_VERSION` "0.1.0" + major/minor/patch macros). The engine reports it via `version()` (string) and `version_u64()` (packed `major<<32|minor<<16|patch`, so versions compare with `<` and fit a wire field). STATS gained a 12th field = the packed version, and `MatrixClient::server_version()` reads it — so a client/monitor can see and compare which build it's talking to over the wire. test_version.cpp (string/packed/engine-getter agree; packed forms order like semver) + the server/client STATS tests assert the version field. ponytail: the release *process* (bump + git tag + artifact) is manual (the user pushes tags); this is the version a running instance reports, not an automated release pipeline. 57-test suite + oracle green. Deferred: a `git describe` build stamp, the release/tag automation, packaging (BP-2).*
 
 *BP-1 & BP-2 landed (build system + packaging, CPU): `build_all.sh` (repo root) compiles both `./matrixdb` and `./matrixdbd` in one command with clang++/g++ (respects `CXX` override), echoing the version from `version.hpp` and exiting non-zero on failure — closes the "manual one-liners" build-reproducibility gap (BP-1 FIXED). A multi-stage `Dockerfile` + `.dockerignore` (repo root) builds both binaries in a `debian:12-slim` image with clang, then strips the runtime to a fresh `debian:12-slim` with only the compiled binaries, running as a non-root user (uid 10001) with `/data` as a chowned mount point for snapshots (EXPOSE 7070). The entrypoint wires `MATRIXDB_OPEN`/`MATRIXDB_TOKEN`/`PORT` env vars into the matrixdbd flags — closes the "no packaging" gap with a production-grade container image (BP-2 CLOSED as partial — container only, no OS packages/release-automation pipeline exist). Bundled side-fix: `server_tcp.hpp` now sets `TCP_NODELAY` on all accepted sockets, closing the Nagle/delayed-ACK network stall from FINDINGS §3.7. Documented in `docs/USAGE.md` "Docker" section. Deferred: TLS (SE-3), OS packages (deb/rpm/Homebrew), remote CI/CD, multi-platform matrix (BP-4 unchanged), durable-volume/WAL wiring for matrixdbd, secrets-manager for `MATRIXDB_TOKEN` (currently a plain env var).*
+
+*BP-4 landed (CI build matrix): `.github/workflows/ci.yml` — four jobs, triggered on every push to
+`main` (this repo has no PR workflow, so there's nothing to gate; the workflow is informational,
+flagging a bad commit fast). `test-linux` (`ubuntu-latest`) and `test-macos` (`macos-14`, native
+Apple Silicon) each run `./build_all.sh` then `./run_tests.sh` — the exact local gate, now on two
+real platforms instead of whichever machine a human happened to use. `cuda-compile-check`
+(`ubuntu-latest` + the `nvidia-cuda-toolkit` apt package) runs the same `nvcc` command already
+documented in `README.md` — compile-only, no GPU on this runner, but a *real* `nvcc` compile
+(upgrading the old clang-only "host-syntax probe"; this project's own history shows that distinction
+matters — two `nvcc`-only `atomicAdd(double*)` arch-guard bugs once slipped past a clang-only local
+build). `docker-build` (`ubuntu-latest`, Docker preinstalled) runs `docker build` then a log-based
+smoke test (`docker run` the image, grep its stderr for the dev-mode startup line, stop it) — the
+first time the `Dockerfile` and `matrixdbd`'s bind/listen path are exercised end-to-end on a real
+host instead of reviewed by inspection (this sandbox has no `docker`/`nvcc`/GitHub Actions access, so
+the actual green run is a manual host-verification step, same status as `matrixdbd`'s own `bind()`).
+Deferred: Windows (no existing build convention targets it), branch protection (no PR flow to attach
+one to), a README status badge (cosmetic), and closing QA-6 fully (GPU kernel *execution* in CI still
+needs a paid/self-hosted GPU runner — the compile-check upgrade is real progress on QA-6 but doesn't
+close it; see QA-6's own note in §8).*
 
 ## 10. Reliability & HA (mostly P3 for the single-box wedge)
 
