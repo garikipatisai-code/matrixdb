@@ -13,8 +13,12 @@ cd "$(dirname "$0")"
 # Pick a compiler: $CXX, else clang++, else g++.
 if [ -n "${CXX:-}" ]; then :; elif command -v clang++ >/dev/null 2>&1; then CXX=clang++; else CXX=g++; fi
 TMP="${TMPDIR:-/tmp}"
-# SAN=1 builds every test under ASan+UBSan (QA-3) to catch UB/OOB — slower; use for a thorough pass.
-if [ "${SAN:-0}" = "1" ]; then FLAGS="-std=c++20 -O1 -g -pthread -fsanitize=address,undefined"; MODE=" [ASan+UBSan]";
+# SAN=1 builds every test under ASan+UBSan (QA-3) to catch UB/OOB; TSAN=1 builds under ThreadSanitizer
+# (mutually exclusive with ASan — pick one). Both slower; use for a thorough pass. Neither is the default
+# (plain optimized build), so wire at least one into CI explicitly if you want it enforced on every push —
+# see .github/workflows/ci.yml's test-linux-asan-ubsan/test-linux-tsan jobs.
+if [ "${TSAN:-0}" = "1" ]; then FLAGS="-std=c++20 -O1 -g -pthread -fsanitize=thread"; MODE=" [TSan]";
+elif [ "${SAN:-0}" = "1" ]; then FLAGS="-std=c++20 -O1 -g -pthread -fsanitize=address,undefined"; MODE=" [ASan+UBSan]";
 else FLAGS="-std=c++20 -O2 -Wall -Wextra -pthread"; MODE=""; fi
 pass=0; fail=0; failed=""
 

@@ -23,6 +23,23 @@ jobs:
       - name: Test (full suite + oracle + CLI/daemon smoke checks)
         run: ./run_tests.sh
 
+  # Sanitizers exist in run_tests.sh (SAN=1 / TSAN=1) but neither was ever wired into CI -- the workflow
+  # above runs the plain, unsanitized build, so a memory-safety bug or a data race could pass every push
+  # indefinitely as long as it didn't happen to crash. These two jobs are what actually enforces them.
+  test-linux-asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test under AddressSanitizer + UndefinedBehaviorSanitizer
+        run: SAN=1 ./run_tests.sh
+
+  test-linux-tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test under ThreadSanitizer
+        run: TSAN=1 ./run_tests.sh
+
   cuda-compile-check:
     runs-on: ubuntu-latest
     steps:

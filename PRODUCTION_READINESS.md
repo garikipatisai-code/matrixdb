@@ -11,6 +11,12 @@ meaningfully built or verified in the current dev environment (single box, no nv
 sandboxed network). This register exists so we sequence deliberately and never confuse
 "prototype works" with "production ready."
 
+**A note on the test counts below:** every "N-test suite + oracle green" mention is a snapshot of
+the total *at the time that increment landed*, not a live count — this file is an append-only
+journal, so later entries have higher numbers than earlier ones by construction. For the current
+count, run `./run_tests.sh` (it prints the number it just ran); don't trust any number frozen in
+an old paragraph as "the current state."
+
 ---
 
 ## Prioritization lens: who we're building for
@@ -265,7 +271,7 @@ in the current env (CPU, no network) vs needs real infra.
 |----|-----|-----|-----|--------|--------|
 | QA-1 | No CI/CD pipeline | Every change verified by hand; CUDA only via manual Colab **[local CI gate landed — `run_tests.sh`]** | P1 | M | partial |
 | QA-2 | Thin test suite (a few oracle checks) — no unit/integration coverage | Regressions slip through **[grown to 37 CPU tests; `test_integration.cpp` covers the full stack end-to-end]** | P1 | L | yes |
-| QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected **[ASan+UBSan: whole CPU suite clean (`SAN=1 ./run_tests.sh`); TSan: the threaded SPSC pipeline (main) clean]** | P1 | S | yes |
+| QA-3 | No sanitizers (ASan/UBSan/TSan) on the concurrent code | Data races / UB in lock-free + multithread paths undetected **[FIXED — QA-3: ASan+UBSan and TSan now both run in CI on every push, not just locally by hand]** | P1 | S | yes |
 | QA-4 | No fuzzing / property-based testing | Edge cases unexplored **[FIXED — QA-4: test_fuzz.cpp, 64k seeded random+mutated inputs, crash-safe under ASan/UBSan]** | P2 | M | yes |
 | QA-5 | No stress / chaos / failure-injection testing | Behavior under load & failure unknown **[stress/load FIXED — QA-5: test_stress.cpp (sustained queries + tiering churn + append + join at scale, oracle-checked); failure-injection FIXED — QA-5: test_fault_injection.cpp (engine-level corrupt-WAL recovery)]** | P2 | L | partial |
 | QA-6 | CUDA path has no automated test — host-syntax probe + manual runs only | GPU regressions only caught by hand **[partial — BP-4 CI added a real `nvcc` compile-check; kernel execution still needs a GPU runner]** | P1 | M | needs GPU CI |
@@ -273,6 +279,17 @@ in the current env (CPU, no network) vs needs real infra.
 *QA-1 partial (local CI gate landed): `run_tests.sh` — one command that auto-discovers every `test_*.cpp` (skips the nvcc-only `test_migration_gpu.cpp`), compiles each under `-std=c++20 -O2 -Wall -Wextra`, runs it, then builds `main.cpp` and asserts the pipeline oracle (`83886070`); exits 0 only if ALL pass, non-zero (= failure count) otherwise. Portable (plain `-O3`, no `-mcpu`; `CXX` override; clang++→g++ fallback). Codifies the per-increment gate I'd been running by hand into a repeatable build verification. Verified ALL GREEN (34 tests + oracle, exit 0) and non-vacuous (a deliberately-failing throwaway test → `FAIL` + exit 1). This is the LOCAL CI gate; full CI/CD with the CUDA path on GPU runners remains QA-6 (needs GPU CI). The CPU suite is now 34 tests (QA-2 substantially improved from "a few oracle checks"). BP-4 (2026-06-30) automated this same gate in CI (`.github/workflows/ci.yml`) on Linux x86 + macOS
 ARM on every push to `main`, plus a real `nvcc` compile-check and a `docker build`/`run` smoke test —
 see BP-4's own note in §9 for specifics; QA-6 (GPU kernel execution in CI) remains open.*
+
+*QA-3 FIXED (sanitizers wired into CI, not just runnable by hand): `run_tests.sh` gained a `TSAN=1`
+mode (mirroring the existing `SAN=1` ASan+UBSan mode — mutually exclusive, pick one) and
+`.github/workflows/ci.yml` gained two new jobs, `test-linux-asan-ubsan` and `test-linux-tsan`, that
+run on every push to `main` alongside the plain build. Before this, both sanitizers existed and were
+genuinely used during development (this register cites specific clean runs throughout), but neither
+was enforced automatically — the workflow that actually gates every push ran the plain, unsanitized
+build, so a memory-safety bug or a data race could land and stay green indefinitely unless someone
+remembered to run `SAN=1`/manually check under TSan by hand. Both new jobs verified green locally
+before landing (67-test suite + oracle, both modes) — as with BP-4, the actual CI run itself is a
+manual host-verification step from this sandbox (no GitHub Actions access here).*
 
 *QA-5 failure-injection landed (engine-level corrupt-WAL recovery): test_fault_injection.cpp injects WAL corruption and proves a fresh `CPUMockEngine` degrades gracefully — (1) a **torn tail** (a partial record appended, simulating a crash mid-write) → all committed writes before it recover and the engine stays usable; (2) an **early flipped payload byte** → the CRC catches it, replay stops at that record (recovering nothing past it), no crash, and the engine is fully usable afterward (new writes commit). This is the integration-level complement to test_cold_store's ColdStore-unit corruption tests — it verifies the database SURVIVES a corrupt log, the load-bearing durability guarantee. Clean under ASan+UBSan (the replay buffer handles adversarial length fields via the `≤ MATRIX_WAL_MAX_RECORD` guard). 58-test suite + oracle green. Remaining QA-5: fault injection on the catalog-snapshot / column-file readers (they already `abort()` fail-loud on our own corrupt format — a graceful-vs-abort policy call), randomized chaos scheduling.*
 
