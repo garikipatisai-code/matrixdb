@@ -107,7 +107,9 @@ Expected: `YAML OK` (no exception).
 
 - [ ] **Step 3: Confirm structure by inspection**
 
-Run: `grep -n "^  [a-z-]*:$\|runs-on:\|^on:\|branches:" .github/workflows/ci.yml`
+Run: `grep -nE "^  [a-z-]+:$|runs-on:|^on:|branches:" .github/workflows/ci.yml`
+(Use `-E`/`+` rather than a bracket-expression-plus-`*`: BSD `grep` on macOS doesn't expand `*` after
+`[a-z-]` the way GNU `grep` does, so the non-`-E` form silently under-matches on macOS.)
 Expected output shows all four job names (`test-linux:`, `test-macos:`, `cuda-compile-check:`,
 `docker-build:`), the `on:` trigger, and `branches: [main]` — a quick visual confirmation nothing
 was dropped or misindented.
