@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>          // struct timeval (SO_RCVTIMEO)
 #include <netinet/in.h>
+#include <netinet/tcp.h>       // TCP_NODELAY
 #include <unistd.h>
 #include <cstdint>
 #include <vector>
@@ -105,6 +106,9 @@ inline int matrix_serve_tcp(CPUMockEngine& eng, const AccessPolicy& policy, uint
     for (;;) {
         const int c = ::accept(srv, nullptr, nullptr);
         if (c < 0) continue;
+        // Every response is 2 send() calls (len prefix, then payload); without this, Nagle holds
+        // the 2nd send for the peer's delayed-ACK timer (~40ms) — see FINDINGS.md 3.7.
+        int nodelay = 1; ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);
         if (recv_timeout_ms) matrix_set_recv_timeout(c, recv_timeout_ms);   // NW-5: drop a stuck reader/writer
         if (recv_timeout_ms) matrix_set_send_timeout(c, recv_timeout_ms);   // both directions, same deadline
         while (matrix_serve_conn(eng, policy, /*principal=*/0, c)) { /* serve until the peer closes */ }
@@ -129,6 +133,7 @@ inline int matrix_serve_tcp_auth(CPUMockEngine& eng, const AccessPolicy& policy,
     for (;;) {
         const int c = ::accept(srv, nullptr, nullptr);
         if (c < 0) continue;
+        int nodelay = 1; ::setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);  // see matrix_serve_tcp
         if (recv_timeout_ms) { matrix_set_recv_timeout(c, recv_timeout_ms); matrix_set_send_timeout(c, recv_timeout_ms); }  // NW-5
         matrix_serve_conn_auth(eng, policy, auth, c);   // authenticate (token frame) then serve until the peer closes
         ::close(c);
