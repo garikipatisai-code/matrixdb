@@ -50,6 +50,7 @@ in the current env (CPU, no network) vs needs real infra.
 | ID | Gap | Why it matters | Sev | Effort | Local? |
 |----|-----|----------------|-----|--------|--------|
 | DM-1 | **Store is 4096 slots, `key & MASK` → silent overwrite on collision** **[FIXED — Inc 1: KVStore]** | Real keys collide → **silent data loss**. This is a correctness bug, not a size limit. | P0 | M | yes |
+| DM-1b | **GPU point-op kernel doesn't mirror KVStore's collision handling** — `matrix_page_kernel` still uses the pre-DM-1-fix flat array indexed by `key & MASK`, silently overwriting colliding keys; CPU keeps both. Also nondeterministic on a duplicate key *within one batch* (thread scheduling decides which write wins; CPU is deterministic, in-index order) | `compute.hpp`'s own header comment claims "the two backends produce byte-identical store contents" — that invariant is false the moment two keys collide or a batch repeats a key. No test catches this (compute_cuda.cuh has zero automated execution in CI — QA-6 — so this has had zero regression protection since it was written) | P0 | M | needs GPU |
 | DM-2 | No schema/catalog (tables, columns, types) | Can't model real data; everything is one fixed record shape | P0 | L | yes — DM-2 named columns + introspection, DM-2c named tables, DM-3 types |
 | DM-3 | Fixed 64-byte record / 32-byte payload; no variable-length or real types | No strings, no nullable, no real columns | P0 | L | partial — DM-3a-j: u32/int64/double + minimal strings + nullable (scalar all types + grouped) landed; full var-length/typed-null + catalog integration deferred |
 | DM-4 | No query language — opcodes only (`OP_READ/WRITE/SCAN`) | No way for a client to express a query; the "router" routes opcodes, there's no parser/planner | P0 | XL | partial — QRY-1 (`MatrixQuery`) + DM-4 (text parser, scalar) landed; full SQL/planner deferred |
@@ -182,6 +183,35 @@ in the current env (CPU, no network) vs needs real infra.
 
 **GPU batch (verify-on-Colab; each carries the cross-backend invariant GPU==`matrix_cpu_*` as its correctness anchor):** **GPU-1 (AGG-2) LANDED + HARDWARE-VERIFIED** — `matrix_{sum,min,max}_kernel_u32` (atomicAdd/atomicMin/atomicMax, grid-stride block-local one-atomic-per-block) + `execute_scan` dispatch on the agg op (COUNT keeps the byte-identical u32x4 path → oracle safe). `test_gpu_agg.cu` ran GREEN on a Colab T4: GPU COUNT/SUM/MIN/MAX == `matrix_cpu_reduce` exactly over the same bytes, incl. a >2^32 SUM (549755289600) and the empty sentinels (MIN UINT64_MAX, SUM/MAX 0). **That run also exposed + fixed a latent regression:** the pipeline cells build at `-std=c++17` but the engine had grown a `std::bit_cast` (C++20) dependency — replaced with a memcpy-based `matrix_bit_cast` so `nvcc`/`g++ -std=c++17` compile `main.cpp` again (run_tests.sh builds at c++20, which masked it). **GPU-4 (predicates) + GPU-2 (grouped) LANDED + HARDWARE-VERIFIED** (additive — the GPU-1 kernels untouched): `matrix_pred_match_dev` + `matrix_{count,sum,min,max}_kernel_pred_u32` (GPU WHERE over GE/LT/LE/EQ/NE/BETWEEN) and `matrix_group_{count,sum,min,max}_kernel` (one atomic per row into a dense group slot, out-of-range keys ignored). On the T4: `test_gpu_pred.cu` GREEN (every op × {COUNT,SUM,MIN,MAX} + empty-match == `matrix_cpu_reduce_pred`) and `test_gpu_grouped.cu` GREEN (== `matrix_cpu_group_reduce`). **GPU-5 (typed int64+double) LANDED + HARDWARE-VERIFIED** (additive): `matrix_{count,sum,min,max}_kernel_pred_{i64,f64}` — int64 via native signed atomics + a two's-complement `atomicAdd` reinterpret for SUM; `double` MIN/MAX via a CAS loop on the bit pattern (no native double atomicMin/Max), SUM via a CAS-fallback `atomicAdd(double*)` scoped to the device pass when `nvcc` defaults below `sm_60`. `test_gpu_typed.cu` GREEN on the T4: GPU == `matrix_cpu_reduce_pred_i64`/`_f64` over the same bytes for every op incl. negatives, >2^32, fractions, half-integer exact SUM, and inf/INT64 sentinels. The same full run booted the live `CUDAGPUEngine` on the T4 (64 MB column auto-routed → DEVICE), resident filter-scan **112.7 GB/s vs 4.47 GB/s CPU (~25×)**, oracle 83886070 intact. **GPU-3 (DEVICE/VRAM *catalog* promotion) LANDED + HARDWARE-VERIFIED** — `matrix_gpu_reduce_dev_{u32,i64,f64}` (thin wrappers over the verified pred kernels) + a real device budget/`pin_device` in `CPUMockEngine` (all behind `#if MATRIX_USE_CUDA`); `scan_tiered_column*` reduces a DEVICE-resident column in VRAM instead of borrowing it down. `test_gpu_catalog.cu` (cell 4g) GREEN on the T4: `execute_query` over a VRAM-pinned column == `matrix_cpu_reduce_*` for u32/i64/f64 × {COUNT,SUM,MIN,MAX} × {filtered,unfiltered}. cell 4 live engine: hot analytical cols auto-promote to VRAM (`col1=DEVICE col2=DEVICE col3=HOST`, migrations=2, cold_borrows=0), all sums correct, oracle 83886070. **GPU PHASE COMPLETE** — GPU-1/2/3/4/5 all merged + hardware-verified; point-ops on CPU (thesis), the full scalar analytical surface runs in VRAM end-to-end. Deferred (YAGNI): grouped-on-device — **now also LANDED + HARDWARE-VERIFIED**: `test_gpu_catalog_grouped.cu` (cell 4h) GREEN on the T4 — GPU `GROUP BY` over DEVICE-resident key+value == `matrix_cpu_group_reduce[_i64/_f64](_pred)` for u32/i64/f64 × {COUNT,SUM,MIN,MAX} × {filtered,unfiltered} (24 per-group cross-checks; predicate-gated grouped kernels reusing the GPU-5 atomics). **The GPU analytical surface is complete in VRAM: scalar + grouped, all value types, filtered + unfiltered, every result cross-checked against the CPU oracle.** **→ Turnkey plan with exact kernels: `docs/superpowers/plans/2026-06-26-gpu-batch-colab-ready.md`.**
 
+*DM-1b OPEN (2026-07-01, found by an adversarial audit, not fixed — needs a GPU to fix and verify):
+`compute_cuda.cuh`'s point-op kernel (`matrix_page_kernel`) never received DM-1's collision fix.
+`kv_store.hpp`'s own header comment documents the CPU fix in detail ("SILENTLY OVERWROTE colliding
+keys... fixed"); the GPU kernel still writes `store[q.query_id & MATRIX_STORE_MASK] = q.query_id`,
+the exact pre-fix behavior, so two colliding keys on GPU silently lose one. Separately, the same
+kernel has no ordering guarantee among the `blockDim.x` threads striding one page — a batch with a
+duplicate key resolves last-writer-wins *nondeterministically* on GPU (whichever thread's write
+lands last that run) vs. deterministically in-order on CPU. Both bugs share one root cause (the GPU
+point-op path was never updated to the KVStore/page-ownership semantics DM-1 established for CPU)
+and one likely fix (route GPU point-ops through page-ownership-correct hashing, or reject/serialize
+duplicate/colliding keys before dispatch). Compounding factor: `compute_cuda.cuh` has zero automated
+execution in CI (QA-6 is still open past BP-4's compile-check-only upgrade), so this has had no
+regression protection since it was written — any future edit to the shared reducers could desync
+GPU further from CPU with nothing to catch it. This directly falsifies `compute.hpp`'s own header
+comment ("the two backends produce byte-identical store contents") for any workload with more than
+`MATRIX_STORE_SLOTS` (4096) distinct keys or a repeated key in one batch. Not fixed in this pass —
+no GPU available in this sandbox to implement or verify a fix.*
+
+*DM-3j FIXED (2026-07-01, critical): `null_masks_` (DM-3j's nullable-column mask) was pure in-RAM
+state — `save_catalog`/`load_catalog` never read or wrote it. Every `backup()`/`restore()` round-trip
+or engine restart from a saved catalog silently turned NULL rows into ordinary 0/0.0 values: the same
+query gave a different, wrong answer before vs. after a restart, with no error anywhere. Fixed by
+adding NULL masks as a new trailing, EOF-tolerant section in the catalog snapshot format — the same
+additive convention already used for string dictionaries, so old snapshots (no masks section) load
+exactly as before (no mask = no NULLs, the correct default) and no magic-version bump was needed.
+`test_nullable_persistence` (test_nullable.cpp) proves the round-trip for a masked column, an
+all-null column, and a maskless column; confirmed non-vacuous by reverting the fix and observing the
+new test fail before re-applying it. 67-test suite + oracle green.*
+
 ## 3. Transactions & concurrency correctness
 
 | ID | Gap | Why | Sev | Effort | Local? |
@@ -192,6 +222,14 @@ in the current env (CPU, no network) vs needs real infra.
 | TX-4 | Commit/visibility semantics undefined | When is a write visible to a reader? No answer today | P1 | M | yes |
 
 *TX-1 landed (atomic transactions, CPU — fully local, no infra): `CPUMockEngine::begin/txn_put/commit/rollback` over a WAL-backed group commit. A transaction buffers writes; `commit()` durably appends them as one group (`append_txn_put × N` + a CRC'd commit marker, fsync) then applies; `rollback()` discards (writes nothing). **Crash-atomic:** a transaction is all-or-nothing across a crash — replay buffers `OP_TXN_WRITE` records and applies them only on a commit marker, discarding an uncommitted (trailing) group. Additive to the WAL: the `OP_WRITE` auto-commit path is byte-identical, so `test_cold_store`/`test_engine_restart` pass unchanged (a reviewer proved crash-atomicity with a 6-case adversarial harness; the OP_WRITE refactor is byte-for-byte behavior-preserving). Delivers ACID **A**(tomicity) on top of the existing **D**(urability). 16-test suite + oracle green. See spec/plan 2026-06-26-transactions. **Remaining TX (all local): TX-2 isolation/MVCC, TX-4 reader-visibility/snapshot semantics — bigger, deferred.***
+
+*TX-2 testing gap OPEN (2026-07-01, found by audit): no test anywhere in the suite runs two threads
+concurrently calling `begin()`/`txn_put()`/`commit()` against the same engine — what a reader sees
+mid-commit is never exercised. `test_transactions.cpp` genuinely proves atomicity and durability
+(destroy/reconstruct-engine WAL-replay), and `test_concurrent_serving.cpp`/the new
+`test_server_tcp.cpp` concurrency test cover concurrent single-op reads/writes — but multi-statement
+transaction interleaving under real concurrency has zero coverage. Not fixed here (TX-2/MVCC itself
+is the bigger, already-tracked, deferred item this gap sits under).*
 
 ## 4. Networking, API & multi-client
 
@@ -211,6 +249,52 @@ in the current env (CPU, no network) vs needs real infra.
 
 *NW-2 landed (concurrent serving — reads, CPU): `concurrent_server.hpp` `ConcurrentServer` is a `std::shared_mutex` dispatch over `matrix_serve` (reads shared, writes exclusive) — single-request serve loop → **single-writer / many-readers**. It honors the thesis rather than contradicting it: under a shared lock no writer runs, so the catalog/tiers/store are immutable and concurrent analytical reads can't race. `execute_query_shared` is a **side-effect-free** read fast path (no borrow/heat/rebalance) that reduces HOST-resident columns directly via the verified `matrix_cpu_*` reducers; a read needing a COLD/DEVICE borrow returns `NEEDS_EXCLUSIVE` and the dispatcher re-runs the full `matrix_serve` under the exclusive lock. The read-path stat counters became `std::atomic`; the lock-free single-owner *write* model (zero store atomics) is preserved. **Verified under ThreadSanitizer:** 8 concurrent readers + a 6-reader/2-writer mix through `ConcurrentServer` are race-free + oracle-correct; escalation returns the proper status; informational throughput ~7.5× (10 threads vs 1) on a multicore dev box. 64-test suite + oracle green, clean under ASan/UBSan + TSan. Deferred: epoch/snapshot reclamation for concurrent COLD reads (v1 escalates), read-path tiering heat, per-column/striped locks, GPU-engine concurrency, MVCC isolation, concurrent wire txns. Spec/plan: `docs/superpowers/specs/2026-06-29-concurrent-serving-design.md` + `docs/superpowers/plans/2026-06-29-concurrent-serving.md`.*
 
+*NW-3 FIXED (2026-07-01, critical): `matrix_serialize_request`/`matrix_deserialize_request`
+(`server.hpp`) only ever encoded 6 of `MatrixQuery`'s 14 fields (`value_col`, `agg`, `has_filter`,
+`threshold`, `grouped`, `key_col`, `num_groups`). `cmp`, `upper`, `lo_i64`, `hi_i64`, `lo_f64`,
+`hi_f64`, `limit`, and `filter_col` were silently dropped — a networked client using BETWEEN, a
+non-default comparison, typed int64/double filter bounds, or cross-column WHERE got a completely
+different, wrong query executed server-side with no error. Worse than a crash: a plausible-looking
+wrong answer, for features the engine (QRY-3, DM-3j, DM-4) had supported over the CPU-direct path
+for a while. Fixed by extending both wire functions to carry the full struct (int64/double via the
+existing `matrix_bit_cast` helper; a bounds check on the deserialized `cmp` matching the existing
+`kind` check's discipline). `limit` now round-trips on the wire byte-for-byte but still has **no
+effect** via the network QUERY dispatch — `serve_core`/`ConcurrentServer::serve()` both call
+`execute_query()`, which never reads `q.limit` (top-N only exists via `top_query(sql)`, a separate
+CPU-direct helper) — documented plainly in `MatrixQuery::limit`'s own comment as a distinct,
+still-open missing-feature gap, not silently implied fixed alongside the correctness bug.
+`test_serve_query_previously_dropped_fields` (test_server.cpp) proves a cross-column WHERE and a
+BETWEEN query served over the wire match direct `execute_query`, and are asserted to differ from
+what the old wire format would have silently run instead. 67-test suite + oracle green.*
+
+*NW-2/NW-5 FIXED — matrixdbd now actually serves multiple clients (2026-07-01, high): `ConcurrentServer`
+above was real and tested but **never called by matrixdbd's TCP accept loop** — `matrix_serve_tcp`/
+`matrix_serve_tcp_auth` served one connection fully before `accept()`-ing the next, so a second
+client couldn't even connect until the first disconnected. This means every "NW-2 landed" note above
+was accurate about the *library component* and silently misleading about the *shipped daemon* — a
+validated-in-isolation piece with zero integration into the thing anyone would actually run. Fixed:
+both accept loops now construct one `ConcurrentServer` and spawn a detached thread per accepted
+connection, all dispatching through that same shared instance, so the mutex serializes writes across
+every connection, not just within one. `matrixdbd.cpp` itself needed zero changes (signatures
+unchanged). `ConcurrentServer`'s constructor moved `principal` from a fixed constructor argument to
+a per-`serve()` parameter (a single daemon-wide principal doesn't work once each connection
+authenticates independently). This surfaced a second, genuine bug: `ConcurrentServer` stored
+`AccessPolicy` as `const AccessPolicy&`, so `ConcurrentServer srv(eng, AccessPolicy::permissive())` —
+a completely reasonable-looking call, and the exact shape this fix's own new test first tried — was
+a dangling reference the instant the constructor call's full expression ended, silently degrading
+every authorization check to FORBIDDEN. Fixed by storing `AccessPolicy` by value (small, cheap to
+copy). New coverage in `test_server_tcp.cpp`: a single-connection round-trip against
+`ConcurrentServer::serve()` directly, and a genuine 8-connection/50-ops-each concurrency test (real
+threads over real socketpairs — bind() is sandbox-blocked, so socketpairs stand in for what the real
+accept loop would hand to threads) proving both correctness under load and that a PUT on one
+connection is visible to a GET on a different connection. Clean under ASan+UBSan and TSan.
+**Residual, deliberately not fixed here:** no cap on concurrent connections/threads (NW-5's own
+documented remainder — thread-per-connection changes "one client blocks everyone" into "N clients
+accumulate N threads," a partial mitigation, not a fix for unbounded resource growth) and no
+graceful shutdown/connection draining (detached threads, matching matrixdbd's pre-existing
+run-forever model — this was previously deferred under RM-4 pending NW-2; NW-2 is now wired in, so
+this is unblocked but still not built).*
+
 ## 5. Security
 
 | ID | Gap | Why | Sev | Effort | Local? |
@@ -229,6 +313,25 @@ in the current env (CPU, no network) vs needs real infra.
 *SE-1 landed (authentication — completes the authn/authz/audit triad, CPU): `Authenticator` validates a bearer credential (token) → principal, distinct from `AccessPolicy` (authn = WHO you are; authz = what you may do). A new `matrix_serve(eng, policy, authenticator, token, req)` overload authenticates FIRST — an unknown/empty token is rejected with the new `ERR_UNAUTHENTICATED` (=1002) and **no engine work** — then serves as the resolved principal (so `AccessPolicy` still gates it). The token is supplied by the transport from the connection, never read from the request payload (no spoofing — same discipline as SE-2's principal). test_security.cpp `test_authentication` proves the ordering: valid token → OK; bad/empty token → ERR_UNAUTHENTICATED with no data; a valid token for an un-granted principal → ERR_FORBIDDEN (authn precedes authz). ponytail: tokens are opaque strings in a map — a real deployment stores salted hashes + ties the token to the connection (a handshake on `matrix_serve_conn`); this is the mechanism, not a credential store. All 6 server-dependent tests green. 56-test suite + oracle green. Remaining SE: SE-3 TLS (needs a vetted library + the transport), SE-4 encryption-at-rest (won't hand-roll crypto).*
 
 *SE-1 over the transport + a SIGPIPE fix (the honest-review verification paid off): `matrix_serve_conn_auth(eng, policy, auth, fd)` authenticates a connection ONCE via a leading `[u32 len][token]` frame → principal (reject + close on failure), then runs the normal serve loop as that principal — the realistic per-connection model. `MatrixClient::authenticate(token)` sends the inverse frame. Verified over a socketpair (good token → authenticated query OK; bad token → server rejects + closes → client ops return false). **Bug caught by TSan:** the auth test's concurrent close-during-send exposed a latent SIGPIPE in `send_all` (`flags=0`) — a write to a peer that already closed killed the whole process (a real client/server crash vector, not test-only). Fixed: `send_all` now passes `MSG_NOSIGNAL` where defined (Linux/Colab → EPIPE, not the signal) and the test ignores SIGPIPE (macOS dev). Re-verified clean under both ASan+UBSan and **TSan** (exit 0, no race, no signal). 56-test suite + oracle green.*
+
+*SE-1 FIXED — constant-time token comparison (2026-07-01, high, CWE-208): `Authenticator::authenticate`
+looked up the token in a `std::unordered_map`: `find()` hashes the input then compares it against one
+bucket with `std::string::operator==`, which returns as soon as it hits a differing byte — a textbook
+timing side-channel on a bearer credential (whether a guess lands in the same hash bucket as a real
+token, and for a same-length guess, how many leading bytes matched before diverging), with no rate
+limiting anywhere in the accept loop to make probing it expensive. Fixed: `Authenticator` now scans
+every registered credential, every time, with no early exit on a match — total work is the same
+regardless of which (if any) token is closest to a guess — and the byte comparison itself accumulates
+an XOR across the full length rather than short-circuiting. O(n) in the number of registered
+credentials, but `authenticate()` runs once per new connection, not per query, so n being small makes
+this free in practice. `test_authentication_constant_time_correctness` (test_security.cpp) locks in
+that the rewrite didn't trade correctness for the timing fix (a same-length guess differing only in
+the last byte, a proper prefix of a real token, and a real token plus a trailing byte must all still
+be rejected). 67-test suite + oracle green. Note: `matrixdbd`'s STATS/HEALTH ops are still
+unconditionally readable by any connected-but-unauthenticated-in-dev-mode client (by design, for
+orchestrator probes) — this leaks operational topology (column count, resident bytes, query
+latencies, exact version) to anyone who can complete a TCP handshake in the zero-config no-token
+default; not changed here, flagged as a known trade-off, not a regression.*
 
 *NW-5 partial (connection read timeout, CPU): `matrix_set_recv_timeout(fd, ms)` sets `SO_RCVTIMEO`, and `matrix_serve_tcp` now applies it (default 30s) to every accepted connection. A client that connects but never sends (slowloris) used to block `matrix_serve_conn`'s `recv` forever — stalling the single-owner serve loop so NO other client could be served (a trivial DoS). Now `recv` times out → `recv_all` returns false → `serve_conn` returns false → the loop drops the stuck connection and moves on. test_recv_timeout.cpp proves it over a socketpair: a no-data client → `serve_conn` returns false within the 200ms timeout (the test completes — it would hang forever without the fix); a request that arrives in time still serves. A symmetric `matrix_set_send_timeout` (SO_SNDTIMEO) closes the other direction (a slow-reader that never drains the response), and `matrix_serve_tcp` sets both on each accepted connection. 60-test suite + oracle green. Deferred (NW-5 rest): max-connection limits, backpressure, connection pooling — most need the concurrent-serving model (NW-2, contra the single-owner thesis).*
 
@@ -291,6 +394,26 @@ remembered to run `SAN=1`/manually check under TSan by hand. Both new jobs verif
 before landing (67-test suite + oracle, both modes) — as with BP-4, the actual CI run itself is a
 manual host-verification step from this sandbox (no GitHub Actions access here).*
 
+*QA-2 coverage gap CLOSED for the ring buffer, two new gaps OPENED by the same audit (2026-07-01):
+`ring_buffer.hpp`'s `SPSCRingBuffer` — the one hand-rolled lock-free primitive in the codebase,
+custom `memory_order_relaxed`/`acquire`/`release` cursor caching — had zero dedicated tests;
+`main.cpp` only drove it as a benchmark, asserting nothing about its own contract. Added
+`test_ring_buffer.cpp`: FIFO order, full/empty boundary (including that a failed push/pop doesn't
+mutate size or the output param), wraparound correctness across ~500 multiples of Capacity, size()
+accounting, and a genuine two-thread producer/consumer stress test (2M items) — the only way to
+exercise the cross-thread memory-ordering contract. Confirmed non-vacuous (injected an off-by-one
+into the full-check boundary, watched the test catch it, reverted). Clean under ASan+UBSan and TSan.
+**Two gaps this same pass found and did NOT fix, still open:** (1) no test anywhere exercises
+`cold_store.hpp`'s transactional buffering path (`append_txn_put`/`append_commit`) in isolation —
+`test_cold_store.cpp` does real byte-level WAL corruption injection but never independently verifies
+"buffer writes until a commit marker, discard uncommitted ones on EOF," the exact mechanism
+`test_transactions.cpp` relies on for atomicity; if that buffering broke, nothing in the file
+specifically responsible for WAL correctness would catch it. (2) `test_catalog_snapshot.cpp` is
+100% single-threaded despite `save_catalog` (no locking, no documented single-writer contract)
+being exactly the kind of whole-catalog operation that needs a concurrent-modification test — low
+risk today (nothing currently calls it from a background thread) but untested if that ever changes.
+67-test suite + oracle green.*
+
 *QA-5 failure-injection landed (engine-level corrupt-WAL recovery): test_fault_injection.cpp injects WAL corruption and proves a fresh `CPUMockEngine` degrades gracefully — (1) a **torn tail** (a partial record appended, simulating a crash mid-write) → all committed writes before it recover and the engine stays usable; (2) an **early flipped payload byte** → the CRC catches it, replay stops at that record (recovering nothing past it), no crash, and the engine is fully usable afterward (new writes commit). This is the integration-level complement to test_cold_store's ColdStore-unit corruption tests — it verifies the database SURVIVES a corrupt log, the load-bearing durability guarantee. Clean under ASan+UBSan (the replay buffer handles adversarial length fields via the `≤ MATRIX_WAL_MAX_RECORD` guard). 58-test suite + oracle green. Remaining QA-5: fault injection on the catalog-snapshot / column-file readers (they already `abort()` fail-loud on our own corrupt format — a graceful-vs-abort policy call), randomized chaos scheduling.*
 
 ## 9. Build, packaging & deployment
@@ -346,6 +469,16 @@ move up-market to the datacenter tier.*
 | KD-3 | Page-binning runs on host — fold into the dual-trigger batcher | P2 | S | yes |
 | KD-4 | Unified-memory path is a stub — implement when hardware is available | P2 | L | needs HW |
 | KD-5 | Hyper-Q multi-stream, `cudaHostRegister` pinned DMA | P2 | M | needs GPU |
+| KD-6 | `compute_mock.cpp` (1990 lines, the biggest file by ~4×) does at least 5 separable jobs in one class: engine lifecycle/WAL/txns, catalog management, a hand-rolled SQL tokenizer+parser (several hundred lines, zero dependency on tiering internals beyond column accessors), query execution/reduction dispatch, and joins/projection. None of these are the CPU/GPU hardware-abstraction duplication that's inherent to this project's design (that split is load-bearing, not a smell) — they're independent responsibilities that landed on one file because each was one more increment. A reasonable split: `query_parser.hpp` (the tokenizer/parser — currently untestable in isolation since it's a private method suite on `CPUMockEngine`, forcing every parser test to stand up a full engine) and `relational_ops.hpp` (joins/gather/project), leaving lifecycle+catalog+execution at roughly half the current size. Found by an audit (2026-07-01); not refactored — the file works, and a mechanical split of a 1990-line file was a bigger risk than this pass's budget justified. | P2 | M | yes |
+
+*2026-07-01 audit note: KD-6, DM-1b, the TX-2/QA-2 testing gaps above, and the still-open QA-6 (GPU
+kernel execution in CI) are the honest residue of a full adversarial review of this codebase. Every
+Critical/High-severity finding that was actionable without a GPU was fixed the same day (DM-3j NULL
+persistence, NW-3 wire-protocol field-dropping, SE-1 timing side-channel, NW-2 daemon wiring +
+AccessPolicy dangling reference, QA-2 ring-buffer coverage, QA-3 CI sanitizer wiring — see each
+gap's own note above for detail). What's listed here is what remains: things that need a GPU to fix
+(DM-1b, QA-6), or that are real but lower-urgency structural/coverage debt (KD-6, TX-2/QA-2 testing
+gaps) rather than live correctness/security bugs.*
 
 ---
 
