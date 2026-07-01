@@ -11,8 +11,8 @@ if [ -n "${CXX:-}" ]; then :; elif command -v clang++ >/dev/null 2>&1; then CXX=
 VERSION=$(grep 'const char\* MATRIXDB_VERSION' version.hpp | head -1 | grep -o '"[^"]*"' | tr -d '"')
 echo "Building MatrixDB v$VERSION..."
 
-# Build both binaries
-"$CXX" -std=c++20 -O2 matrixdb_cli.cpp -o matrixdb
+# Build both binaries (matrixdb: same -O3 as build.sh; matrixdbd: -O2, matching run_tests.sh's daemon compile)
+"$CXX" -std=c++20 -O3 matrixdb_cli.cpp -o matrixdb
 "$CXX" -std=c++20 -O2 matrixdbd.cpp -o matrixdbd
 
-echo "Built matrixdb and matrixdbd (v$VERSION)"
+echo "Built matrixdb and matrixdbd (v$VERSION, CXX=$CXX)"
