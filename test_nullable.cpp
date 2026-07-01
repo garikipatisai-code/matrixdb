@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstdint>
 #include <bit>
+#include <cstdio>
 #include <vector>
 #include <iostream>
 
@@ -135,4 +136,37 @@ static void test_grouped_nullable() {
     std::cout << "[grouped nullable] ok\n";
 }
 
-int main() { test_nullable(); test_nullable_typed(); test_filtered_nullable(); test_grouped_nullable(); std::cout << "ALL NULLABLE TESTS PASSED\n"; return 0; }
+// NULL masks must survive a save_catalog/load_catalog round-trip (backup/restore, engine restart from a
+// saved catalog). Before this test existed, null_masks_ was pure in-RAM state: a restored column silently
+// treated its NULL rows as ordinary 0/0.0 values — a different, wrong answer for the same query with no
+// error. Covers a masked column, an all-null column, and a maskless column (must stay maskless on reload).
+static void test_nullable_persistence() {
+    const std::string path = "/tmp/matrixdb_nullmask_snap.bin";
+    std::remove(path.c_str());
+    {
+        CPUMockEngine src;
+        std::vector<uint32_t> v = {10, 20, 30, 40, 50};
+        src.load_scan_column(2, v.data(), v.size());
+        src.set_column_nulls(2, {0, 1, 0, 1, 0});           // non-null: {10,30,50}, SUM 90
+        std::vector<uint32_t> w = {7, 8, 9};
+        src.load_scan_column(3, w.data(), w.size());
+        src.set_column_nulls(3, {1, 1, 1});                 // all-null
+        std::vector<uint32_t> u = {1, 2, 3};
+        src.load_scan_column(4, u.data(), u.size());        // no mask at all
+        assert(src.save_catalog(path) && "save_catalog should succeed");
+    }
+    {
+        CPUMockEngine dst;
+        assert(dst.load_catalog(path) && "load_catalog should succeed");
+        assert(agg_query(dst, 2, AGG_SUM) == 90 && "masked column: NULL rows still excluded after reload");
+        assert(agg_query(dst, 2, AGG_COUNT) == 3 && "masked column: COUNT still non-null-only after reload");
+        assert(agg_query(dst, 3, AGG_COUNT) == 0 && agg_query(dst, 3, AGG_SUM) == 0
+               && "all-null column: still all-null after reload, not silently un-nulled");
+        assert(agg_query(dst, 4, AGG_SUM) == 6 && agg_query(dst, 4, AGG_COUNT) == 3
+               && "maskless column: stays maskless after reload (no phantom nulls)");
+    }
+    std::remove(path.c_str());
+    std::cout << "[nullable persistence] ok\n";
+}
+
+int main() { test_nullable(); test_nullable_typed(); test_filtered_nullable(); test_grouped_nullable(); test_nullable_persistence(); std::cout << "ALL NULLABLE TESTS PASSED\n"; return 0; }

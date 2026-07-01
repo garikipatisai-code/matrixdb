@@ -575,6 +575,21 @@ public:
                 }
             }
         }
+        // Trailing section: NULL masks (DM-3j). Additive to the dicts section above the same way dicts were
+        // additive to the original per-column format — old snapshots simply lack this section and
+        // load_catalog's read is EOF-tolerant. Without this, every backup()/restore() round-trip and every
+        // engine restart from a saved catalog silently turned NULL rows into ordinary 0/0.0 values (a
+        // different, wrong answer for the same query, with no error) — see PRODUCTION_READINESS.md DM-3j.
+        if (ok) {
+            const uint64_t nmasks = null_masks_.size();
+            ok = std::fwrite(&nmasks, sizeof nmasks, 1, f) == 1;
+            for (auto& kv : null_masks_) {
+                if (!ok) break;
+                const uint64_t mid = kv.first, mlen = kv.second.size();
+                ok = std::fwrite(&mid, sizeof mid, 1, f) == 1 && std::fwrite(&mlen, sizeof mlen, 1, f) == 1
+                  && (mlen == 0 || std::fwrite(kv.second.data(), 1, mlen, f) == mlen);
+            }
+        }
         std::fclose(f);
         if (!ok) { std::remove(tmp.c_str()); std::fprintf(stderr, "save_catalog: short write %s\n", tmp.c_str()); return false; }
         if (std::rename(tmp.c_str(), path.c_str()) != 0) { std::remove(tmp.c_str()); std::fprintf(stderr, "save_catalog: rename -> %s failed\n", path.c_str()); return false; }
@@ -635,6 +650,21 @@ public:
                         dict.push_back(std::move(s));
                     }
                     if (ok) { string_dicts_[did] = std::move(dict); string_encoders_[did] = std::move(enc); }
+                }
+            }
+        }
+        // Trailing NULL-masks section (DM-3j) — same EOF-tolerant convention as the dicts section above:
+        // a missing section (an older snapshot) means no column had a mask, which is the correct default.
+        if (ok) {
+            uint64_t nmasks = 0;
+            if (std::fread(&nmasks, sizeof nmasks, 1, f) == 1) {   // present -> new format
+                for (uint64_t mi = 0; ok && mi < nmasks; ++mi) {
+                    uint64_t mid = 0, mlen = 0;
+                    ok = std::fread(&mid, sizeof mid, 1, f) == 1 && std::fread(&mlen, sizeof mlen, 1, f) == 1;
+                    if (!ok || mlen > (1ull << 32)) { ok = false; break; }   // sane bound — corrupt guard
+                    std::vector<uint8_t> mask(static_cast<size_t>(mlen));
+                    if (mlen > 0) { ok = std::fread(mask.data(), 1, mlen, f) == mlen; if (!ok) break; }
+                    null_masks_[mid] = std::move(mask);
                 }
             }
         }
