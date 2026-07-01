@@ -984,8 +984,6 @@ public:
         TieredColumn& vc = *catalog_.at(value_id);
         tier_mgr_.record_access(key_id, kc.size_bytes());
         tier_mgr_.record_access(value_id, vc.size_bytes());
-        tier_mgr_.record_access(key_id, kc.size_bytes());
-        tier_mgr_.record_access(value_id, vc.size_bytes());
 #if defined(MATRIX_USE_CUDA)
         {   // GPU-3g: u32 key + f64 value both VRAM-resident + no null mask -> GROUP BY in VRAM
             const size_t gn = vc.size_bytes() / sizeof(double);
@@ -1483,7 +1481,13 @@ private:
         const size_t n = col.size_bytes() / sizeof(uint32_t);
         const uint64_t mx = matrix_cpu_reduce_all(keys, n, AGG_MAX);   // max key (0 if n==0)
         if (home != MemorySpace::HOST) col.migrate_to(home);
-        return (n == 0) ? 0u : static_cast<uint32_t>(mx + 1);
+        if (n == 0) return 0u;
+        // mx+1 must stay in range: a key of UINT32_MAX would need 2^32 groups, which no query
+        // could ever pass max_query_groups_ for anyway — reject explicitly instead of silently
+        // wrapping to 0 (0 also means ERR_INVALID_GROUP downstream, so a wrap used to "work" by
+        // accident; this makes the rejection reason correct instead of coincidental).
+        if (mx >= std::numeric_limits<uint32_t>::max()) return std::numeric_limits<uint32_t>::max();
+        return static_cast<uint32_t>(mx + 1);
     }
 
     // Cross-column scalar WHERE: aggregate value_col over the rows where the u32 filter_col satisfies the
