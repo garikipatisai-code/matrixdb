@@ -24,6 +24,7 @@
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <netinet/tcp.h>        // TCP_NODELAY
 
 int main(int argc, char** argv) {
     if (argc < 2) { std::cerr << "usage: spike_server <port>\n"; return 2; }
@@ -54,6 +55,11 @@ int main(int argc, char** argv) {
         if (fd < 0) continue;
         matrix_set_recv_timeout(fd, 30000);
         matrix_set_send_timeout(fd, 30000);
+        // Every SCAN response is two send_all() calls (length prefix, then payload). Without
+        // TCP_NODELAY here, Nagle holds the second send waiting to coalesce, and the client's
+        // delayed-ACK timer (~40ms) is what releases it — a stall that dwarfs the actual scan
+        // time and drowns the CPU-vs-GPU signal this spike exists to measure.
+        int nodelay = 1; ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof nodelay);
         for (;;) {
             uint32_t len = 0;
             if (!matrixsrv_detail::recv_all(fd, &len, sizeof len)) break;
