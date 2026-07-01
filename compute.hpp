@@ -318,15 +318,23 @@ struct MatrixQuery {
     uint32_t    threshold  = 0;
     MatrixCmp   cmp        = MatrixCmp::GT;   // comparison op for the filter (default keeps value>threshold)
     uint32_t    upper      = 0;               // BETWEEN's inclusive upper bound (ignored for other ops)
-    int64_t     lo_i64     = 0;   // int64 filter primary bound / BETWEEN lower (I64 columns; not wire-serialized)
+    int64_t     lo_i64     = 0;   // int64 filter primary bound / BETWEEN lower (I64 columns)
     int64_t     hi_i64     = 0;   // int64 filter BETWEEN upper (I64 columns)
-    double      lo_f64     = 0.0; // double filter primary bound / BETWEEN lower (F64 columns; not wire-serialized)
+    double      lo_f64     = 0.0; // double filter primary bound / BETWEEN lower (F64 columns)
     double      hi_f64     = 0.0; // double filter BETWEEN upper (F64 columns)
     bool        grouped    = false;
     uint64_t    key_col    = 0;
     uint32_t    num_groups = 0;
-    uint64_t    limit      = 0;   // ORDER BY agg DESC LIMIT n -> top-N groups; 0 = no limit (parse-side; not wire-serialized)
-    uint64_t    filter_col = 0;   // cross-column WHERE: u32 column the filter reads (0 = filter the value column itself; parse-side, not wire-serialized)
+    // limit crosses the wire (matrix_serialize_request round-trips it byte-for-byte) but has NO effect via
+    // the network QUERY dispatch today: serve_core calls execute_query()/execute_query_impl(), which never
+    // reads q.limit -- top-N (ORDER BY agg DESC LIMIT n) only exists via top_query(sql), a separate
+    // SQL-string CLI helper that calls top_groups() directly and isn't reachable from the wire protocol.
+    // A network client that sets limit gets a normal (non-top-N) query result, not silently wrong data,
+    // but also not top-N -- this is a missing feature, not a data-corruption risk. Wiring top-N into
+    // serve_core's QUERY case is the fix; not done here (out of scope for the field-dropping bug this
+    // struct's other fields were fixed for).
+    uint64_t    limit      = 0;
+    uint64_t    filter_col = 0;   // cross-column WHERE: u32 column the filter reads (0 = filter the value column itself)
 };
 
 // Result of CPUMockEngine::execute_query — OK or a specific input-validation rejection (the query

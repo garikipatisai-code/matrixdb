@@ -6,6 +6,8 @@
 #include "compute_mock.cpp"   // CPUMockEngine + compute.hpp (MatrixQuery/MatrixQueryStatus/MatrixAggOp)
 #include <cstdint>
 #include <cstring>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -98,23 +100,41 @@ inline std::vector<uint8_t> matrix_serialize_request(const MatrixRequest& r) {
     put_u32(b, static_cast<uint32_t>(r.query.agg));
     b.push_back(r.query.has_filter ? 1 : 0);
     put_u32(b, r.query.threshold);
+    put_u32(b, static_cast<uint32_t>(r.query.cmp));
+    put_u32(b, r.query.upper);
+    put_u64(b, matrix_bit_cast<uint64_t>(r.query.lo_i64));
+    put_u64(b, matrix_bit_cast<uint64_t>(r.query.hi_i64));
+    put_u64(b, matrix_bit_cast<uint64_t>(r.query.lo_f64));
+    put_u64(b, matrix_bit_cast<uint64_t>(r.query.hi_f64));
     b.push_back(r.query.grouped ? 1 : 0);
     put_u64(b, r.query.key_col);
     put_u32(b, r.query.num_groups);
+    put_u64(b, r.query.limit);
+    put_u64(b, r.query.filter_col);
     return b;
 }
 inline bool matrix_deserialize_request(const std::vector<uint8_t>& b, MatrixRequest& out) {
     using namespace matrixsrv_detail;
     Reader r{ b.data(), b.data() + b.size() };
-    uint32_t kind = 0, agg = 0; uint8_t hf = 0, gr = 0;
+    uint32_t kind = 0, agg = 0, cmp = 0; uint8_t hf = 0, gr = 0;
+    uint64_t lo_i64_bits = 0, hi_i64_bits = 0, lo_f64_bits = 0, hi_f64_bits = 0;
     r.u32(kind); r.u64(out.key); r.u64(out.value);
     r.u64(out.query.value_col); r.u32(agg); r.u8(hf); r.u32(out.query.threshold);
+    r.u32(cmp); r.u32(out.query.upper);
+    r.u64(lo_i64_bits); r.u64(hi_i64_bits); r.u64(lo_f64_bits); r.u64(hi_f64_bits);
     r.u8(gr); r.u64(out.query.key_col); r.u32(out.query.num_groups);
+    r.u64(out.query.limit); r.u64(out.query.filter_col);
     if (!r.ok || !r.done()) return false;
     if (kind < 1 || kind > 5) return false;
+    if (cmp > static_cast<uint32_t>(MatrixCmp::BETWEEN)) return false;   // reject a garbage cmp, don't guess
     out.kind = static_cast<ReqKind>(kind);
     out.query.agg = static_cast<MatrixAggOp>(agg);
     out.query.has_filter = (hf != 0);
+    out.query.cmp = static_cast<MatrixCmp>(cmp);
+    out.query.lo_i64 = matrix_bit_cast<int64_t>(lo_i64_bits);
+    out.query.hi_i64 = matrix_bit_cast<int64_t>(hi_i64_bits);
+    out.query.lo_f64 = matrix_bit_cast<double>(lo_f64_bits);
+    out.query.hi_f64 = matrix_bit_cast<double>(hi_f64_bits);
     out.query.grouped = (gr != 0);
     return true;
 }

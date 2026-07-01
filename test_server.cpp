@@ -8,14 +8,24 @@
 
 static void test_request_roundtrip() {
     MatrixRequest r; r.kind = ReqKind::QUERY; r.key = 7; r.value = 70;
-    r.query = MatrixQuery{.value_col=2, .agg=AGG_SUM, .has_filter=true, .threshold=5,
-                          .grouped=true, .key_col=1, .num_groups=4};
+    r.query = MatrixQuery{.value_col=2, .agg=AGG_SUM, .has_filter=true, .threshold=5, .cmp=MatrixCmp::BETWEEN,
+                          .upper=9, .lo_i64=-123456789012LL, .hi_i64=987654321098LL, .lo_f64=-1.5, .hi_f64=2.5,
+                          .grouped=true, .key_col=1, .num_groups=4, .limit=10, .filter_col=3};
     auto b = matrix_serialize_request(r);
     MatrixRequest r2;
     assert(matrix_deserialize_request(b, r2));
     assert(r2.kind == ReqKind::QUERY && r2.key == 7 && r2.value == 70);
     assert(r2.query.value_col == 2 && r2.query.agg == AGG_SUM && r2.query.has_filter
            && r2.query.threshold == 5 && r2.query.grouped && r2.query.key_col == 1 && r2.query.num_groups == 4);
+    // Previously silently dropped on the wire (the server would execute a different, wrong query than
+    // the one the client asked for): cmp/upper, int64+double filter bounds, limit, filter_col. All now
+    // round-trip byte-for-byte. (limit round-trips but still has no effect via the network QUERY dispatch
+    // -- see compute.hpp's MatrixQuery::limit comment -- that's a separate, distinct missing-feature gap,
+    // not the silent-data-corruption bug this test guards against.)
+    assert(r2.query.cmp == MatrixCmp::BETWEEN && r2.query.upper == 9 && "cmp/upper now cross the wire");
+    assert(r2.query.lo_i64 == -123456789012LL && r2.query.hi_i64 == 987654321098LL && "int64 bounds now cross the wire");
+    assert(r2.query.lo_f64 == -1.5 && r2.query.hi_f64 == 2.5 && "double bounds now cross the wire");
+    assert(r2.query.limit == 10 && r2.query.filter_col == 3 && "limit/filter_col now cross the wire");
     b.pop_back(); assert(!matrix_deserialize_request(b, r2) && "truncated request rejected");
     std::cout << "[request round-trip] ok\n";
 }
@@ -76,6 +86,50 @@ static void test_bad_request() {
     std::cout << "[bad request] ok\n";
 }
 
+// Proves the field-dropping bug is actually fixed, not just that bytes round-trip in isolation: a
+// cross-column WHERE (filter_col) and a BETWEEN predicate (cmp/upper) served over the wire must produce
+// the SAME result as calling execute_query directly. Before the fix, filter_col/cmp/upper never reached
+// the server (silently defaulted to filter_col=0/cmp=GT), so a networked cross-column-WHERE query
+// silently ran a completely different query and returned a plausible-looking wrong answer.
+static void test_serve_query_previously_dropped_fields() {
+    const size_t N = 20;
+    std::vector<uint32_t> value(N), filt(N);
+    for (size_t i = 0; i < N; ++i) { value[i] = static_cast<uint32_t>(i * 10); filt[i] = static_cast<uint32_t>(i % 3); }
+    CPUMockEngine eng(0, "", SIZE_MAX);
+    eng.load_scan_column(1, value.data(), N);   // value column: 0,10,20,...,190
+    eng.load_scan_column(2, filt.data(), N);    // filter column: 0,1,2,0,1,2,...
+
+    // Cross-column WHERE: SUM(value) WHERE filt == 1 (filt != value_col, so this exercises filter_col).
+    MatrixQuery q{.value_col = 1, .agg = AGG_SUM, .has_filter = true, .threshold = 1, .cmp = MatrixCmp::EQ,
+                  .filter_col = 2};
+    std::vector<uint64_t> direct;
+    assert(eng.execute_query(q, direct) == MatrixQueryStatus::OK);
+
+    MatrixRequest req; req.kind = ReqKind::QUERY; req.query = q;
+    MatrixResponse resp;
+    assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(req)), resp));
+    assert(resp.status == 0 && resp.results == direct
+           && "cross-column WHERE over the wire == direct execute_query (filter_col actually crossed the wire)");
+    // Non-vacuity: this must differ from what the OLD (broken) wire format would have silently run
+    // (filter_col defaulting to 0, i.e. WHERE value_col == 1 instead of WHERE filt == 1).
+    MatrixQuery old_broken_equivalent{.value_col = 1, .agg = AGG_SUM, .has_filter = true, .threshold = 1,
+                                       .cmp = MatrixCmp::EQ, .filter_col = 0};
+    std::vector<uint64_t> old_result;
+    eng.execute_query(old_broken_equivalent, old_result);
+    assert(old_result != direct && "sanity: the old silently-wrong query really would have returned a different answer");
+
+    // BETWEEN (cmp/upper) over the wire, cross-checked the same way.
+    MatrixQuery bq{.value_col = 1, .agg = AGG_COUNT, .has_filter = true, .threshold = 50, .cmp = MatrixCmp::BETWEEN,
+                   .upper = 100};
+    std::vector<uint64_t> bdirect;
+    assert(eng.execute_query(bq, bdirect) == MatrixQueryStatus::OK);
+    MatrixRequest breq; breq.kind = ReqKind::QUERY; breq.query = bq;
+    MatrixResponse bresp;
+    assert(matrix_deserialize_response(matrix_serve(eng, matrix_serialize_request(breq)), bresp));
+    assert(bresp.status == 0 && bresp.results == bdirect && "BETWEEN over the wire == direct execute_query");
+    std::cout << "[serve query: previously wire-dropped fields] ok\n";
+}
+
 static void test_serve_health() {
     const size_t N = 50; std::vector<uint32_t> col(N, 1);
     CPUMockEngine eng(0, "", SIZE_MAX); eng.load_scan_column(2, col.data(), N);
@@ -126,6 +180,7 @@ int main() {
     test_response_roundtrip();
     test_serve_get_put();
     test_serve_query();
+    test_serve_query_previously_dropped_fields();
     test_serve_health();
     test_serve_stats();
     test_bad_request();
