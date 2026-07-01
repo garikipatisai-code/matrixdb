@@ -6,3 +6,8 @@ spike/
 *.tmp
 matrixdb
 matrixdbd
+matrixdb_proto
+matrixdb_cpu
+build/
+*.out
+examples/*.db
