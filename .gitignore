@@ -2,6 +2,7 @@
 matrixdb_proto
 matrixdb_cpu
 matrixdb
+matrixdbd
 build/
 *.o
 *.out
