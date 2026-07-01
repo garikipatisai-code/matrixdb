@@ -41,10 +41,11 @@ size — out of scope here, noted as a deferred alternative in the register.
    `test_server_tcp.cpp` socketpair tests still passing (they don't touch `accept`, so they're
    unaffected either way; this is a real-host-behavior fix, not a new tested code path).
 2. **BP-1 — one script builds every production binary.** A `build_all.sh` that builds
-   `matrixdb` (CLI), `matrixdbd` (daemon), and stamps both with the `version.hpp` version in
-   their `--version`/startup output. Reuses the `build.sh`/`run_tests.sh` compiler-detection
-   pattern (`clang++`, fallback `g++`, `CXX` override) already established in this repo — no new
-   build system, no cmake.
+   `matrixdb` (CLI) and `matrixdbd` (daemon) in one command, echoing the `version.hpp` version
+   string so the build output states which version it just built (no new `--version` CLI flag on
+   either binary — that's a separate, non-blocking feature, not part of "a build system exists").
+   Reuses the `build.sh`/`run_tests.sh` compiler-detection pattern (`clang++`, fallback `g++`,
+   `CXX` override) already established in this repo — no new build system, no cmake.
 3. **BP-2 — a Docker image.** One multi-stage `Dockerfile`: build stage compiles `matrixdb` +
    `matrixdbd` from source with the toolchain, runtime stage copies just the two binaries onto a
    minimal base (no compiler in the shipped image). `ENTRYPOINT` runs `matrixdbd` (the thing you'd
