@@ -143,6 +143,51 @@ put it.
   folding into Leg 1 hardening regardless.
 - **Proceed to Leg 1/Leg 2** per `docs/superpowers/specs/2026-06-30-network-gpu-spike-design.md`.
 
+### 3.8 The honest-review pass: extensive process didn't catch what an adversarial audit did
+
+Leg 1 (packaging) landed, and the standing goal shifted to "be as production-ready as a frontier
+DB." Before writing more code, we ran the thing this project's own discipline had never actually
+run on itself: a from-scratch adversarial audit — four independent passes over the core engine,
+the serving/security layer, the test suite, and docs/build hygiene — explicitly told not to be
+diplomatic, not to trust "landed" markers, and to re-derive every claim from the code rather than
+the register's own account of itself.
+
+**What it found that months of spec → plan → subagent-review → merge had not:**
+- **`save_catalog`/`load_catalog` never persisted NULL masks** (DM-3j). Every backup/restore or
+  restart silently turned NULL rows into ordinary 0/0.0 — a different, wrong answer for the same
+  query, with no error. This had been sitting in "landed, tested, green" code since DM-3j shipped.
+- **The wire protocol silently dropped 8 of `MatrixQuery`'s 14 fields.** A networked client using
+  BETWEEN, a non-default comparison, typed filter bounds, or cross-column WHERE got a completely
+  different query executed server-side, silently. Every one of those features had landed on the
+  engine (QRY-3, DM-3j, DM-4) and been declared done — nobody had re-checked the wire format
+  against the struct it was supposed to carry as the struct kept growing.
+- **`ConcurrentServer` — a real, unit-tested, `ThreadSanitizer`-verified component — was never
+  called by the actual daemon.** `matrixdbd` served one connection at a time regardless. A
+  validated-in-isolation library function is not the same claim as "the shipped product does this."
+- A timing side-channel on the bearer token, a dangling reference in the fix for the item above
+  (caught by the fix's OWN new test, not by writing the fix), a copy-paste double-count in tiering
+  heat, and a `UINT32_MAX` overflow masked by an accidental downstream safety net.
+- Zero dedicated tests on the one hand-rolled lock-free primitive in the codebase (`ring_buffer.hpp`),
+  and sanitizers that existed, were genuinely used, and were never actually wired into the CI gate
+  that runs on every push.
+
+**All of the above were fixed the same session** (see `PRODUCTION_READINESS.md`'s per-gap notes
+dated 2026-07-01 for the mechanics of each fix). What's still open, honestly: the GPU point-op
+kernel never received the collision fix the CPU store got (DM-1b) — falsifying this project's own
+header-comment claim that the two backends are byte-identical — and it can't be fixed or verified
+here; there's no GPU in this sandbox, and `compute_cuda.cuh` has had zero automated execution in CI
+for its entire life (QA-6), which is very likely *how* DM-1b went unnoticed this long.
+
+**The lesson, stated plainly because it's uncomfortable:** this project's process — brainstorm →
+spec → self-review → plan → subagent-driven implementation → two-stage review → merge — is
+genuinely more rigorous than most solo projects ever get, and it still let two silent-wrong-answer
+bugs and one silently-half-built feature through, because every one of those reviews checked "does
+this increment do what its own spec says" and none of them checked "does the thing three layers
+away that's supposed to consume this still agree with it." Depth of process is not a substitute for
+periodically looking at the whole system adversarially, from outside the frame of whatever
+increment is currently being built. **Schedule the adversarial pass; don't wait for someone to ask
+for one.**
+
 ---
 
 ## 4. Hypotheses we overturned (kept on purpose — the misses are the lessons)
@@ -154,6 +199,8 @@ put it.
 | Register blocking (CUB) is the top scan lever | vectorized `uint4` edged it | Measure on the actual chip |
 | ~70% per-scan overhead | 4% | Instrument before optimizing |
 | Spec's thread-per-query + delta log | replaced by page ownership | Ownership > conflict resolution |
+| "Landed + tested" == "works in the shipped product" | `ConcurrentServer` was landed + TSan-verified + never called by `matrixdbd` | Unit-tested-in-isolation ≠ integrated; check the actual call path, not just that a test constructs the component |
+| "Byte-identical CPU/GPU store" (compute.hpp's own header claim) | GPU point-op kernel never got the collision fix CPU's did (DM-1b) | An invariant is only as true as its least-recently-audited backend |
 
 ---
 
