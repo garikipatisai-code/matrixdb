@@ -6,21 +6,14 @@ internals and the GPU story, see `README.md`.)
 
 ## Install / build
 
-No cmake — one command produces the `matrixdb` binary:
+No cmake — one command produces both binaries:
 
 ```sh
-./build.sh                 # uses clang++, falls back to g++
-# CXX=g++ ./build.sh       # force a compiler
+./build_all.sh              # uses clang++, falls back to g++ — builds ./matrixdb and ./matrixdbd
+# CXX=g++ ./build_all.sh    # force a compiler
 ```
 
-You need a C++20 compiler (clang++ or g++). The result is a single `./matrixdb` executable.
-
-To also build the network daemon (`matrixdbd`, see "Networked server" below), use `build_all.sh` instead —
-same compiler convention, builds both `./matrixdb` and `./matrixdbd`:
-
-```sh
-./build_all.sh              # builds ./matrixdb and ./matrixdbd
-```
+You need a C++20 compiler (clang++ or g++). This is the same script CI and the Docker image use.
 
 ## Run
 
@@ -151,7 +144,7 @@ Besides the local CLI, MatrixDB has a network daemon, **`matrixdbd`**, speaking 
 GET/PUT/QUERY/HEALTH/STATS protocol with token auth:
 
 ```sh
-./build_all.sh                                         # or ./build.sh for the CLI only
+./build_all.sh
 ./matrixdbd 7070 --open mydata.db --token s3cret      # token auth, serving a saved catalog
 ./matrixdbd 7070                                       # dev mode: no auth, empty catalog
 ```
