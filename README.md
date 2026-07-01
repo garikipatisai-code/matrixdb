@@ -61,8 +61,9 @@ A real analytical engine, not just a count-scan demo — the CPU surface is feat
 - **Ops:** health/readiness probe, query-latency + tiering metrics, structured leveled logging, admission
   control (group-count cap), graceful shutdown, semver build version.
 
-Verified by **65 CPU tests + the pipeline oracle** (`run_tests.sh`), clean under ASan/UBSan and TSan; the
-GPU cross-checks run on a Colab T4 via the notebook.
+Verified by **the CPU test suite + the pipeline oracle** (`./run_tests.sh` prints the current count —
+66 as of this writing, growing every increment so this doc doesn't hardcode a number that goes stale),
+clean under ASan/UBSan (`SAN=1 ./run_tests.sh`); the GPU cross-checks run on a Colab T4 via the notebook.
 
 ## Files
 
@@ -89,7 +90,7 @@ host-only to run), `version.hpp`, `logging.hpp`.
 `matrixdb_cli.cpp` (the thin `matrixdb` main).
 
 **Harness** — `main.cpp` (orchestration + benchmarks + oracle asserts), `run_tests.sh` (CI gate),
-`test_*.cpp` (65 CPU tests, run by `run_tests.sh`), `test_gpu_*.cu` (GPU cross-check gates), `make_notebook.py` (regenerates
+`test_*.cpp` (CPU tests, run by `run_tests.sh` — see its printed count), `test_gpu_*.cu` (GPU cross-check gates), `make_notebook.py` (regenerates
 `matrixdb_colab.ipynb` from the real source — run after edits).
 
 **Docs** — `FINDINGS.md` (engineering journal), `PRODUCTION_READINESS.md` (per-increment gap register),
@@ -118,6 +119,12 @@ is duplicated, so there is no coherence protocol. A `MemorySpace`/`MemoryModel` 
 to unified-memory hardware (e.g. Grace-Hopper); only the discrete-memory path is implemented today.
 
 ## Build & run locally (CPU)
+
+For the actual products (the `matrixdb` CLI and the `matrixdbd` daemon — what CI and the Docker image
+build), use `./build_all.sh` (or `./build.sh` for the CLI alone); see `docs/USAGE.md` for the full
+walkthrough. The commands below build `main.cpp` directly into the pipeline/benchmark harness binary
+(`matrixdb_proto`), a separate target `build_all.sh` does not build:
+
 ```sh
 clang++ -std=c++20 -O3 -mcpu=apple-m1 main.cpp -o matrixdb_proto   # Apple Silicon
 # g++ -std=c++20 -O3 -march=native main.cpp -o matrixdb_proto      # Linux x86_64
@@ -170,8 +177,9 @@ equi-join, one column per side — left before the comma, right after; u32/i64 k
 lkey = rkey`, and aggregate-over-join `SELECT agg(lcol) JOIN lkey = rkey [GROUP BY rcol [HAVING agg <op> v |
 ORDER BY agg DESC LIMIT n]]` (sum/count/min/max a left measure by a right dimension, then filter or rank —
 the star query). Malformed input prints a friendly `Error:` line — never crashes.
-(`matrixdb>` is shown for clarity; the REPL reads plain lines.) A network/server mode and readline history
-are the remaining deferrals.
+(`matrixdb>` is shown for clarity; the REPL reads plain lines.) Readline history is the remaining
+CLI-side deferral — a network/server mode already exists (`matrixdbd`, preview status; see "Known
+limits" below and `docs/USAGE.md`'s Networked server / Docker sections).
 
 ## Test on Google Colab (GPU)
 
@@ -215,14 +223,20 @@ Each step was decided by a benchmark or a cross-check, not a guess. Notable find
   `std::shared_mutex` — `ConcurrentServer`): analytical reads over HOST-resident columns run in parallel
   (verified race-free under ThreadSanitizer), writes serialize, and a read needing a tier borrow escalates
   to the exclusive lock. The lock-free single-owner *write* model (zero store atomics) is preserved.
+  **This is in-process concurrency** (verified via threads calling `ConcurrentServer::serve()` directly);
+  the separate question of whether the TCP daemon (`matrixdbd`) can serve multiple *network* clients at
+  once is answered below — today it cannot, `ConcurrentServer` is not yet wired into its accept loop.
   v1 limits (deferred): a COLD/DEVICE read escalates rather than running concurrently (wants epoch/snapshot
   reclamation); pure concurrent reads don't accrue tiering heat; the global lock can starve writers under
   sustained reads; GPU-engine concurrency and MVCC isolation are future.
 - **Transport is plaintext** (TLS wants a vetted library — see the networked-serving design doc for the
   `IoChannel`/TLS seam and a reverse-proxy interim); **no encryption-at-rest** (won't hand-roll crypto). A
   network daemon (`matrixdbd`) exists as a **preview**: it compiles in CI and the auth+serve path is
-  socketpair-tested, but `bind`/`accept` are host-only (blocked in the sandbox) and connections serve one at
-  a time — concurrency + TLS are designed, not yet built (`docs/superpowers/specs/2026-06-30-matrixdb-networked-serving-design.md`).
+  socketpair-tested, but `bind`/`accept` are host-only (blocked in the sandbox) and **it serves one TCP
+  connection at a time** — a second client cannot even connect until the first disconnects, regardless of
+  the in-process `ConcurrentServer` capability described above. Wiring `ConcurrentServer` into the accept
+  loop (one thread per connection, shared `ConcurrentServer` instance) plus TLS are designed, not yet
+  built (`docs/superpowers/specs/2026-06-30-matrixdb-networked-serving-design.md`).
 - **Per-batch GPU sync (point-op path):** each `execute_batch` blocks on a `cudaStreamSynchronize`;
   double-buffering / async batches would hide it. HTAP head-of-line blocking between scans and point ops is
   already fixed (separate queues/threads, GPU separate streams).
