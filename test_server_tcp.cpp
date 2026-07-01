@@ -5,9 +5,12 @@
 #include "server_tcp.hpp"
 #include <sys/socket.h>
 #include <unistd.h>
+#include <array>
 #include <cassert>
 #include <cstdint>
 #include <vector>
+#include <atomic>
+#include <thread>
 #include <iostream>
 
 static MatrixRequest mk(ReqKind k) { MatrixRequest r; r.kind = k; return r; }
@@ -72,6 +75,78 @@ int main() {
       ::shutdown(fd[0], SHUT_WR);
       assert(!matrix_serve_conn_auth(eng, pol, auth, fd[1]) && "unauthenticated connection rejected");
       ::close(fd[0]); ::close(fd[1]); }
+
+    // matrix_serve_conn_concurrent: same framing, dispatched through a shared ConcurrentServer instead of
+    // the bare matrix_serve -- what matrix_serve_tcp's real (HOST-ONLY, unrunnable here) accept loop now
+    // uses. One connection first, proving byte-for-byte equivalence with ConcurrentServer::serve() direct.
+    {
+        ConcurrentServer csrv(eng, pol);
+        int fd[2]; assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, fd) == 0);
+        const std::vector<uint8_t> qb = matrix_serialize_request(q);
+        framed_write(fd[0], qb);
+        assert(matrix_serve_conn_concurrent(csrv, 1, fd[1]) && "concurrent-dispatch server served one framed request");
+        const std::vector<uint8_t> got = framed_read(fd[0]);
+        assert(got == csrv.serve(qb, 1) && "TCP-framed concurrent serve == direct ConcurrentServer::serve");
+        ::close(fd[0]); ::close(fd[1]);
+    }
+
+    // The actual concurrency claim: N independent "connections" (socketpairs standing in for what
+    // matrix_serve_tcp's accept loop would hand to N threads -- the only thing bind()/accept() would add
+    // over this is OS-level connection acceptance, not the serve logic under test), each served on its
+    // own thread, all sharing ONE ConcurrentServer over the SAME engine. Proves two things at once: many
+    // connections' requests are all served correctly under concurrent load, and a PUT on one connection is
+    // durably visible to a GET on a completely different connection (the mutex actually serializes writes
+    // across connections, not just within one -- the exact property that made ConcurrentServer's old
+    // fixed-principal, single-instance-per-daemon design insufficient for matrixdbd before this fix).
+    {
+        CPUMockEngine meng;   // fresh engine: this test's PUTs must not collide with earlier tests' keys
+        ConcurrentServer msrv(meng, AccessPolicy::permissive());
+        constexpr int kConns = 8, kOpsPerConn = 50;
+        std::vector<std::array<int, 2>> fds(kConns);
+        for (auto& p : fds) { int f[2]; assert(::socketpair(AF_UNIX, SOCK_STREAM, 0, f) == 0); p = {f[0], f[1]}; }
+
+        std::atomic<int> bad{0};
+        std::vector<std::thread> servers, clients;
+        for (int c = 0; c < kConns; ++c) {
+            const int server_fd = fds[static_cast<size_t>(c)][1];
+            servers.emplace_back([&msrv, server_fd] {
+                while (matrix_serve_conn_concurrent(msrv, /*principal=*/0, server_fd)) { /* until EOF */ }
+            });
+        }
+        for (int c = 0; c < kConns; ++c) {
+            const int client_fd = fds[static_cast<size_t>(c)][0];
+            clients.emplace_back([&, c, client_fd] {
+                for (int i = 0; i < kOpsPerConn; ++i) {
+                    const uint64_t key = static_cast<uint64_t>(c) * 1000 + static_cast<uint64_t>(i);
+                    MatrixRequest put = mk(ReqKind::PUT); put.key = key; put.value = key * 7;
+                    framed_write(client_fd, matrix_serialize_request(put));
+                    MatrixResponse presp;
+                    if (!matrix_deserialize_response(framed_read(client_fd), presp) || presp.status != 0) ++bad;
+
+                    MatrixRequest get = mk(ReqKind::GET); get.key = key;
+                    framed_write(client_fd, matrix_serialize_request(get));
+                    MatrixResponse gresp;
+                    if (!matrix_deserialize_response(framed_read(client_fd), gresp)
+                        || gresp.results.size() != 1 || gresp.results[0] != key * 7) ++bad;
+                }
+                ::shutdown(client_fd, SHUT_WR);   // EOF -> the matching server thread's loop ends
+            });
+        }
+        for (auto& t : clients) t.join();
+        for (auto& t : servers) t.join();
+        assert(bad.load() == 0 && "all connections' PUT+GET pairs correct under real concurrent serving");
+
+        // Cross-connection visibility: every key written by every connection's thread is readable now,
+        // through the SAME shared engine -- not N independent, isolated per-connection states.
+        for (int c = 0; c < kConns; ++c) {
+            for (int i = 0; i < kOpsPerConn; ++i) {
+                const uint64_t key = static_cast<uint64_t>(c) * 1000 + static_cast<uint64_t>(i);
+                uint64_t v = 0; assert(meng.kv_get(key, v) && v == key * 7 && "cross-connection write visible");
+            }
+        }
+        for (auto& p : fds) { ::close(p[0]); ::close(p[1]); }
+        std::cout << "[concurrent accept-loop dispatch] ok (" << kConns << " connections x " << kOpsPerConn << " ops)\n";
+    }
 
     std::cout << "ALL TCP-TRANSPORT TESTS PASSED\n";
     return 0;
