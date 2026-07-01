@@ -15,6 +15,13 @@ No cmake — one command produces the `matrixdb` binary:
 
 You need a C++20 compiler (clang++ or g++). The result is a single `./matrixdb` executable.
 
+To also build the network daemon (`matrixdbd`, see "Networked server" below), use `build_all.sh` instead —
+same compiler convention, builds both `./matrixdb` and `./matrixdbd`:
+
+```sh
+./build_all.sh              # builds ./matrixdb and ./matrixdbd
+```
+
 ## Run
 
 ```sh
@@ -144,7 +151,7 @@ Besides the local CLI, MatrixDB has a network daemon, **`matrixdbd`**, speaking 
 GET/PUT/QUERY/HEALTH/STATS protocol with token auth:
 
 ```sh
-clang++ -std=c++20 -O2 matrixdbd.cpp -o matrixdbd     # or g++
+./build_all.sh                                         # or ./build.sh for the CLI only
 ./matrixdbd 7070 --open mydata.db --token s3cret      # token auth, serving a saved catalog
 ./matrixdbd 7070                                       # dev mode: no auth, empty catalog
 ```
@@ -156,6 +163,43 @@ but it's **host-only to run** (loopback `bind` is blocked in the build sandbox) 
 a time**. TLS and concurrent connections are *designed but not built* — for encryption today, terminate TLS at
 a reverse proxy (nginx/Caddy/stunnel) in front of `matrixdbd` on loopback. Full plan + wire-protocol spec:
 `docs/superpowers/specs/2026-06-30-matrixdb-networked-serving-design.md`.
+
+## Docker
+
+A multi-stage `Dockerfile` at the repo root builds `matrixdbd` (and `matrixdb`, for admin access) into a
+minimal runtime image with no compiler/toolchain — the standard way to ship a single-box database today.
+
+```sh
+docker build -t matrixdb .
+docker run -p 7070:7070 matrixdb                                   # dev mode: no auth, empty catalog
+
+# authenticated, serving a snapshot mounted from the host:
+docker run -p 7070:7070 \
+    -e MATRIXDB_OPEN=/data/mydata.db -e MATRIXDB_TOKEN=s3cret \
+    -v ./mydata.db:/data/mydata.db \
+    matrixdb
+
+# administer the running container's data directory with the bundled CLI:
+docker exec -it <container> matrixdb -c "SELECT COUNT(*)"
+```
+
+`MATRIXDB_OPEN` and `MATRIXDB_TOKEN` are optional environment variables the entrypoint translates into
+`matrixdbd`'s `--open`/`--token` flags; unset, the container starts in dev mode. `PORT` (default `7070`)
+overrides the listen port without needing to rewrite the entrypoint.
+
+**Current limitations (read before relying on this in anything but a dev/demo setting):**
+- **Token visibility.** `MATRIXDB_TOKEN` is a plain environment variable — visible to anyone who can run
+  `docker inspect` on the container, same caveat as `POSTGRES_PASSWORD` and similar containerized-DB
+  conventions. There's no secrets-manager integration yet; treat container-level access as equivalent to
+  token-level access.
+- **No durable-volume story beyond a snapshot file.** `--open` loads one snapshot file at startup;
+  `matrixdbd` does not write back to it automatically (persistence is point-op WAL, which isn't wired into
+  `matrixdbd` yet — a pre-existing gap, not introduced by this image). Mounting `/data` gives you a place to
+  put a snapshot to load, not a live-durable database directory.
+- **CPU-only image.** The build stage has no CUDA toolchain, so the image always runs the CPU engine
+  (`CPUMockEngine`) — there is no GPU-accelerated container yet.
+- **No TLS.** Same as the bare `matrixdbd` — terminate TLS at a reverse proxy in front of the container if
+  you need encryption.
 
 ## Verifying a build
 
