@@ -66,17 +66,40 @@ private:
 // mechanism, not a credential store.)
 class Authenticator {
 public:
-    void add_credential(const std::string& token, uint64_t principal) { tokens_[token] = principal; }
+    void add_credential(const std::string& token, uint64_t principal) { tokens_.push_back({token, principal}); }
     // True + principal if the token is known; false (principal untouched) otherwise. Empty token -> false.
+    //
+    // Deliberately NOT a hash-map lookup: unordered_map::find hashes the input then compares it against
+    // one bucket with std::string::operator==, which returns as soon as it finds a differing byte. That
+    // leaks two things via response timing — whether a guess landed in the same bucket as any real token,
+    // and (for a same-length guess) how many leading bytes matched before diverging — the textbook
+    // timing side-channel on a bearer-token comparison (CWE-208). Instead this compares the presented
+    // token against EVERY registered credential, every time, with no early exit on a match: total work is
+    // the same whether the token matches nothing, matches the first entry, or matches the last, so an
+    // attacker's response-time samples carry no signal about which (if any) token is closest to a guess.
+    // O(n) in the number of registered tokens, but n is a handful of provisioned credentials checked once
+    // per new connection (not a per-query hot path) — the cost is negligible next to what it closes.
     bool authenticate(const std::string& token, uint64_t& principal) const {
         if (token.empty()) return false;
-        auto it = tokens_.find(token);
-        if (it == tokens_.end()) return false;
-        principal = it->second;
-        return true;
+        bool found = false; uint64_t matched = 0;
+        for (const auto& [t, p] : tokens_) {
+            if (timing_safe_equal(token, t)) { found = true; matched = p; }
+        }
+        if (found) principal = matched;
+        return found;
     }
 private:
-    std::unordered_map<std::string, uint64_t> tokens_;
+    // Constant-time-in-content byte comparison: no branch or early return depends on *which* bytes
+    // matched, only the running XOR-OR of every byte. The length check short-circuits (standard practice
+    // for this primitive — matches Go's crypto/subtle.ConstantTimeCompare and Python's
+    // hmac.compare_digest — token length isn't the secret being protected, its content is).
+    static bool timing_safe_equal(const std::string& a, const std::string& b) {
+        if (a.size() != b.size()) return false;
+        uint8_t diff = 0;
+        for (size_t i = 0; i < a.size(); ++i) diff |= static_cast<uint8_t>(a[i]) ^ static_cast<uint8_t>(b[i]);
+        return diff == 0;
+    }
+    std::vector<std::pair<std::string, uint64_t>> tokens_;
 };
 
 namespace matrixsrv_detail {

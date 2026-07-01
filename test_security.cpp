@@ -85,9 +85,42 @@ static void test_authentication() {
     std::cout << "[authentication] ok\n";
 }
 
+// Correctness of the constant-time comparison in Authenticator::authenticate (SE-1 hardening): the
+// content-comparison logic changed (no early exit on the first mismatching byte, no hash-map lookup) to
+// close a timing side-channel, so pin down that it still gets ordinary cases right -- a same-length
+// guess that differs only in its last byte, a guess that's a proper prefix of a real token, and multiple
+// registered credentials where only one should ever match.
+static void test_authentication_constant_time_correctness() {
+    Authenticator auth;
+    auth.add_credential("s3cr3t-alice-0123", 1);
+    auth.add_credential("s3cr3t-bob-4567", 2);
+    uint64_t principal = 999;
+
+    assert(auth.authenticate("s3cr3t-alice-0123", principal) && principal == 1 && "exact match: alice");
+    principal = 999;
+    assert(auth.authenticate("s3cr3t-bob-4567", principal) && principal == 2 && "exact match: bob");
+
+    // same length as a real token, differs only in the final byte -- must still fail (the whole point of
+    // removing the early-exit: a naive "compare until first difference, but always scan the full length"
+    // rewrite could accidentally short-circuit correctness along with timing if done carelessly)
+    principal = 999;
+    assert(!auth.authenticate("s3cr3t-alice-0124", principal) && principal == 999 && "last-byte-only diff rejected");
+
+    // a proper prefix of a real token (shorter, so length differs) must fail, not partially match
+    principal = 999;
+    assert(!auth.authenticate("s3cr3t-alice", principal) && principal == 999 && "prefix of a real token rejected");
+
+    // a real token with one extra trailing byte (longer) must also fail
+    principal = 999;
+    assert(!auth.authenticate("s3cr3t-alice-0123X", principal) && principal == 999 && "real token + extra byte rejected");
+
+    std::cout << "[authentication constant-time correctness] ok\n";
+}
+
 int main() {
     test_access_control();
     test_authentication();
+    test_authentication_constant_time_correctness();
     std::cout << "ALL SECURITY TESTS PASSED\n";
     return 0;
 }
