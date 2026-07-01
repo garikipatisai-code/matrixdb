@@ -83,7 +83,8 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_gpu_grouped.cu",
            "test_gpu_typed.cu",
            "test_gpu_catalog.cu",
-           "test_gpu_catalog_grouped.cu"]
+           "test_gpu_catalog_grouped.cu",
+           "bench_gpu_roofline.cu"]
 
 def code(src):
     return {"cell_type": "code", "metadata": {}, "execution_count": None,
@@ -540,6 +541,13 @@ cells += [
        "round — a predicate-gated variant of the 4e-verified unfiltered kernel)."),
     code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
          "-DMATRIX_USE_CUDA test_gpu_catalog_grouped.cu -o test_gpu_catalog_grouped && ./test_gpu_catalog_grouped"),
+    md("## 4i. GPU roofline + fusion lever (needs T4 GPU)\n"
+       "Turns \"are we taking full advantage of the GPU?\" into numbers. `bench_gpu_roofline.cu` measures, on "
+       "this card: achieved DRAM bandwidth of a resident scan vs the card's **theoretical peak** (% of "
+       "roofline), the branch cost of a filtered scan, and the **kernel-fusion lever** — sum+count as two "
+       "kernels (2 column reads) vs one fused kernel (1 read). A scan near 100% of peak = optimal kernel; the "
+       "fusion speedup is the bandwidth MatrixDB leaves on the table by running separate filter/aggregate kernels."),
+    code("!nvcc -std=c++17 -O3 bench_gpu_roofline.cu -o roof && ./roof"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "
