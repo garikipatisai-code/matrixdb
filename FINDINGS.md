@@ -92,6 +92,33 @@ host-wall vs cudaEvent timing, and comparing a 16M-column integrated scan agains
 standalone number. **There was no gap to close.** Instrumenting before fixing saved a
 wasted optimization pass.
 
+### 3.7 The network+GPU spike: the in-process win survives a real TCP hop — PASS
+The one open question gating Leg 1 (package MatrixDB) / Leg 2 (Java/Spring Boot dependency):
+does §3.5's ~12–19× in-process GPU scan win survive a real TCP + serialization hop to a JVM
+client, or does that hop eat it alive? A standalone `spike/spike_server.cpp` (loopback TCP,
+length-prefixed frames, the real `CUDAGPUEngine`/`CPUMockEngine`) driven by a raw-socket
+`spike/SpikeClient.java`, measured on the same Colab T4 host for both engines:
+- GPU: scan round-trip median **0.64 ms** (fixed tax 88.8 µs, 13.9%) — matches the in-process
+  GPU baseline (§3.5, ~0.4–0.7 ms) almost exactly.
+- CPU: scan round-trip median **24.2 ms** (fixed tax 64.6 µs, 0.3%) — slower than the
+  in-process ~8 ms baseline, consistent with Colab's shared vCPU being noisier than the
+  original benchmarking host, not a network artifact (its own tax is negligible).
+- **Via-network GPU speedup: 37.9×** — clears the spec's ≳10× PASS bar with room to spare,
+  and even exceeds the in-process 12–25× range (because CPU degraded more than GPU crossing
+  hosts, not because the network helped).
+- GPU tax fraction (13.9%) nominally exceeds the spec's <10% guideline, but mechanically:
+  fixed ~89 µs measured against an already-sub-millisecond scan is naturally a larger
+  fraction. Per the spec's own "judgment call near the boundary" clause: this is the compute
+  getting fast enough that a fixed cost becomes visible, not the network dominating — the
+  37.9× win holds while including that tax.
+- **Verdict: PASS.** Proceed to Leg 1/Leg 2 per
+  `docs/superpowers/specs/2026-06-30-network-gpu-spike-design.md`.
+- Side-finding, not yet fixed: the Nagle + delayed-ACK stall the spike hit and fixed
+  (`TCP_NODELAY` on the accepted socket, once the response is split across two `send()`
+  calls) also exists, unfixed, in production `matrixdbd`'s `server_tcp.hpp`
+  (`matrix_serve_conn`, used by both `matrix_serve_tcp` and `matrix_serve_tcp_auth`) — worth
+  folding into Leg 1 hardening regardless.
+
 ---
 
 ## 4. Hypotheses we overturned (kept on purpose — the misses are the lessons)
