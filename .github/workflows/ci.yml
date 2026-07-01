@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (matrixdb + matrixdbd)
+        run: ./build_all.sh
+      - name: Test (full suite + oracle + CLI/daemon smoke checks)
+        run: ./run_tests.sh
+
+  test-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (matrixdb + matrixdbd)
+        run: ./build_all.sh
+      - name: Test (full suite + oracle + CLI/daemon smoke checks)
+        run: ./run_tests.sh
+
+  cuda-compile-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the CUDA toolkit (nvcc only — this runner has no GPU)
+        run: sudo apt-get update && sudo apt-get install -y nvidia-cuda-toolkit
+      - name: Compile the CUDA path (compile-only, no kernel execution)
+        run: |
+          nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread -DMATRIX_USE_CUDA \
+              main.cpp -o matrixdb_proto
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t matrixdb .
+      - name: Smoke-test the container (dev mode, no auth)
+        run: |
+          docker run --rm -d --name mdb -p 7070:7070 matrixdb
+          sleep 2
+          docker logs mdb 2>&1 | tee /tmp/mdb.log
+          grep -q "serving on port 7070 (no auth" /tmp/mdb.log
+          docker stop mdb
