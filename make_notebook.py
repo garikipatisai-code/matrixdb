@@ -462,7 +462,10 @@ cells += [
        "`matrixdbd.cpp` is the network daemon (GET/PUT/QUERY/HEALTH/STATS over length-prefixed TCP, token "
        "auth). It's HOST-ONLY to *run* (bind is blocked in the sandbox; the auth+serve path is socketpair-"
        "tested in test_server_tcp.cpp), so here we just confirm it compiles. See the networked-serving design doc."),
-    code("!clang++ -std=c++20 -O2 -c matrixdbd.cpp -o /tmp/mdbd.o 2>/dev/null "
+    code("!rm -f /tmp/mdbd.o; "
+         "clang++ -std=c++20 -O2 -c matrixdbd.cpp -o /tmp/mdbd.o 2>/dev/null "
+         "|| g++ -std=c++20 -O2 -c matrixdbd.cpp -o /tmp/mdbd.o 2>/dev/null; "
+         "test -f /tmp/mdbd.o "
          "&& echo 'matrixdbd: COMPILES (run on a real host: ./matrixdbd 7070 --token s3cret)' "
          "|| echo 'matrixdbd: COMPILE FAILED'"),
     code("!clang++ -std=c++20 -O2 matrixdb_cli.cpp -o /tmp/matrixdb 2>/dev/null "
