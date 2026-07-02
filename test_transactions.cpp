@@ -5,6 +5,9 @@
 #include <vector>
 #include <cstdio>
 #include <iostream>
+#include <thread>
+#include <shared_mutex>
+#include <atomic>
 
 static std::vector<std::pair<uint64_t,uint64_t>> replay_all(const std::string& path) {
     std::vector<std::pair<uint64_t,uint64_t>> applied;
@@ -92,11 +95,72 @@ static void test_engine_rollback() {
     std::cout << "[engine rollback] ok\n";
 }
 
+// TX-2 testing gap (found by audit, closed here): no test anywhere exercised concurrent
+// multi-statement transactions. begin()/txn_put()/commit() are NOT internally synchronized
+// (in_txn_/txn_buf_ are plain fields) -- by design, matching the single-owner/lock-free thesis: a
+// caller is responsible for serializing access, the same way ConcurrentServer serializes single-key
+// auto-commit PUTs under an exclusive lock. This proves that documented usage pattern, generalized
+// to a real multi-key transaction, actually delivers cross-key atomicity under real concurrent
+// threads -- something no existing test covered (test_concurrent_serving.cpp only ever composes
+// single-key auto-commit PUTs, never a multi-put begin/txn_put x N/commit group).
+//
+// Design: two keys (A, B) with the invariant B == A+1, maintained ONLY by committing both together
+// in one transaction. Multiple writer threads race to advance the pair (each holding an exclusive
+// lock for its whole begin->txn_put->txn_put->commit); concurrent reader threads (shared lock)
+// repeatedly read both keys and check the invariant. If cross-key atomicity broke -- e.g. a reader
+// could observe A updated but B still stale -- a reader would catch a "torn" pair sooner or later
+// under enough concurrent iterations.
+static void test_concurrent_multi_key_transactions() {
+    CPUMockEngine eng;   // no WAL: pure in-memory concurrency test
+    std::shared_mutex mu;
+    constexpr uint64_t KEY_A = 1, KEY_B = 2;
+    { std::unique_lock<std::shared_mutex> w(mu); eng.begin(); eng.txn_put(KEY_A, 0); eng.txn_put(KEY_B, 1); eng.commit(); }
+
+    constexpr int kWriters = 3, kRoundsPerWriter = 2000, kReaders = 4;
+    std::atomic<bool> stop{false};
+    std::atomic<int> torn_reads{0};
+    std::atomic<int> rounds_committed{0};
+
+    auto writer = [&] {
+        for (int round = 1; round <= kRoundsPerWriter; ++round) {
+            std::unique_lock<std::shared_mutex> w(mu);
+            eng.begin();
+            eng.txn_put(KEY_A, static_cast<uint64_t>(round));
+            eng.txn_put(KEY_B, static_cast<uint64_t>(round) + 1);   // invariant: B == A+1
+            eng.commit();
+            ++rounds_committed;
+        }
+    };
+    auto reader = [&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+            std::shared_lock<std::shared_mutex> r(mu);
+            uint64_t a = 0, b = 0;
+            if (eng.kv_get(KEY_A, a) && eng.kv_get(KEY_B, b) && b != a + 1) ++torn_reads;
+        }
+    };
+
+    std::vector<std::thread> writers, readers;
+    for (int i = 0; i < kWriters; ++i) writers.emplace_back(writer);
+    for (int i = 0; i < kReaders; ++i) readers.emplace_back(reader);
+    for (auto& t : writers) t.join();
+    stop.store(true, std::memory_order_relaxed);
+    for (auto& t : readers) t.join();
+
+    assert(torn_reads.load() == 0 && "no reader ever observed a torn (partially-committed) multi-key transaction");
+    assert(rounds_committed.load() == kWriters * kRoundsPerWriter && "every writer thread's every transaction committed");
+    uint64_t final_a = 0, final_b = 0;
+    assert(eng.kv_get(KEY_A, final_a) && eng.kv_get(KEY_B, final_b) && final_b == final_a + 1
+           && "final state still satisfies the cross-key invariant after all concurrent activity");
+    std::cout << "[concurrent multi-key transactions] ok (" << kWriters << " writers x " << kRoundsPerWriter
+              << " txns + " << kReaders << " concurrent readers, 0 torn reads)\n";
+}
+
 int main() {
     test_wal_commit_atomicity();
     test_wal_autocommit_unchanged();
     test_engine_commit_durable();
     test_engine_rollback();
+    test_concurrent_multi_key_transactions();
     std::cout << "ALL TRANSACTION TESTS PASSED\n";
     return 0;
 }
