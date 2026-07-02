@@ -10,6 +10,7 @@
 // sharing one ConcurrentServer instance so the mutex actually serializes across connections, not just
 // within one.
 #include "server.hpp"
+#include <mutex>
 #include <shared_mutex>
 
 class ConcurrentServer {
