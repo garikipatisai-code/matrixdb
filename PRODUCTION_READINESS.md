@@ -50,7 +50,7 @@ in the current env (CPU, no network) vs needs real infra.
 | ID | Gap | Why it matters | Sev | Effort | Local? |
 |----|-----|----------------|-----|--------|--------|
 | DM-1 | **Store is 4096 slots, `key & MASK` → silent overwrite on collision** **[FIXED — Inc 1: KVStore]** | Real keys collide → **silent data loss**. This is a correctness bug, not a size limit. | P0 | M | yes |
-| DM-1b | **GPU point-op kernel doesn't mirror KVStore's collision handling** — `matrix_page_kernel` still uses the pre-DM-1-fix flat array indexed by `key & MASK`, silently overwriting colliding keys; CPU keeps both. Also nondeterministic on a duplicate key *within one batch* (thread scheduling decides which write wins; CPU is deterministic, in-index order) | `compute.hpp`'s own header comment claims "the two backends produce byte-identical store contents" — false the moment two keys collide or a batch repeats a key. **Verified currently unreachable** — `main.cpp` hardcodes point-ops to the CPU engine unconditionally and no `test_gpu_*.cu` file calls `execute_batch`, so this is a real bug in dead code today, not an active data-loss risk; it becomes one the moment anything routes point-ops to GPU or tests this kernel directly | P2 | M | needs GPU |
+| DM-1b | **GPU point-op kernel doesn't mirror KVStore's collision handling** — `matrix_page_kernel` still uses the pre-DM-1-fix flat array indexed by `key & MASK`, silently overwriting colliding keys; CPU keeps both. Also nondeterministic on a duplicate key *within one batch* (thread scheduling decides which write wins; CPU is deterministic, in-index order) **[FIXED for the demonstrated case — DM-1b: MATRIX_STORE_SLOTS matches BATCH_MAX/KVStore's capacity; hardware-verified on a Colab T4]** | `compute.hpp`'s own header comment claims "the two backends produce byte-identical store contents" — false the moment two keys collide or a batch repeats a key. The demonstrated case (the standard sequential-key benchmark) is now collision-free by construction; a genuinely over-capacity key range (across separate batches) still collides, documented and hardware-confirmed as a real, unfixed residual | P2 | M | partial — fix verified on Colab; general-case GPU hash table not built |
 | DM-2 | No schema/catalog (tables, columns, types) | Can't model real data; everything is one fixed record shape | P0 | L | yes — DM-2 named columns + introspection, DM-2c named tables, DM-3 types |
 | DM-3 | Fixed 64-byte record / 32-byte payload; no variable-length or real types | No strings, no nullable, no real columns | P0 | L | partial — DM-3a-j: u32/int64/double + minimal strings + nullable (scalar all types + grouped) landed; full var-length/typed-null + catalog integration deferred |
 | DM-4 | No query language — opcodes only (`OP_READ/WRITE/SCAN`) | No way for a client to express a query; the "router" routes opcodes, there's no parser/planner | P0 | XL | partial — QRY-1 (`MatrixQuery`) + DM-4 (text parser, scalar) landed; full SQL/planner deferred |
@@ -197,19 +197,43 @@ that `store_checksum()`'s printed comment in `main.cpp` ("must match across CPU 
 was never actually true for the default 65536-key benchmark workload against a 4096-slot GPU store;
 it's only ever printed, never `assert()`-ed, unlike the scan-sum oracle right next to it.
 
-**Severity corrected from an initial P0 to P2 after verifying reachability**, not fixed further:
+**Severity corrected from an initial P0 to P2 after verifying reachability**:
 `main.cpp` hardcodes point-op dispatch to the CPU engine unconditionally (`point_op_engine =
 cpu_engine.get()`, unconditional, not gated on `MATRIX_USE_CUDA`), and grepping every `test_gpu_*.cu`
-file confirms none of them call `execute_batch` either — `matrix_page_kernel` is currently
-**unreachable from anything exercised anywhere in this repo**. So this is a real bug in dead code
-today, not an active data-loss risk (the initial P0 write-up overclaimed active risk without having
-checked reachability first) — it becomes P0-real the moment anything routes point-ops to GPU or
-tests this kernel directly. A precise warning is now at the kernel itself (`compute_cuda.cuh`,
-right above `matrix_page_kernel`) for whoever touches this next. Not fixed further: this sandbox has
-no `nvcc`/GPU to implement or verify a nontrivial concurrent-hash-table rewrite against, and shipping
-an unverified "fix" for code nothing exercises would trade a known, honestly-documented gap for an
-unverified one that looks more finished than it is — worse, not better. Fix + hardware-verify on a
-real Colab run when GPU point-ops are ever actually needed.*
+file confirmed none of them called `execute_batch` either — `matrix_page_kernel` was unreachable
+from anything exercised anywhere in this repo. So this was a real bug in dead code, not an active
+data-loss risk (the initial P0 write-up overclaimed active risk without having checked reachability
+first).
+
+**FIXED for the demonstrated case, hardware-verified (2026-07-01, same day — the user offered a real
+Colab GPU to close the verification loop this note originally said the sandbox couldn't provide):**
+`MATRIX_STORE_SLOTS` (the GPU store's capacity) was 4096 while `KVStore`'s own capacity was
+independently hardcoded to 65536 — two different capacities for what's supposed to be one point-op
+store, guaranteeing a collision for the standard benchmark workload (65536 unique keys into 4096
+slots). Fixed by matching `MATRIX_STORE_SLOTS` to `MATRIX_BATCH_MAX`/`KVStore`'s capacity (both now
+65536, and `KVStore`'s constructor reads the shared symbol instead of its own literal, so the two
+capacities can't silently drift apart again). `test_gpu_pointop_collision.cu` (wired into
+`make_notebook.py`/`matrixdb_colab.ipynb`) proved this on a real Tesla T4: Check 1 (a full-capacity
+unique-key batch) produced `store_checksum=2147450880`, an **exact** match to the analytically-known
+sum — zero collisions, confirmed on hardware, not just reasoned about. Check 2 (two batches with
+aliasing key ranges — a genuinely over-capacity key range spread across separate calls, since
+`execute_batch`'s own count clamp now equals the store's capacity, making a single-call overflow
+impossible) confirmed the documented residual limitation is real and deterministic
+(`store_checksum=6442418176`, exactly the second batch's values) — the fix isn't overclaimed as
+solving more than it does. A general-purpose GPU hash table for the residual case remains
+deliberately not built (this kernel's only reachable caller is now this dedicated test — see above).
+
+**A second, unrelated bug surfaced by that same Colab run**: `concurrent_server.hpp` and
+`test_transactions.cpp` (both from NW-2/TX-2's fixes earlier this session) used `std::unique_lock`
+with only `<shared_mutex>` included, not `<mutex>` — clang++/libc++ (this sandbox's only local
+toolchain) transitively compiles it anyway; g++/libstdc++ (Colab's toolchain, used there because
+clang++ wasn't found) does not, and failed hard on 4 tests plus `matrixdbd.cpp` itself. Fixed (added
+the direct include to both files, swept every other file touched this session for the same pattern —
+clean). This is the second instance of the exact "include what you use" mistake this session already
+fixed once in `server.hpp`; couldn't be reproduced locally (no real GNU g++ in this sandbox, only a
+clang++ alias), so it's verified by construction plus a clean local build, not by reproducing the
+failure — a real g++/libstdc++ re-run would close that loop, same as this whole DM-1b fix needed a
+real GPU to close its own.*
 
 *DM-3j FIXED (2026-07-01, critical): `null_masks_` (DM-3j's nullable-column mask) was pure in-RAM
 state — `save_catalog`/`load_catalog` never read or wrote it. Every `backup()`/`restore()` round-trip
