@@ -84,6 +84,7 @@ SOURCES = ["types.hpp", "ring_buffer.hpp", "compute.hpp",
            "test_gpu_typed.cu",
            "test_gpu_catalog.cu",
            "test_gpu_catalog_grouped.cu",
+           "test_gpu_pointop_collision.cu",
            "bench_gpu_roofline.cu"]
 
 def code(src):
@@ -548,6 +549,21 @@ cells += [
        "kernels (2 column reads) vs one fused kernel (1 read). A scan near 100% of peak = optimal kernel; the "
        "fusion speedup is the bandwidth MatrixDB leaves on the table by running separate filter/aggregate kernels."),
     code("!nvcc -std=c++17 -O3 bench_gpu_roofline.cu -o roof && ./roof"),
+    md("## 4j. Point-op collision fix proof (DM-1b, needs T4 GPU)\n"
+       "\n"
+       "The point-op store's GPU kernel (`matrix_page_kernel`) used to guarantee a collision for the "
+       "standard benchmark workload: `MATRIX_STORE_SLOTS` (4096) was smaller than the workload's key "
+       "range (`BATCH_MAX`=65536), while the CPU `KVStore` was independently sized to 65536 — two "
+       "different capacities for what's supposed to be one point-op store. Fixed by matching "
+       "`MATRIX_STORE_SLOTS` to `BATCH_MAX`/`KVStore`'s capacity (see `types.hpp`'s own note and "
+       "`PRODUCTION_READINESS.md`'s DM-1b entry). Check 1 here is the hardware proof the fix closes "
+       "the gap for the actual, demonstrated case: a full-capacity unique-key batch must now be "
+       "collision-free (exact store-checksum match, not just no-crash). Check 2 confirms the "
+       "documented residual limitation (a true over-capacity key range, across two aliasing batches) "
+       "still collides deterministically — so the fix isn't overclaimed as solving more than it does."),
+    code("!nvcc -std=c++17 -O3 -x cu -D_GNU_SOURCE -Xcompiler -pthread "
+         "-DMATRIX_USE_CUDA test_gpu_pointop_collision.cu -o test_gpu_pointop_collision "
+         "&& ./test_gpu_pointop_collision"),
     md("## 3b. Cost-model unit test (CPU, no GPU)\n"
        "\n"
        "Pure-function check of the router's placement decisions — point ops -> HOST, "

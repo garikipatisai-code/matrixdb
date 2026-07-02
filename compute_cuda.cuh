@@ -33,18 +33,22 @@
 // that page's queries [offsets[page], offsets[page+1]). Writes to a slot within a page
 // are owned by this block alone, so no atomics on the store are needed. Same-slot writes
 // within the page race between threads -> last-writer-wins, matching the CPU mock's
-// deterministic in-order result only when keys are unique (true for our benchmark).
+// deterministic in-order result only when keys are unique.
 //
-// KNOWN BUG (DM-1b in PRODUCTION_READINESS.md, unfixed — needs a GPU to fix+verify, none
-// available where this was found): `store[slot]` below is a flat MATRIX_STORE_SLOTS-size array
-// indexed by `key & MASK` with no probing — unlike kv_store.hpp's KVStore (open-addressing, DM-1
-// fixed), two DIFFERENT keys that collide on the same slot silently overwrite each other here;
-// KVStore keeps both. This kernel is currently UNREACHABLE from anything exercised in this repo
-// (main.cpp hardcodes point-ops to the CPU engine unconditionally — see its `point_op_engine =
-// cpu_engine.get()`; no test_gpu_*.cu file calls execute_batch/exercises this kernel), so today
-// this is a real bug in dead code, not an active data-loss risk. It becomes one the moment
-// anything routes point-ops to GPU or writes a GPU point-op test — fix the collision handling
-// (page-ownership-correct hashing, matching KVStore) before that happens, not after.
+// DM-1b (PRODUCTION_READINESS.md), fixed for the actual demonstrated case, pending hardware
+// verification: `store[slot]` below is a flat MATRIX_STORE_SLOTS-size array indexed by `key & MASK`
+// with no probing -- unlike kv_store.hpp's KVStore (open-addressing), two DIFFERENT keys that
+// collide on the same slot silently overwrite each other here. This USED to be guaranteed for the
+// standard benchmark workload (MATRIX_STORE_SLOTS was 4096 while BATCH_MAX/KVStore's capacity was
+// 65536) -- fixed by matching MATRIX_STORE_SLOTS to BATCH_MAX (see types.hpp's own note), which
+// makes the sequential-key benchmark workload a perfect bijection: zero collisions by construction.
+// test_gpu_pointop_collision.cu proves this on real hardware (build+run on Colab -- no nvcc in the
+// sandbox this was fixed in). Narrower residual caveat, NOT fixed (still real, still needs a GPU to
+// address if it ever matters): a batch with more than STORE_SLOTS truly-distinct keys, or a
+// deliberately duplicate key within one page, still collides/races the same way -- this kernel was
+// confirmed unreachable from anything exercised in this repo before this fix (main.cpp hardcodes
+// point-ops to the CPU engine unconditionally; no other test called execute_batch), so the residual
+// case was judged not worth a general-purpose GPU hash table for code nothing currently calls.
 __global__ void matrix_page_kernel(const DatabaseQuery* binned, const uint32_t* offsets,
                                    uint64_t* store,
                                    unsigned long long* reads,

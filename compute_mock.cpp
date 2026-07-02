@@ -1944,7 +1944,10 @@ private:
     // Point-op store: a real hash table (gap DM-1). Distinct keys never overwrite; a full
     // table is an explicit error, not silent loss. Sized with headroom over the demo's
     // distinct write-keys; real capacity / SSD-spill is gap DM-9 / Inc 3 (the seam).
-    KVStore kv_{1u << 16}; // 65536 slots
+    // MATRIX_STORE_SLOTS (not a bare literal): DM-1b fixed a real bug where this and the GPU
+    // engine's own point-op store capacity had silently drifted to two different values — sharing
+    // one symbol makes that impossible to repeat.
+    KVStore kv_{MATRIX_STORE_SLOTS}; // 65536 slots
     // Ordered secondary index (DM-7): key -> value, mirrors kv_ (maintained on commit, rebuilt on recovery).
     // Enables log-time range scans (kv_range_sorted) vs kv_range's O(n) full scan.
     // ponytail: a std::map mirror — doubles point-op key memory + a map insert per commit; a packed

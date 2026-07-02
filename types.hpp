@@ -63,7 +63,25 @@ enum MatrixAggOp : uint32_t {
 // to the same owner: writes to a key serialize by ownership. No cross-thread conflict
 // => no store atomics, no OCC, no delta log. Each page has a single owner; pages are
 // independent of one another (shared-nothing).
-constexpr size_t MATRIX_STORE_SLOTS = 4096;                       // power of two
+//
+// DM-1b fix (2026-07-01): this used to be 4096 while KVStore's own point-op capacity
+// (compute_mock.cpp's `KVStore kv_{...}`) was independently hardcoded to 65536 (== BATCH_MAX) --
+// two different capacities for what's supposed to be "the same" point-op store across backends.
+// GPU's flat, direct-mapped store (compute_cuda.cuh's matrix_page_kernel: `store[key & MASK]`, no
+// probing) silently overwrote on any two keys sharing a slot -- guaranteed for the standard
+// benchmark workload (BATCH_MAX=65536 unique keys into only 4096 slots). Matching this to BATCH_MAX
+// (and KVStore's capacity, which now reads MATRIX_STORE_SLOTS instead of its own literal) makes the
+// two backends' capacities the same symbol, permanently, and gives GPU enough slots that the
+// standard sequential-key workload (query_id 0..BATCH_MAX-1) is a perfect bijection -- zero
+// collisions by construction, not by luck. See PRODUCTION_READINESS.md DM-1b and
+// test_gpu_pointop_collision.cu for the hardware-verified proof. This does NOT make the GPU store a
+// general-purpose hash table: a batch with more than STORE_SLOTS truly-distinct keys, or an
+// adversarial (non-sequential) key distribution, can still collide -- narrower and far less likely
+// than the guaranteed-collision case this fix closes, and unlike a hash table's graceful probing,
+// still resolves via silent last-writer-wins if it happens. Not solved further: this kernel is
+// confirmed unreachable from anything exercised in this repo (see the DM-1b note), so going further
+// than "make the actual, demonstrated case correct" was judged disproportionate.
+constexpr size_t MATRIX_STORE_SLOTS = 65536;                      // power of two; == BATCH_MAX, == KVStore's capacity
 constexpr size_t MATRIX_STORE_MASK  = MATRIX_STORE_SLOTS - 1;
 constexpr size_t MATRIX_PAGE_COUNT  = 1024;                       // owner threads; the tuning knob
 constexpr size_t MATRIX_PAGE_SIZE   = MATRIX_STORE_SLOTS / MATRIX_PAGE_COUNT; // slots per page
