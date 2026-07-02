@@ -87,6 +87,80 @@ int main() {
         std::remove(PATH);
     }
 
+    // --- Task 3a: transactional puts buffer until a commit marker, then all replay together ---
+    // (test_transactions.cpp proves this at the CPUMockEngine level; this is the ColdStore-level
+    // unit test of the exact mechanism it relies on, which had no dedicated coverage before this.)
+    {
+        std::remove(PATH);
+        {
+            ColdStore w(PATH);
+            w.append_txn_put(100, 1000);
+            w.append_txn_put(200, 2000);
+            w.append_commit();
+        }
+        ColdStore r(PATH);
+        std::vector<std::pair<uint64_t,uint64_t>> got;
+        r.replay([&](uint64_t k, uint64_t v){ got.push_back({k, v}); });
+        assert(got.size() == 2 && "both txn-puts replay once their commit marker is present");
+        assert(got[0] == std::make_pair(100ull, 1000ull) && got[1] == std::make_pair(200ull, 2000ull)
+               && "txn-puts replay in append order");
+        std::remove(PATH);
+    }
+
+    // --- Task 3b: transactional puts with NO commit marker (crash before commit) discard on EOF ---
+    {
+        std::remove(PATH);
+        {
+            ColdStore w(PATH);
+            w.append_txn_put(300, 3000);
+            w.append_txn_put(400, 4000);
+            // no append_commit() -- simulates a crash mid-transaction
+        }
+        ColdStore r(PATH);
+        int n = 0;
+        r.replay([&](uint64_t, uint64_t){ ++n; });
+        assert(n == 0 && "uncommitted txn-puts are discarded on EOF, not applied");
+        std::remove(PATH);
+    }
+
+    // --- Task 3c: an uncommitted txn group does NOT poison auto-commit writes around it ---
+    // (an OP_WRITE before or after an incomplete txn group must still replay -- the buffering is
+    // scoped to txn-puts only, not a blanket "stop on anything unusual").
+    {
+        std::remove(PATH);
+        {
+            ColdStore w(PATH);
+            w.append_put(1, 11);              // auto-commit, before the txn group
+            w.append_txn_put(500, 5000);       // buffered...
+            w.append_txn_put(600, 6000);       // ...never committed (crash)
+        }
+        ColdStore r(PATH);
+        std::vector<std::pair<uint64_t,uint64_t>> got;
+        r.replay([&](uint64_t k, uint64_t v){ got.push_back({k, v}); });
+        assert(got.size() == 1 && got[0] == std::make_pair(1ull, 11ull)
+               && "auto-commit write before the dangling txn group still replays; the txn group doesn't");
+        std::remove(PATH);
+    }
+
+    // --- Task 3d: two SEQUENTIAL committed txn groups both replay, and independently -- proves the
+    // buffer is actually cleared after each commit (not accumulating across groups, and not letting
+    // a later group's content leak into an earlier one's replay). ---
+    {
+        std::remove(PATH);
+        {
+            ColdStore w(PATH);
+            w.append_txn_put(1, 10); w.append_txn_put(2, 20); w.append_commit();   // group 1
+            w.append_txn_put(3, 30); w.append_commit();                            // group 2
+        }
+        ColdStore r(PATH);
+        std::vector<std::pair<uint64_t,uint64_t>> got;
+        r.replay([&](uint64_t k, uint64_t v){ got.push_back({k, v}); });
+        assert(got.size() == 3 && "both committed groups replay in full");
+        assert(got[0] == std::make_pair(1ull, 10ull) && got[1] == std::make_pair(2ull, 20ull)
+               && got[2] == std::make_pair(3ull, 30ull) && "order preserved across group boundaries");
+        std::remove(PATH);
+    }
+
     std::printf("PASS: cold store WAL correct\n");
     return 0;
 }
