@@ -50,7 +50,7 @@ in the current env (CPU, no network) vs needs real infra.
 | ID | Gap | Why it matters | Sev | Effort | Local? |
 |----|-----|----------------|-----|--------|--------|
 | DM-1 | **Store is 4096 slots, `key & MASK` → silent overwrite on collision** **[FIXED — Inc 1: KVStore]** | Real keys collide → **silent data loss**. This is a correctness bug, not a size limit. | P0 | M | yes |
-| DM-1b | **GPU point-op kernel doesn't mirror KVStore's collision handling** — `matrix_page_kernel` still uses the pre-DM-1-fix flat array indexed by `key & MASK`, silently overwriting colliding keys; CPU keeps both. Also nondeterministic on a duplicate key *within one batch* (thread scheduling decides which write wins; CPU is deterministic, in-index order) | `compute.hpp`'s own header comment claims "the two backends produce byte-identical store contents" — that invariant is false the moment two keys collide or a batch repeats a key. No test catches this (compute_cuda.cuh has zero automated execution in CI — QA-6 — so this has had zero regression protection since it was written) | P0 | M | needs GPU |
+| DM-1b | **GPU point-op kernel doesn't mirror KVStore's collision handling** — `matrix_page_kernel` still uses the pre-DM-1-fix flat array indexed by `key & MASK`, silently overwriting colliding keys; CPU keeps both. Also nondeterministic on a duplicate key *within one batch* (thread scheduling decides which write wins; CPU is deterministic, in-index order) | `compute.hpp`'s own header comment claims "the two backends produce byte-identical store contents" — false the moment two keys collide or a batch repeats a key. **Verified currently unreachable** — `main.cpp` hardcodes point-ops to the CPU engine unconditionally and no `test_gpu_*.cu` file calls `execute_batch`, so this is a real bug in dead code today, not an active data-loss risk; it becomes one the moment anything routes point-ops to GPU or tests this kernel directly | P2 | M | needs GPU |
 | DM-2 | No schema/catalog (tables, columns, types) | Can't model real data; everything is one fixed record shape | P0 | L | yes — DM-2 named columns + introspection, DM-2c named tables, DM-3 types |
 | DM-3 | Fixed 64-byte record / 32-byte payload; no variable-length or real types | No strings, no nullable, no real columns | P0 | L | partial — DM-3a-j: u32/int64/double + minimal strings + nullable (scalar all types + grouped) landed; full var-length/typed-null + catalog integration deferred |
 | DM-4 | No query language — opcodes only (`OP_READ/WRITE/SCAN`) | No way for a client to express a query; the "router" routes opcodes, there's no parser/planner | P0 | XL | partial — QRY-1 (`MatrixQuery`) + DM-4 (text parser, scalar) landed; full SQL/planner deferred |
@@ -183,23 +183,33 @@ in the current env (CPU, no network) vs needs real infra.
 
 **GPU batch (verify-on-Colab; each carries the cross-backend invariant GPU==`matrix_cpu_*` as its correctness anchor):** **GPU-1 (AGG-2) LANDED + HARDWARE-VERIFIED** — `matrix_{sum,min,max}_kernel_u32` (atomicAdd/atomicMin/atomicMax, grid-stride block-local one-atomic-per-block) + `execute_scan` dispatch on the agg op (COUNT keeps the byte-identical u32x4 path → oracle safe). `test_gpu_agg.cu` ran GREEN on a Colab T4: GPU COUNT/SUM/MIN/MAX == `matrix_cpu_reduce` exactly over the same bytes, incl. a >2^32 SUM (549755289600) and the empty sentinels (MIN UINT64_MAX, SUM/MAX 0). **That run also exposed + fixed a latent regression:** the pipeline cells build at `-std=c++17` but the engine had grown a `std::bit_cast` (C++20) dependency — replaced with a memcpy-based `matrix_bit_cast` so `nvcc`/`g++ -std=c++17` compile `main.cpp` again (run_tests.sh builds at c++20, which masked it). **GPU-4 (predicates) + GPU-2 (grouped) LANDED + HARDWARE-VERIFIED** (additive — the GPU-1 kernels untouched): `matrix_pred_match_dev` + `matrix_{count,sum,min,max}_kernel_pred_u32` (GPU WHERE over GE/LT/LE/EQ/NE/BETWEEN) and `matrix_group_{count,sum,min,max}_kernel` (one atomic per row into a dense group slot, out-of-range keys ignored). On the T4: `test_gpu_pred.cu` GREEN (every op × {COUNT,SUM,MIN,MAX} + empty-match == `matrix_cpu_reduce_pred`) and `test_gpu_grouped.cu` GREEN (== `matrix_cpu_group_reduce`). **GPU-5 (typed int64+double) LANDED + HARDWARE-VERIFIED** (additive): `matrix_{count,sum,min,max}_kernel_pred_{i64,f64}` — int64 via native signed atomics + a two's-complement `atomicAdd` reinterpret for SUM; `double` MIN/MAX via a CAS loop on the bit pattern (no native double atomicMin/Max), SUM via a CAS-fallback `atomicAdd(double*)` scoped to the device pass when `nvcc` defaults below `sm_60`. `test_gpu_typed.cu` GREEN on the T4: GPU == `matrix_cpu_reduce_pred_i64`/`_f64` over the same bytes for every op incl. negatives, >2^32, fractions, half-integer exact SUM, and inf/INT64 sentinels. The same full run booted the live `CUDAGPUEngine` on the T4 (64 MB column auto-routed → DEVICE), resident filter-scan **112.7 GB/s vs 4.47 GB/s CPU (~25×)**, oracle 83886070 intact. **GPU-3 (DEVICE/VRAM *catalog* promotion) LANDED + HARDWARE-VERIFIED** — `matrix_gpu_reduce_dev_{u32,i64,f64}` (thin wrappers over the verified pred kernels) + a real device budget/`pin_device` in `CPUMockEngine` (all behind `#if MATRIX_USE_CUDA`); `scan_tiered_column*` reduces a DEVICE-resident column in VRAM instead of borrowing it down. `test_gpu_catalog.cu` (cell 4g) GREEN on the T4: `execute_query` over a VRAM-pinned column == `matrix_cpu_reduce_*` for u32/i64/f64 × {COUNT,SUM,MIN,MAX} × {filtered,unfiltered}. cell 4 live engine: hot analytical cols auto-promote to VRAM (`col1=DEVICE col2=DEVICE col3=HOST`, migrations=2, cold_borrows=0), all sums correct, oracle 83886070. **GPU PHASE COMPLETE** — GPU-1/2/3/4/5 all merged + hardware-verified; point-ops on CPU (thesis), the full scalar analytical surface runs in VRAM end-to-end. Deferred (YAGNI): grouped-on-device — **now also LANDED + HARDWARE-VERIFIED**: `test_gpu_catalog_grouped.cu` (cell 4h) GREEN on the T4 — GPU `GROUP BY` over DEVICE-resident key+value == `matrix_cpu_group_reduce[_i64/_f64](_pred)` for u32/i64/f64 × {COUNT,SUM,MIN,MAX} × {filtered,unfiltered} (24 per-group cross-checks; predicate-gated grouped kernels reusing the GPU-5 atomics). **The GPU analytical surface is complete in VRAM: scalar + grouped, all value types, filtered + unfiltered, every result cross-checked against the CPU oracle.** **→ Turnkey plan with exact kernels: `docs/superpowers/plans/2026-06-26-gpu-batch-colab-ready.md`.**
 
-*DM-1b OPEN (2026-07-01, found by an adversarial audit, not fixed — needs a GPU to fix and verify):
+*DM-1b OPEN, severity corrected after verification (2026-07-01, found by an adversarial audit):
 `compute_cuda.cuh`'s point-op kernel (`matrix_page_kernel`) never received DM-1's collision fix.
 `kv_store.hpp`'s own header comment documents the CPU fix in detail ("SILENTLY OVERWROTE colliding
 keys... fixed"); the GPU kernel still writes `store[q.query_id & MATRIX_STORE_MASK] = q.query_id`,
 the exact pre-fix behavior, so two colliding keys on GPU silently lose one. Separately, the same
 kernel has no ordering guarantee among the `blockDim.x` threads striding one page — a batch with a
 duplicate key resolves last-writer-wins *nondeterministically* on GPU (whichever thread's write
-lands last that run) vs. deterministically in-order on CPU. Both bugs share one root cause (the GPU
-point-op path was never updated to the KVStore/page-ownership semantics DM-1 established for CPU)
-and one likely fix (route GPU point-ops through page-ownership-correct hashing, or reject/serialize
-duplicate/colliding keys before dispatch). Compounding factor: `compute_cuda.cuh` has zero automated
-execution in CI (QA-6 is still open past BP-4's compile-check-only upgrade), so this has had no
-regression protection since it was written — any future edit to the shared reducers could desync
-GPU further from CPU with nothing to catch it. This directly falsifies `compute.hpp`'s own header
-comment ("the two backends produce byte-identical store contents") for any workload with more than
-`MATRIX_STORE_SLOTS` (4096) distinct keys or a repeated key in one batch. Not fixed in this pass —
-no GPU available in this sandbox to implement or verify a fix.*
+lands last that run) vs. deterministically in-order on CPU. This directly falsifies `compute.hpp`'s
+own header comment ("the two backends produce byte-identical store contents") for any workload with
+more than `MATRIX_STORE_SLOTS` (4096) distinct keys or a repeated key in one batch — and confirms
+that `store_checksum()`'s printed comment in `main.cpp` ("must match across CPU and GPU backends")
+was never actually true for the default 65536-key benchmark workload against a 4096-slot GPU store;
+it's only ever printed, never `assert()`-ed, unlike the scan-sum oracle right next to it.
+
+**Severity corrected from an initial P0 to P2 after verifying reachability**, not fixed further:
+`main.cpp` hardcodes point-op dispatch to the CPU engine unconditionally (`point_op_engine =
+cpu_engine.get()`, unconditional, not gated on `MATRIX_USE_CUDA`), and grepping every `test_gpu_*.cu`
+file confirms none of them call `execute_batch` either — `matrix_page_kernel` is currently
+**unreachable from anything exercised anywhere in this repo**. So this is a real bug in dead code
+today, not an active data-loss risk (the initial P0 write-up overclaimed active risk without having
+checked reachability first) — it becomes P0-real the moment anything routes point-ops to GPU or
+tests this kernel directly. A precise warning is now at the kernel itself (`compute_cuda.cuh`,
+right above `matrix_page_kernel`) for whoever touches this next. Not fixed further: this sandbox has
+no `nvcc`/GPU to implement or verify a nontrivial concurrent-hash-table rewrite against, and shipping
+an unverified "fix" for code nothing exercises would trade a known, honestly-documented gap for an
+unverified one that looks more finished than it is — worse, not better. Fix + hardware-verify on a
+real Colab run when GPU point-ops are ever actually needed.*
 
 *DM-3j FIXED (2026-07-01, critical): `null_masks_` (DM-3j's nullable-column mask) was pure in-RAM
 state — `save_catalog`/`load_catalog` never read or wrote it. Every `backup()`/`restore()` round-trip
@@ -223,13 +233,23 @@ new test fail before re-applying it. 67-test suite + oracle green.*
 
 *TX-1 landed (atomic transactions, CPU — fully local, no infra): `CPUMockEngine::begin/txn_put/commit/rollback` over a WAL-backed group commit. A transaction buffers writes; `commit()` durably appends them as one group (`append_txn_put × N` + a CRC'd commit marker, fsync) then applies; `rollback()` discards (writes nothing). **Crash-atomic:** a transaction is all-or-nothing across a crash — replay buffers `OP_TXN_WRITE` records and applies them only on a commit marker, discarding an uncommitted (trailing) group. Additive to the WAL: the `OP_WRITE` auto-commit path is byte-identical, so `test_cold_store`/`test_engine_restart` pass unchanged (a reviewer proved crash-atomicity with a 6-case adversarial harness; the OP_WRITE refactor is byte-for-byte behavior-preserving). Delivers ACID **A**(tomicity) on top of the existing **D**(urability). 16-test suite + oracle green. See spec/plan 2026-06-26-transactions. **Remaining TX (all local): TX-2 isolation/MVCC, TX-4 reader-visibility/snapshot semantics — bigger, deferred.***
 
-*TX-2 testing gap OPEN (2026-07-01, found by audit): no test anywhere in the suite runs two threads
-concurrently calling `begin()`/`txn_put()`/`commit()` against the same engine — what a reader sees
-mid-commit is never exercised. `test_transactions.cpp` genuinely proves atomicity and durability
-(destroy/reconstruct-engine WAL-replay), and `test_concurrent_serving.cpp`/the new
+*TX-2 testing gap CLOSED (2026-07-01, found and fixed same session): no test anywhere in the suite
+ran two threads concurrently calling `begin()`/`txn_put()`/`commit()` against the same engine — what
+a reader sees mid-commit was never exercised. `test_transactions.cpp` genuinely proves atomicity and
+durability (destroy/reconstruct-engine WAL-replay), and `test_concurrent_serving.cpp`/the new
 `test_server_tcp.cpp` concurrency test cover concurrent single-op reads/writes — but multi-statement
-transaction interleaving under real concurrency has zero coverage. Not fixed here (TX-2/MVCC itself
-is the bigger, already-tracked, deferred item this gap sits under).*
+transaction interleaving under real concurrency had zero coverage. Fixed:
+`test_concurrent_multi_key_transactions` (test_transactions.cpp) — `begin()`/`txn_put()`/`commit()`
+are not internally synchronized by design (matching the single-owner thesis: a caller serializes
+access, the same way `ConcurrentServer` does for single-key PUT under an exclusive lock), so this
+proves that documented pattern, generalized to a real multi-key transaction, delivers actual
+cross-key atomicity under real concurrent threads: two keys with an enforced `B == A+1` invariant,
+3 writer threads racing to advance the pair under an external `shared_mutex`, 4 reader threads
+concurrently checking the invariant never tears. Confirmed non-vacuous: removed the locking and the
+misuse was caught immediately and reliably (the engine's own internal "transaction already open"
+assertion fired before a reader even had to catch a torn value), then restored. Clean under
+ASan+UBSan and TSan. **TX-2/MVCC itself remains the bigger, already-tracked, deferred item** — this
+closes the testing gap under it, not TX-2 itself.*
 
 ## 4. Networking, API & multi-client
 
@@ -403,16 +423,19 @@ mutate size or the output param), wraparound correctness across ~500 multiples o
 accounting, and a genuine two-thread producer/consumer stress test (2M items) — the only way to
 exercise the cross-thread memory-ordering contract. Confirmed non-vacuous (injected an off-by-one
 into the full-check boundary, watched the test catch it, reverted). Clean under ASan+UBSan and TSan.
-**Two gaps this same pass found and did NOT fix, still open:** (1) no test anywhere exercises
-`cold_store.hpp`'s transactional buffering path (`append_txn_put`/`append_commit`) in isolation —
-`test_cold_store.cpp` does real byte-level WAL corruption injection but never independently verifies
-"buffer writes until a commit marker, discard uncommitted ones on EOF," the exact mechanism
-`test_transactions.cpp` relies on for atomicity; if that buffering broke, nothing in the file
-specifically responsible for WAL correctness would catch it. (2) `test_catalog_snapshot.cpp` is
-100% single-threaded despite `save_catalog` (no locking, no documented single-writer contract)
-being exactly the kind of whole-catalog operation that needs a concurrent-modification test — low
-risk today (nothing currently calls it from a background thread) but untested if that ever changes.
-67-test suite + oracle green.*
+**Of the two gaps this same pass found, one is now CLOSED, one remains open:** (1) **CLOSED** —
+`test_cold_store.cpp` gained direct unit coverage of `cold_store.hpp`'s transactional buffering path
+(`append_txn_put`/`append_commit`) in isolation: committed txn-puts replay together; uncommitted
+ones (no commit marker — a simulated crash) are discarded, not applied; an uncommitted txn group
+doesn't poison an unrelated auto-commit write around it; two sequential committed groups both
+replay correctly (proves the buffer is actually cleared after each commit). Confirmed non-vacuous
+(made `OP_TXN_WRITE` apply immediately instead of buffering, watched the "discarded on EOF"
+assertion fail, reverted). (2) **Still open** — `test_catalog_snapshot.cpp` remains 100%
+single-threaded despite `save_catalog` (no locking, no documented single-writer contract) being
+exactly the kind of whole-catalog operation that needs a concurrent-modification test; low risk
+today (nothing currently calls it from a background thread) but untested if that ever changes — not
+fixed this pass, lower priority than the other items given the confirmed absence of any current
+concurrent caller. 67-test suite + oracle green.*
 
 *QA-5 failure-injection landed (engine-level corrupt-WAL recovery): test_fault_injection.cpp injects WAL corruption and proves a fresh `CPUMockEngine` degrades gracefully — (1) a **torn tail** (a partial record appended, simulating a crash mid-write) → all committed writes before it recover and the engine stays usable; (2) an **early flipped payload byte** → the CRC catches it, replay stops at that record (recovering nothing past it), no crash, and the engine is fully usable afterward (new writes commit). This is the integration-level complement to test_cold_store's ColdStore-unit corruption tests — it verifies the database SURVIVES a corrupt log, the load-bearing durability guarantee. Clean under ASan+UBSan (the replay buffer handles adversarial length fields via the `≤ MATRIX_WAL_MAX_RECORD` guard). 58-test suite + oracle green. Remaining QA-5: fault injection on the catalog-snapshot / column-file readers (they already `abort()` fail-loud on our own corrupt format — a graceful-vs-abort policy call), randomized chaos scheduling.*
 
@@ -471,14 +494,21 @@ move up-market to the datacenter tier.*
 | KD-5 | Hyper-Q multi-stream, `cudaHostRegister` pinned DMA | P2 | M | needs GPU |
 | KD-6 | `compute_mock.cpp` (1990 lines, the biggest file by ~4×) does at least 5 separable jobs in one class: engine lifecycle/WAL/txns, catalog management, a hand-rolled SQL tokenizer+parser (several hundred lines, zero dependency on tiering internals beyond column accessors), query execution/reduction dispatch, and joins/projection. None of these are the CPU/GPU hardware-abstraction duplication that's inherent to this project's design (that split is load-bearing, not a smell) — they're independent responsibilities that landed on one file because each was one more increment. A reasonable split: `query_parser.hpp` (the tokenizer/parser — currently untestable in isolation since it's a private method suite on `CPUMockEngine`, forcing every parser test to stand up a full engine) and `relational_ops.hpp` (joins/gather/project), leaving lifecycle+catalog+execution at roughly half the current size. Found by an audit (2026-07-01); not refactored — the file works, and a mechanical split of a 1990-line file was a bigger risk than this pass's budget justified. | P2 | M | yes |
 
-*2026-07-01 audit note: KD-6, DM-1b, the TX-2/QA-2 testing gaps above, and the still-open QA-6 (GPU
-kernel execution in CI) are the honest residue of a full adversarial review of this codebase. Every
-Critical/High-severity finding that was actionable without a GPU was fixed the same day (DM-3j NULL
-persistence, NW-3 wire-protocol field-dropping, SE-1 timing side-channel, NW-2 daemon wiring +
-AccessPolicy dangling reference, QA-2 ring-buffer coverage, QA-3 CI sanitizer wiring — see each
-gap's own note above for detail). What's listed here is what remains: things that need a GPU to fix
-(DM-1b, QA-6), or that are real but lower-urgency structural/coverage debt (KD-6, TX-2/QA-2 testing
-gaps) rather than live correctness/security bugs.*
+*2026-07-01 audit note, updated same day after a follow-up pass closed what could safely be closed:
+of the items found by the full adversarial review, every Critical/High-severity finding that was
+actionable without a GPU was fixed (DM-3j NULL persistence, NW-3 wire-protocol field-dropping, SE-1
+timing side-channel, NW-2 daemon wiring + AccessPolicy dangling reference, QA-2 ring-buffer
+coverage, QA-3 CI sanitizer wiring), and a follow-up pass closed both remaining CPU-only testing
+gaps that were safely closeable (TX-2's concurrent-multi-key-transaction test, QA-2's cold_store
+transactional-buffering test) plus corrected DM-1b's severity after verifying it's currently
+unreachable rather than an active risk. **What's left is now genuinely irreducible from this
+sandbox:** DM-1b (needs a GPU to fix + verify a nontrivial concurrent kernel rewrite — attempting
+it blind was explicitly declined, see DM-1b's own note for why) and QA-6 (needs an actual GPU CI
+runner, an infrastructure/billing decision, not a code change). KD-6 (the `compute_mock.cpp` split)
+and the `test_catalog_snapshot.cpp` concurrency gap remain open by choice, not by constraint — both
+are safely CPU-only work, deliberately not attempted ad hoc in this pass because they're structural
+changes with real design decisions (see KD-6's own entry), better served by this project's normal
+brainstorm → spec → plan cycle than an improvised edit to a 1990-line file.*
 
 ---
 
